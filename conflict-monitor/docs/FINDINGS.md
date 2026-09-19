@@ -7,7 +7,7 @@ than deleting it.
 | | |
 |---|---|
 | Branch | `v3-rebuild` |
-| HEAD at last update | `4e59ede` |
+| Covers work through | `74f09f0` |
 | Last updated | 2026-09-19 |
 
 ---
@@ -667,7 +667,7 @@ document that silently edits away its own mistakes would fail its own standard.
 | "No distinguishable `parse_failed` path exists" — written in commit `9fd3fbf`'s own message | It does exist. That same commit split the catch-all into `rate_limited` / `parse_failed` / `api_NNN` / `llm_failed`. The commit message is stale about its own diff | The audit read `classifier.py:303-319` instead of trusting the note |
 | Four severity-5 defaults | **Six**, plus a seventh probe — and `clamp_severity` is dead code: `Field(ge=1, le=10)` raises before the validator runs, so 11 becomes a parse failure instead of clamping to 10 | Grepping for the literal rather than recalling the list |
 | `frontend/dist` is committed | It is untracked; the amend that removed it worked | `git ls-files` |
-| The interference fix re-centred the AO | It re-centred the **primary** path only. `opensky.py:160` still requests the old `lamin 15 / lamax 45 / lomin 25 / lomax 65` box on the OpenSky fallback, so the two paths now disagree about where the AO is | The audit compared the two poll functions. **Fixed 2026-09-19 in `4e59ede`**: both paths derive the AO from `CENTRE_LAT`/`CENTRE_LON`/`RADIUS_NM`, and OpenSky results are clipped to the circle |
+| The interference fix re-centred the AO | It re-centred the **primary** path only. `opensky.py:160` still requests the old `lamin 15 / lamax 45 / lomin 25 / lomax 65` box on the OpenSky fallback, so the two paths now disagree about where the AO is | The audit compared the two poll functions. **Fixed 2026-09-19 in `74f09f0`**: both paths derive the AO from `CENTRE_LAT`/`CENTRE_LON`/`RADIUS_NM`, and OpenSky results are clipped to the circle |
 
 ---
 
@@ -681,4 +681,4 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-18 | `64b690a` | Fix the GPS interference layer: right AO, right test, real denominator |
 | 2026-09-18 | `7ddbe58` | Add `docs/FINDINGS.md` — this register |
 | 2026-09-18 | `de831ed` | Add `tools/` (reproduction scripts) and the resume section |
-| 2026-09-19 | `4e59ede` | One AO for both aircraft poll paths; OpenSky bbox derived from the constants and clipped to the circle |
+| 2026-09-19 | `74f09f0` | One AO for both aircraft poll paths; OpenSky bbox derived from the constants and clipped to the circle |
