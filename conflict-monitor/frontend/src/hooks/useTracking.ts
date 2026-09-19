@@ -23,8 +23,18 @@ export interface JammingZone {
   lat: number;
   lon: number;
   radius_km: number;
-  aircraft_count: number;
+  degraded: number;
+  total: number;
+  ratio: number;
   intensity: number;
+}
+
+export interface JammingStatus {
+  status: "ok" | "no_integrity_data" | "insufficient_coverage";
+  source: string | null;
+  as_of: number;
+  cells_evaluated: number;
+  aircraft_evaluable: number;
 }
 
 export interface Vessel {
@@ -57,6 +67,13 @@ export function useTracking() {
   const [aircraft, setAircraft] = useState<Aircraft[]>([]);
   const [tleData, setTleData] = useState<TLERecord[]>([]);
   const [jammingZones, setJammingZones] = useState<JammingZone[]>([]);
+  const [jammingStatus, setJammingStatus] = useState<JammingStatus>({
+    status: "no_integrity_data",
+    source: null,
+    as_of: 0,
+    cells_evaluated: 0,
+    aircraft_evaluable: 0,
+  });
   const [vessels, setVessels] = useState<Vessel[]>([]);
   const [aircraftTracks, setAircraftTracks] = useState<TrackHistory>({});
   const [vesselTracks, setVesselTracks] = useState<TrackHistory>({});
@@ -81,7 +98,17 @@ export function useTracking() {
     const fetchJamming = async () => {
       try {
         const res = await fetch(`${API_BASE}/tracking/jamming`);
-        if (res.ok) setJammingZones(await res.json());
+        if (res.ok) {
+          const data = await res.json();
+          setJammingZones(data.zones ?? []);
+          setJammingStatus({
+            status: data.status ?? "no_integrity_data",
+            source: data.source ?? null,
+            as_of: data.as_of ?? 0,
+            cells_evaluated: data.cells_evaluated ?? 0,
+            aircraft_evaluable: data.aircraft_evaluable ?? 0,
+          });
+        }
       } catch { /* backend unavailable */ }
     };
     fetchJamming();
@@ -132,5 +159,5 @@ export function useTracking() {
     return () => clearInterval(interval);
   }, []);
 
-  return { aircraft, tleData, jammingZones, vessels, aircraftTracks, vesselTracks };
+  return { aircraft, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks };
 }

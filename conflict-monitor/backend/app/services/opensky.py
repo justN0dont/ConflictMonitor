@@ -7,6 +7,7 @@ zones by clustering aircraft with degraded navigation accuracy.
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 
 import httpx
@@ -17,53 +18,104 @@ from app.services.track_history import record_aircraft_position
 logger = logging.getLogger(__name__)
 
 # Centre of the Middle East bounding box
-CENTRE_LAT = 30
-CENTRE_LON = 45
-RADIUS_NM = 2500  # ~covers lat 15-45, lon 25-65
+CENTRE_LAT = 29.5
+CENTRE_LON = 45.5
+RADIUS_NM = 650  # ~lat 23-40, lon 33-56 (Levant -> Hormuz); measured 139 aircraft / 84KB per poll
 
 POLL_INTERVAL = 15  # seconds
 
-_cache: dict = {"states": [], "timestamp": 0, "jamming": []}
+# Published gpsjam.org degradation threshold: nic < 7 OR nac_p < 8.
+NIC_THRESHOLD = 7
+NAC_P_THRESHOLD = 8
+
+# A ratio is only meaningful with a real denominator: without a floor, a cell
+# holding 2 aircraft that both happen to be degraded would read as 100%.
+MIN_CELL_AIRCRAFT = 10
+MIN_RATIO = 0.25
+
+# adsb.lol rejects generic clients with 403 "User-Agent too generic; include
+# valid contact info." Without a contact UA the live feed never returns.
+ADSB_USER_AGENT = "conflict-monitor/1.0 (+https://github.com/troofevades-rgb/conflict-monitor)"
+
+_cache: dict = {
+    "states": [],
+    "timestamp": 0,
+    "source": None,
+    "jamming": [],
+    "jamming_status": "no_integrity_data",
+    "cells_evaluated": 0,
+    "aircraft_evaluable": 0,
+}
 
 
-def _detect_jamming(states: list[dict]) -> list[dict]:
-    """Infer GPS jamming zones from aircraft with degraded navigation accuracy.
+def _detect_jamming(states: list[dict]) -> dict:
+    """Measure degraded navigation integrity per grid cell, as a ratio.
 
-    Uses two signals:
-    - position_source == 2 (MLAT fallback, from OpenSky)
-    - nac_p == 0 and nic == 0 (degraded GPS accuracy, from adsb.lol)
+    A position counts as degraded when it fails the published gpsjam.org
+    threshold: nic < 7 or nac_p < 8.  An aircraft carrying neither field
+    cannot be evaluated (OpenSky state vectors carry no integrity fields at
+    all), so it is excluded from the numerator AND the denominator and the
+    returned status says so — "I wasn't looking" must never render as
+    "nothing happened".
     """
-    jammed = [
-        s for s in states
-        if not s.get("on_ground") and (
-            s.get("position_source") == 2
-            or (s.get("nac_p") == 0 and s.get("nic") == 0)
-        )
-        and s.get("lat") is not None and s.get("lon") is not None
-    ]
-    if len(jammed) < 2:
-        return []
-
     grid_size = 0.8  # degrees (~90 km)
-    grid: dict[tuple[float, float], list[dict]] = defaultdict(list)
-    for ac in jammed:
-        key = (
-            round(ac["lat"] / grid_size) * grid_size,
-            round(ac["lon"] / grid_size) * grid_size,
+    grid: dict[tuple[float, float], list[bool]] = defaultdict(list)
+    evaluable = 0
+
+    for s in states:
+        if s.get("on_ground"):
+            continue
+        if s.get("lat") is None or s.get("lon") is None:
+            continue
+        nic = s.get("nic")
+        nac_p = s.get("nac_p")
+        if nic is None and nac_p is None:
+            continue  # unevaluable — no integrity fields to judge
+        evaluable += 1
+        degraded = (
+            (nic is not None and nic < NIC_THRESHOLD)
+            or (nac_p is not None and nac_p < NAC_P_THRESHOLD)
         )
-        grid[key].append(ac)
+        key = (
+            round(s["lat"] / grid_size) * grid_size,
+            round(s["lon"] / grid_size) * grid_size,
+        )
+        grid[key].append(degraded)
 
     zones = []
-    for (lat, lon), aircraft in grid.items():
-        if len(aircraft) >= 2:
-            zones.append({
-                "lat": lat,
-                "lon": lon,
-                "radius_km": grid_size * 111 / 2,
-                "aircraft_count": len(aircraft),
-                "intensity": min(len(aircraft) / 8, 1.0),
-            })
-    return zones
+    cells_evaluated = 0
+    for (lat, lon), flags in grid.items():
+        total = len(flags)
+        if total < MIN_CELL_AIRCRAFT:
+            continue
+        cells_evaluated += 1
+        degraded_count = sum(flags)
+        ratio = degraded_count / total
+        if ratio < MIN_RATIO:
+            continue
+        zones.append({
+            "lat": lat,
+            "lon": lon,
+            "radius_km": grid_size * 111 / 2,
+            "degraded": degraded_count,
+            "total": total,
+            "ratio": ratio,
+            "intensity": min(max(ratio, 0.0), 1.0),
+        })
+
+    if evaluable == 0:
+        status = "no_integrity_data"
+    elif cells_evaluated == 0:
+        status = "insufficient_coverage"
+    else:
+        status = "ok"
+
+    return {
+        "status": status,
+        "zones": zones,
+        "cells_evaluated": cells_evaluated,
+        "aircraft_evaluable": evaluable,
+    }
 
 
 async def _poll_adsb_lol(client: httpx.AsyncClient) -> list[dict] | None:
@@ -150,27 +202,35 @@ async def start_opensky_poller():
     logger.info("Aircraft tracking: using adsb.lol (primary), polling every %ds", POLL_INTERVAL)
 
     async with httpx.AsyncClient(timeout=30, auth=opensky_auth) as opensky_client, \
-               httpx.AsyncClient(timeout=30) as adsb_client:
+               httpx.AsyncClient(timeout=30, headers={"User-Agent": ADSB_USER_AGENT}) as adsb_client:
         while True:
             # Try adsb.lol first (free, no auth, no rate limits)
             states = await _poll_adsb_lol(adsb_client)
+            source = "adsb.lol"
 
             # Fall back to OpenSky if adsb.lol failed
             if states is None:
                 states = await _poll_opensky(opensky_client, opensky_auth)
+                source = "opensky"
 
             if states is not None:
+                interference = _detect_jamming(states)
                 _cache["states"] = states
-                _cache["timestamp"] = int(asyncio.get_event_loop().time())
-                _cache["jamming"] = _detect_jamming(states)
+                _cache["timestamp"] = int(time.time())
+                _cache["source"] = source
+                _cache["jamming"] = interference["zones"]
+                _cache["jamming_status"] = interference["status"]
+                _cache["cells_evaluated"] = interference["cells_evaluated"]
+                _cache["aircraft_evaluable"] = interference["aircraft_evaluable"]
                 for ac in states:
                     if not ac.get("on_ground"):
                         record_aircraft_position(ac["icao24"], ac["lon"], ac["lat"])
                 logger.info(
-                    "Aircraft: %d tracked, %d jamming zones (source: %s)",
+                    "Aircraft: %d tracked, %d interference zones, status=%s (source: %s)",
                     len(states),
-                    len(_cache["jamming"]),
-                    "adsb.lol" if states else "opensky",
+                    len(interference["zones"]),
+                    interference["status"],
+                    source,
                 )
 
             await asyncio.sleep(POLL_INTERVAL)
@@ -180,5 +240,13 @@ def get_aircraft() -> list[dict]:
     return _cache["states"]
 
 
-def get_jamming_zones() -> list[dict]:
-    return _cache["jamming"]
+def get_jamming_zones() -> dict:
+    """Return the current interference measurement plus its provenance."""
+    return {
+        "status": _cache.get("jamming_status", "no_integrity_data"),
+        "source": _cache.get("source"),
+        "as_of": _cache.get("timestamp", 0),
+        "cells_evaluated": _cache.get("cells_evaluated", 0),
+        "aircraft_evaluable": _cache.get("aircraft_evaluable", 0),
+        "zones": _cache.get("jamming", []),
+    }

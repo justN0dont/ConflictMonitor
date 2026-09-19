@@ -22,7 +22,14 @@ async def tle():
 
 @router.get("/jamming")
 async def jamming():
-    """Return detected GPS jamming zones inferred from MLAT clustering."""
+    """Return measured GPS navigation-integrity degradation.
+
+    Each zone is a 0.8-degree cell where the share of aircraft failing the
+    gpsjam.org threshold (nic < 7 or nac_p < 8) reached the reporting minimum.
+    `status` distinguishes a real measurement from an unevaluable feed:
+    "ok", "no_integrity_data" (the source carried no nic/nac_p at all) or
+    "insufficient_coverage" (no cell held enough aircraft to form a ratio).
+    """
     return get_jamming_zones()
 
 

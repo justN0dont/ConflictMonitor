@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Map, { Marker, Popup, Source, Layer } from "react-map-gl";
 import type { ConflictEvent } from "../types/event";
-import type { Aircraft, JammingZone, TLERecord, TrackHistory, Vessel } from "../hooks/useTracking";
+import type { Aircraft, JammingStatus, JammingZone, TLERecord, TrackHistory, Vessel } from "../hooks/useTracking";
 import { GlobeView } from "./GlobeView";
 import { CesiumView } from "./CesiumView";
 
@@ -20,6 +20,7 @@ interface MapPanelProps {
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingZones: JammingZone[];
+  jammingStatus: JammingStatus;
   aircraftTracks: TrackHistory;
   vesselTracks: TrackHistory;
 }
@@ -97,7 +98,7 @@ function PingMarker({
   );
 }
 
-export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, aircraftTracks, vesselTracks }: MapPanelProps) {
+export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks }: MapPanelProps) {
   const [selected, setSelected] = useState<ConflictEvent | null>(null);
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
@@ -328,7 +329,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, air
                 anchor="center"
               >
                 <div
-                  title={`GPS JAMMING | ${z.aircraft_count} MLAT aircraft`}
+                  title={`GPS INTERFERENCE | ${z.degraded}/${z.total} aircraft degraded (${Math.round(z.ratio * 100)}%)`}
                   style={{
                     width: Math.max(30, z.radius_km / 2),
                     height: Math.max(30, z.radius_km / 2),
@@ -615,7 +616,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, air
                 </span>
               </div>
             )}
-            {jammingZones.length > 0 && (
+            {jammingStatus.status === "ok" && (
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <div
                   style={{
@@ -627,7 +628,25 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, air
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  GPS JAMMING ({jammingZones.length})
+                  GPS INTERFERENCE ({jammingZones.length})
+                </span>
+              </div>
+            )}
+            {jammingStatus.status !== "ok" && (
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <div
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: "transparent",
+                    border: "1px dashed #d29922",
+                  }}
+                />
+                <span style={{ color: "#d29922" }}>
+                  {jammingStatus.status === "no_integrity_data"
+                    ? "GPS: NO INTEGRITY DATA"
+                    : "GPS: INSUFFICIENT COVERAGE"}
                 </span>
               </div>
             )}

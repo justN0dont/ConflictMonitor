@@ -581,7 +581,7 @@ export function CesiumView({
           height: 0,
         },
         label: {
-          text: `GPS JAMMING\n${z.aircraft_count} aircraft`,
+          text: `GPS INTERFERENCE\n${z.degraded}/${z.total} degraded`,
           font: "10px JetBrains Mono, monospace",
           fillColor: JAMMING_COLOR,
           outlineColor: Cesium.Color.BLACK,

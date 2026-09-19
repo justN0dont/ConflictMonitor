@@ -543,9 +543,14 @@ async def start_demo_aircraft_poller():
             ac.step(dt_seconds=15.0)
 
         states = [ac.to_dict() for ac in _demo_aircraft]
+        zones = _generate_demo_jamming(states)
         opensky_cache["states"] = states
-        opensky_cache["timestamp"] = int(time.monotonic())
-        opensky_cache["jamming"] = _generate_demo_jamming(states)
+        opensky_cache["timestamp"] = int(time.time())
+        opensky_cache["source"] = "demo"
+        opensky_cache["jamming"] = zones
+        opensky_cache["jamming_status"] = "ok" if zones else "insufficient_coverage"
+        opensky_cache["cells_evaluated"] = len(zones)
+        opensky_cache["aircraft_evaluable"] = len(states)
 
         logger.debug("Demo aircraft: %d tracked", len(states))
         await asyncio.sleep(15)
@@ -553,6 +558,8 @@ async def start_demo_aircraft_poller():
 
 def _generate_demo_jamming(states: list[dict]) -> list[dict]:
     """Simulate 1-3 GPS jamming zones."""
+    from app.services.opensky import MIN_CELL_AIRCRAFT
+
     # Randomly create jamming zones near contested areas
     jam_locations = [
         {"lat": 33.5, "lon": 36.3, "label": "Damascus"},   # Syria
@@ -561,14 +568,22 @@ def _generate_demo_jamming(states: list[dict]) -> list[dict]:
         {"lat": 26.5, "lon": 56.3, "label": "Hormuz"},      # Strait of Hormuz
     ]
     zones = []
+    remaining = len(states)  # a cell cannot hold more aircraft than the fleet has
     for jl in jam_locations:
+        if remaining < MIN_CELL_AIRCRAFT:
+            break
         if random.random() < 0.4:  # 40% chance each zone is active
+            total = random.randint(MIN_CELL_AIRCRAFT, min(remaining, 40))
+            degraded = max(1, round(total * random.uniform(0.3, 0.9)))
+            remaining -= total
             zones.append({
                 "lat": jl["lat"] + random.uniform(-0.3, 0.3),
                 "lon": jl["lon"] + random.uniform(-0.3, 0.3),
                 "radius_km": random.uniform(30, 80),
-                "aircraft_count": random.randint(2, 8),
-                "intensity": random.uniform(0.3, 0.9),
+                "degraded": degraded,
+                "total": total,
+                "ratio": degraded / total,
+                "intensity": degraded / total,
             })
     return zones
 
