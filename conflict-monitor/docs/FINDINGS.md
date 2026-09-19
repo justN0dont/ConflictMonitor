@@ -139,6 +139,31 @@ Of the 45,624 events that carry a usable location name, the table resolves **70.
 - **The word-boundary fix was simulated across all 3,665 strings: 49 change, zero regressions**, and
   three get actively better (`Kuwaiti consulate, Basra` → Basra rather than Kuwait).
 
+### GPS interference — measured 2026-09-19
+
+Degraded share (`nic < 7 or nac_p < 8`) over a 250 nm radius, airborne vs at/above FL200:
+
+| Point | airborne | ≥ FL200 |
+|---|---|---|
+| Frankfurt (peaceful control) | 23.9% (n=833) | **2.3%** (n=433) |
+| Kaliningrad / Baltic | 20.8% (n=101) | **16.4%** (n=61) |
+| Hormuz | 5.3% (n=57) | 4.9% (n=41) |
+
+**Low-altitude degradation is aircraft equipage, not interference.** General aviation around a busy
+hub carries older, cheaper GPS, so it reports low NIC everywhere. Without an altitude floor Frankfurt
+is indistinguishable from Kaliningrad. With one, the control collapses to 2.3% while Kaliningrad holds
+at 16.4% — a 7× separation, and the strongest open-source interference signal reachable.
+
+This also invalidates an earlier claim: a "Baltic 50%" figure quoted on 2026-09-18 came from a
+24-aircraft sample and does not survive a larger one.
+
+**A snapshot cannot support a per-cell ratio.** At cruise-only density, 423 evaluable aircraft over a
+250 nm radius leave ~4 per 0.8° cell; Kaliningrad cannot fill one cell at any grid size below 4°, and
+Hormuz reads "40%" off four aircraft. Ratios must be pooled per named AOI, not per grid cell —
+gpsjam.org gets away with fine cells only by aggregating over a full day.
+
+Reproduce: `../tools/probe_adsb_coverage.py`.
+
 ### Sensor coverage — probed 2026-09-18
 
 **ADS-B** (`api.adsb.lol`, 250 nm radius):

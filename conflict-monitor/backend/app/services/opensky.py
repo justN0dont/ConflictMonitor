@@ -61,6 +61,15 @@ NAC_P_THRESHOLD = 8
 MIN_CELL_AIRCRAFT = 10
 MIN_RATIO = 0.25
 
+# Low-altitude traffic reports low NIC because of aircraft EQUIPAGE, not interference:
+# general aviation around a busy hub carries older, cheaper GPS. Measured 2026-09-19,
+# 250nm radius, degraded share airborne vs at/above FL200:
+#     Frankfurt (control)   23.9%  ->   2.3%
+#     Kaliningrad/Baltic    20.8%  ->  16.4%
+#     Hormuz                 5.3%  ->   4.9%
+# Without this floor a GA hub is indistinguishable from jammed airspace.
+MIN_ALTITUDE_FT = 20000
+
 # adsb.lol rejects generic clients with 403 "User-Agent too generic; include
 # valid contact info." Without a contact UA the live feed never returns.
 ADSB_USER_AGENT = "conflict-monitor/1.0 (+https://github.com/troofevades-rgb/conflict-monitor)"
@@ -80,11 +89,15 @@ def _detect_jamming(states: list[dict]) -> dict:
     """Measure degraded navigation integrity per grid cell, as a ratio.
 
     A position counts as degraded when it fails the published gpsjam.org
-    threshold: nic < 7 or nac_p < 8.  An aircraft carrying neither field
-    cannot be evaluated (OpenSky state vectors carry no integrity fields at
-    all), so it is excluded from the numerator AND the denominator and the
+    threshold: nic < 7 or nac_p < 8, measured only at or above MIN_ALTITUDE_FT.
+    An aircraft carrying neither field cannot be evaluated (OpenSky state vectors
+    carry no integrity fields at all), and neither can one below the altitude
+    floor, so both are excluded from the numerator AND the denominator and the
     returned status says so — "I wasn't looking" must never render as
     "nothing happened".
+
+    aircraft_evaluable therefore counts aircraft at cruise carrying integrity
+    fields, not all aircraft in the area.
     """
     grid_size = 0.8  # degrees (~90 km)
     grid: dict[tuple[float, float], list[bool]] = defaultdict(list)
@@ -99,6 +112,13 @@ def _detect_jamming(states: list[dict]) -> dict:
         nac_p = s.get("nac_p")
         if nic is None and nac_p is None:
             continue  # unevaluable — no integrity fields to judge
+        # Altitude here is always FEET: only the adsb.lol path carries nic/nac_p, and it
+        # reports alt_geom/alt_baro in feet. OpenSky reports METRES but never reaches this
+        # line, because its state vectors carry no integrity fields and are skipped above.
+        # alt_baro can also be the string "ground", which isinstance rejects.
+        alt = s.get("altitude")
+        if not isinstance(alt, (int, float)) or alt < MIN_ALTITUDE_FT:
+            continue  # unevaluable — low-level GA, on approach, or altitude unknown
         evaluable += 1
         degraded = (
             (nic is not None and nic < NIC_THRESHOLD)
