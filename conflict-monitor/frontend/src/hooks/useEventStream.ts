@@ -19,25 +19,39 @@ export function useEventStream() {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
-    ws.onopen = () => setIsConnected(true);
+    ws.onopen = () => {
+      setIsConnected(true);
+      // Send periodic pings to keep the connection alive
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send("ping");
+        } else {
+          clearInterval(pingInterval);
+        }
+      }, 30000);
+      (ws as any)._pingInterval = pingInterval;
+    };
 
     ws.onmessage = (e) => {
       try {
-        const msg: EventWSMessage = JSON.parse(e.data);
+        const msg = JSON.parse(e.data);
+        if (msg.type === "ping") return; // ignore server pings
         if (msg.type === "new_event") {
+          const event = msg.event as ConflictEvent;
           setEvents((prev) =>
-            [msg.event, ...prev]
+            [event, ...prev]
               .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
               .slice(0, MAX_EVENTS),
           );
         }
       } catch {
-        // ignore malformed messages
+        console.warn("WS: malformed message", e.data);
       }
     };
 
     ws.onclose = () => {
       setIsConnected(false);
+      clearInterval((ws as any)._pingInterval);
       reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY);
     };
 

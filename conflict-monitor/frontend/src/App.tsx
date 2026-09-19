@@ -11,7 +11,7 @@ const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:800
 
 export default function App() {
   const { events, isConnected } = useEventStream();
-  const { aircraft, tleData, jammingZones, vessels } = useTracking();
+  const { aircraft, tleData, jammingZones, vessels, aircraftTracks, vesselTracks } = useTracking();
   const [demoMode, setDemoMode] = useState(false);
   const [timeRange, setTimeRange] = useState<{ earliest: Date; latest: Date } | null>(null);
   const [activeRange, setActiveRange] = useState<{ start: Date; end: Date } | null>(null);
@@ -69,7 +69,7 @@ export default function App() {
         satelliteCount={tleData.length}
         demoMode={demoMode}
       />
-      <MapPanel events={filteredEvents} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} />
+      <MapPanel events={filteredEvents} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} />
       <div className="sidebar">
         <div className="sidebar-feed"><LiveFeed events={filteredEvents} /></div>
         <div className="sidebar-gauge"><EscalationGauge events={filteredEvents} /></div>

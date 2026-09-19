@@ -12,6 +12,7 @@ import time
 import httpx
 
 from app.config import settings
+from app.services.track_history import record_vessel_position
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ async def _run_websocket():
                 })
                 _cache["vessels"][mmsi] = vessel
                 _cache["last_update"] = now
+                record_vessel_position(mmsi, lon, lat)
 
             elif msg_type == "ShipStaticData":
                 static = msg.get("Message", {}).get("ShipStaticData", {})

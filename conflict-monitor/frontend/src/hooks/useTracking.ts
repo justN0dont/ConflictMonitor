@@ -42,17 +42,24 @@ export interface Vessel {
   length?: number;
 }
 
+// [lon, lat, timestamp]
+export type TrackPoint = [number, number, number];
+export type TrackHistory = Record<string, TrackPoint[]>;
+
 const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
 const AIRCRAFT_POLL_MS = 15_000;
 const JAMMING_POLL_MS = 15_000;
 const VESSEL_POLL_MS = 10_000;
 const TLE_POLL_MS = 6 * 3600 * 1000;
+const TRACK_POLL_MS = 15_000;
 
 export function useTracking() {
   const [aircraft, setAircraft] = useState<Aircraft[]>([]);
   const [tleData, setTleData] = useState<TLERecord[]>([]);
   const [jammingZones, setJammingZones] = useState<JammingZone[]>([]);
   const [vessels, setVessels] = useState<Vessel[]>([]);
+  const [aircraftTracks, setAircraftTracks] = useState<TrackHistory>({});
+  const [vesselTracks, setVesselTracks] = useState<TrackHistory>({});
   const mountedRef = useRef(true);
 
   // Poll aircraft positions
@@ -108,5 +115,22 @@ export function useTracking() {
     return () => clearInterval(interval);
   }, []);
 
-  return { aircraft, tleData, jammingZones, vessels };
+  // Poll track histories
+  useEffect(() => {
+    const fetchTracks = async () => {
+      try {
+        const [acRes, vRes] = await Promise.all([
+          fetch(`${API_BASE}/tracking/aircraft/tracks`),
+          fetch(`${API_BASE}/tracking/vessels/tracks`),
+        ]);
+        if (acRes.ok) setAircraftTracks(await acRes.json());
+        if (vRes.ok) setVesselTracks(await vRes.json());
+      } catch { /* backend unavailable */ }
+    };
+    fetchTracks();
+    const interval = setInterval(fetchTracks, TRACK_POLL_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  return { aircraft, tleData, jammingZones, vessels, aircraftTracks, vesselTracks };
 }

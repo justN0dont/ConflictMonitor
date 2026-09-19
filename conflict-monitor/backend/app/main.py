@@ -18,6 +18,15 @@ logger = logging.getLogger("conflict-monitor")
 logging.basicConfig(level=logging.INFO)
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Background tasks are fire-and-forget; without this their errors vanish."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Background task died: %r", exc, exc_info=exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create tables (replaced by Alembic in production)
@@ -91,6 +100,9 @@ async def lifespan(app: FastAPI):
         # Maritime vessels
         tasks.append(asyncio.create_task(start_maritime_poller()))
         logger.info("Maritime poller started")
+
+    for task in tasks:
+        task.add_done_callback(_log_task_exception)
 
     yield
 

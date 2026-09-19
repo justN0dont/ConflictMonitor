@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Map, { Marker, Popup } from "react-map-gl";
+import Map, { Marker, Popup, Source, Layer } from "react-map-gl";
 import type { ConflictEvent } from "../types/event";
-import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
+import type { Aircraft, JammingZone, TLERecord, TrackHistory, Vessel } from "../hooks/useTracking";
 import { GlobeView } from "./GlobeView";
 import { CesiumView } from "./CesiumView";
 
@@ -20,6 +20,8 @@ interface MapPanelProps {
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingZones: JammingZone[];
+  aircraftTracks: TrackHistory;
+  vesselTracks: TrackHistory;
 }
 
 /** Small diamond marker with type color and severity ring */
@@ -95,8 +97,10 @@ function PingMarker({
   );
 }
 
-export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: MapPanelProps) {
+export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, aircraftTracks, vesselTracks }: MapPanelProps) {
   const [selected, setSelected] = useState<ConflictEvent | null>(null);
+  const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);
+  const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
   const [newEventIds, setNewEventIds] = useState<Set<number>>(new Set());
   const prevIdsRef = useRef<Set<number>>(new Set());
   const [viewMode, setViewMode] = useState<"2d" | "globe" | "terrain">("2d");
@@ -129,7 +133,69 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: M
 
   const handleMarkerClick = useCallback((e: ConflictEvent) => {
     setSelected(e);
+    setSelectedAircraft(null);
+    setSelectedVessel(null);
   }, []);
+
+  const handleAircraftClick = useCallback((ac: Aircraft) => {
+    setSelectedAircraft(ac);
+    setSelected(null);
+    setSelectedVessel(null);
+  }, []);
+
+  const handleVesselClick = useCallback((v: Vessel) => {
+    setSelectedVessel(v);
+    setSelected(null);
+    setSelectedAircraft(null);
+  }, []);
+
+  // Build GeoJSON for aircraft trail lines
+  const aircraftTrailGeoJSON = useMemo(() => ({
+    type: "FeatureCollection" as const,
+    features: Object.entries(aircraftTracks).map(([id, points]) => ({
+      type: "Feature" as const,
+      properties: { id },
+      geometry: {
+        type: "LineString" as const,
+        coordinates: points.map(([lon, lat]) => [lon, lat]),
+      },
+    })).filter(f => f.geometry.coordinates.length >= 2),
+  }), [aircraftTracks]);
+
+  // Build GeoJSON for vessel trail lines
+  const vesselTrailGeoJSON = useMemo(() => ({
+    type: "FeatureCollection" as const,
+    features: Object.entries(vesselTracks).map(([id, points]) => ({
+      type: "Feature" as const,
+      properties: { id },
+      geometry: {
+        type: "LineString" as const,
+        coordinates: points.map(([lon, lat]) => [lon, lat]),
+      },
+    })).filter(f => f.geometry.coordinates.length >= 2),
+  }), [vesselTracks]);
+
+  // Highlight track for selected aircraft/vessel
+  const selectedTrailGeoJSON = useMemo(() => {
+    let points: [number, number, number][] | undefined;
+    if (selectedAircraft) {
+      points = aircraftTracks[selectedAircraft.icao24];
+    } else if (selectedVessel) {
+      points = vesselTracks[selectedVessel.mmsi];
+    }
+    if (!points || points.length < 2) return null;
+    return {
+      type: "FeatureCollection" as const,
+      features: [{
+        type: "Feature" as const,
+        properties: {},
+        geometry: {
+          type: "LineString" as const,
+          coordinates: points.map(([lon, lat]) => [lon, lat]),
+        },
+      }],
+    };
+  }, [selectedAircraft, selectedVessel, aircraftTracks, vesselTracks]);
 
   return (
     <div className="panel" style={{ gridArea: "map", position: "relative" }}>
@@ -192,6 +258,47 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: M
             mapStyle="mapbox://styles/mapbox/dark-v11"
             mapboxAccessToken={MAPBOX_TOKEN}
           >
+            {/* Aircraft trail lines */}
+            <Source id="aircraft-trails" type="geojson" data={aircraftTrailGeoJSON}>
+              <Layer
+                id="aircraft-trail-lines"
+                type="line"
+                paint={{
+                  "line-color": "#58d0ff",
+                  "line-width": 1,
+                  "line-opacity": 0.25,
+                }}
+              />
+            </Source>
+
+            {/* Vessel trail lines */}
+            <Source id="vessel-trails" type="geojson" data={vesselTrailGeoJSON}>
+              <Layer
+                id="vessel-trail-lines"
+                type="line"
+                paint={{
+                  "line-color": "#40e0d0",
+                  "line-width": 1,
+                  "line-opacity": 0.25,
+                }}
+              />
+            </Source>
+
+            {/* Highlighted trail for selected entity */}
+            {selectedTrailGeoJSON && (
+              <Source id="selected-trail" type="geojson" data={selectedTrailGeoJSON}>
+                <Layer
+                  id="selected-trail-line"
+                  type="line"
+                  paint={{
+                    "line-color": selectedAircraft ? "#58d0ff" : "#40e0d0",
+                    "line-width": 2.5,
+                    "line-opacity": 0.8,
+                  }}
+                />
+              </Source>
+            )}
+
             {/* Conflict event markers */}
             {geoEvents.map((evt) => (
               <Marker
@@ -235,29 +342,34 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: M
               </Marker>
             ))}
 
-            {/* Aircraft markers with callsigns */}
+            {/* Aircraft markers with plane icons */}
             {airborneAircraft.map((ac, i) => (
               <Marker
                 key={`ac-${ac.icao24 || i}`}
                 longitude={ac.lon}
                 latitude={ac.lat}
                 anchor="center"
+                style={{ transition: "transform 2s linear" }}
               >
                 <div
-                  style={{ display: "flex", alignItems: "center", gap: 3, pointerEvents: "none" }}
+                  style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}
+                  onClick={(e) => { e.stopPropagation(); handleAircraftClick(ac); }}
                   title={`${ac.callsign || ac.icao24} | ${ac.origin_country}${ac.altitude ? ` | ${Math.round(ac.altitude)}m` : ""}`}
                 >
-                  {/* Heading-oriented aircraft dot */}
-                  <div
+                  {/* Plane icon rotated by heading */}
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill={selectedAircraft?.icao24 === ac.icao24 ? "#fff" : "#58d0ff"}
                     style={{
-                      width: 7,
-                      height: 7,
-                      borderRadius: "50%",
-                      background: "#58d0ff",
-                      opacity: 0.85,
-                      boxShadow: "0 0 4px rgba(88,208,255,0.5)",
+                      transform: `rotate(${(ac.heading || 0)}deg)`,
+                      filter: "drop-shadow(0 0 3px rgba(88,208,255,0.6))",
+                      opacity: 0.9,
                     }}
-                  />
+                  >
+                    <path d="M12 2 L14 8 L21 10 L14 11 L14 18 L17 20 L17 21 L12 19 L7 21 L7 20 L10 18 L10 11 L3 10 L10 8 Z" />
+                  </svg>
                   {/* Callsign label */}
                   {ac.callsign && (
                     <span
@@ -278,30 +390,34 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: M
               </Marker>
             ))}
 
-            {/* Vessel markers */}
+            {/* Vessel markers with ship icons */}
             {vessels.map((v) => (
               <Marker
                 key={`v-${v.mmsi}`}
                 longitude={v.lon}
                 latitude={v.lat}
                 anchor="center"
+                style={{ transition: "transform 2s linear" }}
               >
                 <div
-                  style={{ display: "flex", alignItems: "center", gap: 3, pointerEvents: "none" }}
+                  style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}
+                  onClick={(e) => { e.stopPropagation(); handleVesselClick(v); }}
                   title={`${v.name || v.mmsi} | ${v.ship_type_name || "Vessel"}${v.speed ? ` | ${v.speed}kn` : ""}${v.destination ? ` → ${v.destination}` : ""}`}
                 >
-                  {/* Ship-shaped marker (rotated triangle) */}
-                  <div
+                  {/* Ship icon rotated by heading */}
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill={selectedVessel?.mmsi === v.mmsi ? "#fff" : "#40e0d0"}
                     style={{
-                      width: 0,
-                      height: 0,
-                      borderLeft: "3.5px solid transparent",
-                      borderRight: "3.5px solid transparent",
-                      borderBottom: "8px solid #40e0d0",
-                      transform: `rotate(${(v.heading || 0) + 180}deg)`,
+                      transform: `rotate(${(v.heading >= 0 && v.heading < 360) ? v.heading : (v.course || 0)}deg)`,
                       filter: "drop-shadow(0 0 3px rgba(64,224,208,0.5))",
+                      opacity: 0.9,
                     }}
-                  />
+                  >
+                    <path d="M12 2 L15 9 L15 16 L19 20 L12 22 L5 20 L9 16 L9 9 Z" />
+                  </svg>
                   {/* Name label */}
                   {v.name && (
                     <span
@@ -322,6 +438,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: M
               </Marker>
             ))}
 
+            {/* Event info popup */}
             {selected && selected.lat && selected.lon && (
               <Popup
                 longitude={selected.lon}
@@ -364,6 +481,74 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: M
                     {selected.channel_name} &middot;{" "}
                     {new Date(selected.timestamp).toLocaleString()}
                   </div>
+                </div>
+              </Popup>
+            )}
+
+            {/* Aircraft info popup */}
+            {selectedAircraft && (
+              <Popup
+                longitude={selectedAircraft.lon}
+                latitude={selectedAircraft.lat}
+                anchor="bottom"
+                onClose={() => setSelectedAircraft(null)}
+                closeButton
+                closeOnClick={false}
+                style={{ maxWidth: 280 }}
+              >
+                <div style={{ color: "#c8d6e5", fontSize: 11, fontFamily: "var(--font-mono)", lineHeight: 1.6 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: "#58d0ff", marginBottom: 4 }}>
+                    {selectedAircraft.callsign || selectedAircraft.icao24}
+                  </div>
+                  <div>ICAO24: {selectedAircraft.icao24}</div>
+                  {selectedAircraft.callsign && <div>CALLSIGN: {selectedAircraft.callsign}</div>}
+                  {selectedAircraft.origin_country && <div>ORIGIN: {selectedAircraft.origin_country}</div>}
+                  {selectedAircraft.altitude != null && <div>ALT: {Math.round(selectedAircraft.altitude).toLocaleString()} ft</div>}
+                  {selectedAircraft.velocity != null && <div>SPD: {Math.round(selectedAircraft.velocity)} kts</div>}
+                  {selectedAircraft.heading != null && <div>HDG: {Math.round(selectedAircraft.heading)}&deg;</div>}
+                  <div style={{ fontSize: 9, color: "#5a6a7e", marginTop: 4 }}>
+                    {selectedAircraft.lat.toFixed(4)}, {selectedAircraft.lon.toFixed(4)}
+                    {selectedAircraft.position_source === 2 && " | MLAT"}
+                  </div>
+                  {aircraftTracks[selectedAircraft.icao24] && (
+                    <div style={{ fontSize: 9, color: "#5a6a7e" }}>
+                      TRACK: {aircraftTracks[selectedAircraft.icao24].length} points
+                    </div>
+                  )}
+                </div>
+              </Popup>
+            )}
+
+            {/* Vessel info popup */}
+            {selectedVessel && (
+              <Popup
+                longitude={selectedVessel.lon}
+                latitude={selectedVessel.lat}
+                anchor="bottom"
+                onClose={() => setSelectedVessel(null)}
+                closeButton
+                closeOnClick={false}
+                style={{ maxWidth: 280 }}
+              >
+                <div style={{ color: "#c8d6e5", fontSize: 11, fontFamily: "var(--font-mono)", lineHeight: 1.6 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: "#40e0d0", marginBottom: 4 }}>
+                    {selectedVessel.name || selectedVessel.mmsi}
+                  </div>
+                  <div>MMSI: {selectedVessel.mmsi}</div>
+                  {selectedVessel.ship_type_name && <div>TYPE: {selectedVessel.ship_type_name}</div>}
+                  {selectedVessel.speed > 0 && <div>SPD: {selectedVessel.speed} kts</div>}
+                  {selectedVessel.heading >= 0 && selectedVessel.heading < 360 && <div>HDG: {selectedVessel.heading}&deg;</div>}
+                  {selectedVessel.course > 0 && <div>COG: {selectedVessel.course.toFixed(1)}&deg;</div>}
+                  {selectedVessel.destination && <div>DEST: {selectedVessel.destination}</div>}
+                  {selectedVessel.length != null && selectedVessel.length > 0 && <div>LEN: {selectedVessel.length}m</div>}
+                  <div style={{ fontSize: 9, color: "#5a6a7e", marginTop: 4 }}>
+                    {selectedVessel.lat.toFixed(4)}, {selectedVessel.lon.toFixed(4)}
+                  </div>
+                  {vesselTracks[selectedVessel.mmsi] && (
+                    <div style={{ fontSize: 9, color: "#5a6a7e" }}>
+                      TRACK: {vesselTracks[selectedVessel.mmsi].length} points
+                    </div>
+                  )}
                 </div>
               </Popup>
             )}
@@ -412,15 +597,9 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: M
             ))}
             {airborneAircraft.length > 0 && (
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <div
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: "#58d0ff",
-                    boxShadow: "0 0 4px rgba(88,208,255,0.6)",
-                  }}
-                />
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="#58d0ff">
+                  <path d="M12 2 L14 8 L21 10 L14 11 L14 18 L17 20 L17 21 L12 19 L7 21 L7 20 L10 18 L10 11 L3 10 L10 8 Z" />
+                </svg>
                 <span style={{ color: "var(--text-secondary)" }}>
                   AIRCRAFT ({airborneAircraft.length})
                 </span>
@@ -428,15 +607,9 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones }: M
             )}
             {vessels.length > 0 && (
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <div
-                  style={{
-                    width: 0,
-                    height: 0,
-                    borderLeft: "4px solid transparent",
-                    borderRight: "4px solid transparent",
-                    borderBottom: "8px solid #40e0d0",
-                  }}
-                />
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="#40e0d0">
+                  <path d="M12 2 L15 9 L15 16 L19 20 L12 22 L5 20 L9 16 L9 9 Z" />
+                </svg>
                 <span style={{ color: "var(--text-secondary)" }}>
                   VESSELS ({vessels.length})
                 </span>

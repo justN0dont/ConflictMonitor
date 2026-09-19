@@ -12,6 +12,7 @@ from collections import defaultdict
 import httpx
 
 from app.config import settings
+from app.services.track_history import record_aircraft_position
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,9 @@ async def start_opensky_poller():
                 _cache["states"] = states
                 _cache["timestamp"] = int(asyncio.get_event_loop().time())
                 _cache["jamming"] = _detect_jamming(states)
+                for ac in states:
+                    if not ac.get("on_ground"):
+                        record_aircraft_position(ac["icao24"], ac["lon"], ac["lat"])
                 logger.info(
                     "Aircraft: %d tracked, %d jamming zones (source: %s)",
                     len(states),

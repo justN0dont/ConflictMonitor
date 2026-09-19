@@ -65,7 +65,7 @@ body::before {
 .app-grid {
   display: grid;
   grid-template-columns: 1fr 400px;
-  grid-template-rows: 52px 1fr 72px;
+  grid-template-rows: 52px minmax(0, 1fr) 72px;
   grid-template-areas:
     "header  header"
     "map     sidebar"
@@ -206,8 +206,8 @@ body::before {
   to { opacity: 1; }
 }
 
-/* Global smooth transitions */
-.panel * {
+/* Global smooth transitions (exclude map markers) */
+.panel *:not(.mapboxgl-marker *) {
   transition-property: background-color, border-color, color, box-shadow, opacity;
   transition-duration: 0.3s;
   transition-timing-function: ease;

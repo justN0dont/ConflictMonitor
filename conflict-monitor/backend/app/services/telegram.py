@@ -1,6 +1,7 @@
 import logging
 
 from geoalchemy2.shape import from_shape
+from sqlalchemy import select
 from shapely.geometry import Point
 from telethon import TelegramClient, events
 
@@ -124,6 +125,16 @@ async def start_telegram_listener():
                 if not raw_text:
                     continue
 
+                # Already ingested on a previous run — skip before spending an API call
+                async with async_session() as session:
+                    already = await session.scalar(
+                        select(Event.id)
+                        .where(Event.channel_name == channel_name, Event.raw_text == raw_text)
+                        .limit(1)
+                    )
+                if already is not None:
+                    continue
+
                 logger.info("Backfill from %s: %s", channel_name, raw_text[:80])
                 result = await classify_message(raw_text)
 
@@ -137,6 +148,14 @@ async def start_telegram_listener():
                     geometry = from_shape(Point(lon, lat), srid=4326)
 
                 async with async_session() as session:
+                    existing = await check_duplicate(
+                        session, result.get("summary", ""), result.get("event_type", "military"),
+                        lat, lon, message.date,
+                    )
+                    if existing:
+                        await merge_duplicate(session, existing, channel_name, result.get("severity", 5), lat, lon)
+                        continue
+
                     db_event = Event(
                         source="telegram",
                         channel_name=channel_name,
