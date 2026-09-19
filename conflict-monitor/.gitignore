@@ -6,3 +6,6 @@ frontend/node_modules/
 *.log
 .DS_Store
 sessions/
+dist/
+frontend/dist/
+*.tsbuildinfo

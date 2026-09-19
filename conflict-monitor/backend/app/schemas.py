@@ -30,6 +30,9 @@ class EventRead(BaseModel):
     report_count: int = 1
     reporting_channels: str = ""
     source_reliability: int | None = None
+    location_name: str = ""
+    telegram_message_id: int | None = None
+    source_url: str = ""
 
     model_config = {"from_attributes": True}
 

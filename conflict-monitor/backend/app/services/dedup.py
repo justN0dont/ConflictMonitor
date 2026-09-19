@@ -19,6 +19,7 @@ from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 
 from app.models import Event
+from app.seed_channels import get_reliability as _channel_reliability
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,8 @@ async def merge_duplicate(
 ):
     """Update an existing event with info from a duplicate report."""
     # Increment report count
-    existing.report_count = (existing.report_count or 1) + 1
+    new_count = (existing.report_count or 1) + 1
+    existing.report_count = new_count
 
     # Append channel
     channels = existing.reporting_channels or existing.channel_name
@@ -123,9 +125,25 @@ async def merge_duplicate(
         if new_lon is not None:
             existing.geometry = from_shape(Point(new_lon, new_lat), srid=4326)
 
+    # ── Multi-source confidence boost ──────────────────────────────────────────
+    # When multiple independent channels confirm the same event, raise reliability.
+    # Base: take the higher of the two channels' scores.
+    # Bonus: +1 if 3+ independent sources (capped at 5).
+    new_channel_rel = _channel_reliability(new_channel) or 1
+    current_rel = existing.source_reliability or 1
+    combined = max(current_rel, new_channel_rel)
+    if new_count >= 3:
+        combined = min(5, combined + 1)
+    if combined != existing.source_reliability:
+        existing.source_reliability = combined
+        logger.debug(
+            "Reliability boosted to %d for event #%d (%d sources)",
+            combined, existing.id, new_count,
+        )
+
     await session.commit()
     await session.refresh(existing)
     logger.info(
-        "Merged into event #%d (now %d reports from: %s)",
-        existing.id, existing.report_count, existing.reporting_channels,
+        "Merged into event #%d (now %d reports | reliability=%d | sources: %s)",
+        existing.id, new_count, existing.source_reliability or 0, existing.reporting_channels,
     )

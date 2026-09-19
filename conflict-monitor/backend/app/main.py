@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.db import engine
 from app.models import Base
+from app.routes.channels import router as channels_router
 from app.routes.events import router as events_router
 from app.routes.tracking import router as tracking_router
 from app.routes.ws import router as ws_router
@@ -33,19 +34,32 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
         await conn.run_sync(Base.metadata.create_all)
-        # Add columns that may be missing on existing tables
-        for col, default in [
-            ("report_count", "1"),
-            ("reporting_channels", "''"),
-            ("source_reliability", "NULL"),
-        ]:
+        # Add columns that may be missing on existing tables (safe, idempotent)
+        migrations = [
+            ("report_count",        "INTEGER", "1"),
+            ("reporting_channels",  "TEXT",    "''"),
+            ("source_reliability",  "INTEGER", "NULL"),
+            ("location_name",       "TEXT",    "''"),
+            ("telegram_message_id", "INTEGER", "NULL"),
+            ("source_url",          "TEXT",    "''"),
+        ]
+        for col, col_type, default in migrations:
             try:
                 await conn.execute(text(
                     f"ALTER TABLE events ADD COLUMN IF NOT EXISTS {col} "
-                    f"{'INTEGER' if col != 'reporting_channels' else 'TEXT'} DEFAULT {default}"
+                    f"{col_type} DEFAULT {default}"
                 ))
             except Exception:
                 pass
+
+        # Index on telegram_message_id for fast dedup lookups
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_events_tg_msg_id "
+                "ON events(telegram_message_id) WHERE telegram_message_id IS NOT NULL"
+            ))
+        except Exception:
+            pass
     logger.info("Database tables ready")
 
     tasks: list[asyncio.Task] = []
@@ -101,6 +115,11 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(start_maritime_poller()))
         logger.info("Maritime poller started")
 
+        # News feed ingestion (RSS from Reuters, BBC, Al Jazeera, Times of Israel, etc.)
+        from app.services.news_feeds import start_news_feed_poller
+        tasks.append(asyncio.create_task(start_news_feed_poller()))
+        logger.info("News feed poller started (RSS: Reuters, BBC, Al Jazeera, Times of Israel, Iran International, RFI, MEE)")
+
     for task in tasks:
         task.add_done_callback(_log_task_exception)
 
@@ -120,6 +139,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(channels_router)
 app.include_router(events_router)
 app.include_router(tracking_router)
 app.include_router(ws_router)

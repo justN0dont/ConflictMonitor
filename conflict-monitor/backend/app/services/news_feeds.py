@@ -1,0 +1,464 @@
+"""
+News Feed Ingestion Service
+============================
+Polls multiple open-source RSS feeds from major news agencies covering the
+Iran-Israel-US conflict. Runs the same classifier + geocoder pipeline as
+Telegram to produce structured events in the DB.
+
+Sources (no API keys required):
+  TIER 4 — Wire services / rigorous verification:
+  - Reuters World News            (cooperative model incentivises accuracy over speed)
+  - BBC Middle East               (strong verification; UK-establishment framing on context)
+  - AP News World                 (cooperative model, no shareholders = accuracy first)
+  - The War Zone (twz.com)        (best English-language military analysis publication)
+
+  TIER 3 — Useful, identifiable perspective, apply equal scrutiny to all:
+  - Al Jazeera English            (Qatar state media; pro-Arab framing; factual on events)
+  - Times of Israel               (Israeli perspective; subject to IDF military censorship)
+  - Iran International (English)  (Saudi-funded, anti-Islamic Republic; mirrors ToI from other side)
+  - RFI (France 24 Radio)         (French state radio; strong editorial independence in practice)
+  - Defense One                   (Atlantic Media; US defense policy focus; no documented bias)
+
+  EXCLUDED (documented reasons):
+  - Middle East Eye               (Qatar-funded, documented Muslim Brotherhood editorial ties;
+                                   functionally a perspective channel, not independent journalism)
+  - IRNA / PressTV                (Iranian state broadcaster — official narrative, not reporting)
+
+Articles are filtered by conflict-relevant keywords BEFORE sending to Claude,
+so we don't waste API credits on unrelated news. Only severity >= 3 events
+get saved (same threshold as Telegram ingestion).
+
+Polling interval: every 5 minutes per feed.
+
+NOTE ON BIAS (applies to ALL sources equally):
+  Every source in this list has some perspective. Reuters is Western. Al Jazeera is
+  Qatari. Iran International is Saudi-adjacent. Times of Israel is under IDF censorship.
+  The classifier strips loaded language from summaries, and our dedup pipeline merges
+  cross-source events so you can see how many independent outlets confirmed the same fact.
+  No single source should be trusted alone — the cross-confirmation score is the signal.
+"""
+
+import asyncio
+import hashlib
+import logging
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from xml.etree import ElementTree
+
+import httpx
+from geoalchemy2.shape import from_shape
+from shapely.geometry import Point
+from sqlalchemy import select
+
+from app.db import async_session
+from app.models import Event
+from app.services.broadcaster import broadcaster
+from app.schemas import EventRead, EventWS
+from app.services.classifier import classify_message
+from app.services.dedup import check_duplicate, merge_duplicate
+from app.services.geocoder import geocode
+
+logger = logging.getLogger(__name__)
+
+# ── CONFIG ─────────────────────────────────────────────────────────────────────
+
+POLL_INTERVAL = 300  # seconds between feed polls (5 min)
+MIN_SEVERITY = 3
+
+# Coordinates for unresolvable locations (Indian Ocean parking)
+UNKNOWN_LAT = -25.0
+UNKNOWN_LON = 80.0
+
+# ── FEED REGISTRY ──────────────────────────────────────────────────────────────
+
+FEEDS = [
+
+    # ── TIER 4 — Wire services / rigorous independent verification ─────────────
+
+    {
+        "url": "https://feeds.reuters.com/reuters/worldNews",
+        "source": "reuters",
+        "reliability": 4,
+        "bias_notes": (
+            "Tier-1 wire cooperative. Accuracy-over-speed model. "
+            "Western editorial perspective on geopolitical narratives; strong factual "
+            "standards on events. Corrections published prominently."
+        ),
+    },
+    {
+        "url": "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
+        "source": "bbc_mideast",
+        "reliability": 4,
+        "bias_notes": (
+            "UK public broadcaster. Strong editorial verification standards. "
+            "Some UK-establishment framing on geopolitical context; factual on events. "
+            "Covers the region continuously with dedicated correspondents."
+        ),
+    },
+    {
+        "url": "https://apnews.com/world-news.rss",
+        "source": "ap_news",
+        "reliability": 4,
+        "bias_notes": (
+            "Associated Press — cooperative model owned by its member news orgs. "
+            "No shareholders = accuracy incentivised over clicks. One of the few "
+            "wire services with no single geopolitical owner. Verification standards "
+            "equivalent to Reuters. Apply same Western-framing caveat on context."
+        ),
+    },
+    {
+        "url": "https://www.twz.com/feed",
+        "source": "the_war_zone",
+        "reliability": 4,
+        "bias_notes": (
+            "The War Zone (twz.com) — best English-language military analysis "
+            "publication. Deep technical sourcing on hardware, deployments, and "
+            "doctrine. Founded by Tyler Rogoway; strong track record. "
+            "US/Western focus but explicitly analytical rather than partisan. "
+            "Good for military capability and equipment events specifically."
+        ),
+    },
+
+    # ── TIER 3 — Useful with identifiable perspective — apply equal scrutiny ───
+    # Each of these serves a different geopolitical lens. None is "better" than
+    # the others from an accuracy standpoint. Use in combination; cross-confirmed
+    # events that appear in MULTIPLE of these sources carry more weight.
+
+    {
+        "url": "https://www.aljazeera.com/xml/rss/all.xml",
+        "source": "aljazeera",
+        "reliability": 3,
+        "bias_notes": (
+            "Qatar state media. Qatar simultaneously hosts CENTCOM and Hamas political "
+            "bureau — unique access, complex editorial interests. Pro-Arab/Palestinian "
+            "framing on context; generally factual on events. Provides perspective "
+            "largely absent from Western wire services."
+        ),
+    },
+    {
+        "url": "https://www.timesofisrael.com/feed/",
+        "source": "times_of_israel",
+        "reliability": 3,
+        "bias_notes": (
+            "Israeli perspective. Good primary Israeli source attribution. "
+            "CRITICAL CAVEAT: Israel's IDF Military Censor actively restricts "
+            "reporting on strikes ON Israeli territory (CPJ + RSF documented "
+            "March 2026). Events favourable to Iranian strikes may be delayed, "
+            "minimised or absent from Israeli media by law. Apply extra scepticism "
+            "to any absence of coverage of Israeli-territory events."
+        ),
+    },
+    {
+        "url": "https://www.iranintl.com/en/rss",
+        "source": "iran_international",
+        "reliability": 3,
+        "bias_notes": (
+            "UK-based English satellite channel. CPJ research documents "
+            "Saudi-adjacent funding and editorially opposes the Islamic Republic. "
+            "Functionally a mirror image of PressTV from the opposite direction — "
+            "will amplify Iranian military failures, downplay Iranian government "
+            "context. Facts on Iranian military actions are usually accurate; "
+            "framing is one-sided. Use alongside Al Jazeera to triangulate."
+        ),
+    },
+    {
+        "url": "https://www.rfi.fr/en/rss",
+        "source": "rfi",
+        "reliability": 3,
+        "bias_notes": (
+            "Radio France Internationale — French state radio with strong "
+            "editorial independence enforced by charter. Good Levant, Africa, "
+            "and Gulf coverage. France's independent diplomatic position "
+            "(not a NATO full member until 2009) gives somewhat different "
+            "Middle East framing than UK/US outlets."
+        ),
+    },
+    {
+        "url": "https://www.defenseone.com/rss/all/",
+        "source": "defense_one",
+        "reliability": 3,
+        "bias_notes": (
+            "Atlantic Media defense policy publication. US national security "
+            "focus — procurement, doctrine, strategy, and escalation analysis. "
+            "No documented political bias beyond general US-policy framing. "
+            "Better than general news for military capability/decision context. "
+            "Not a primary event-reporting source but strong on escalation signals."
+        ),
+    },
+
+    # ── EXCLUDED SOURCES (documented rationale) ─────────────────────────────────
+    # Middle East Eye — removed from active ingestion.
+    #   UK-registered outlet with documented editorial and financial ties to Qatar
+    #   and Muslim Brotherhood-aligned networks (per Middle East Forum and CPJ).
+    #   Not editorially independent journalism; functions as a perspective channel.
+    #   If added back, treat as reliability=2 (perspective-window, not reporting).
+    #
+    # IRNA / PressTV — Iranian state broadcasters.
+    #   Official Islamic Republic narrative. Factnameh study documents >95%
+    #   word-similarity with IRGC channel messaging = coordinated state narrative.
+    #   Same standard applied here as to any other government mouthpiece.
+]
+
+# ── KEYWORD FILTER ─────────────────────────────────────────────────────────────
+# Articles must contain at least one of these terms to be sent to the classifier.
+# This avoids burning API credits on unrelated news.
+
+CONFLICT_KEYWORDS = [
+    # Parties
+    "iran", "israel", "irgc", "idf", "mossad", "hezbollah", "hamas",
+    "houthi", "houthis", "ansar allah", "islamic revolutionary",
+    # Conflict terms
+    "missile", "strike", "attack", "bomb", "explosion", "airstrike", "air strike",
+    "drone", "ballistic", "cruise missile", "rocket", "intercept", "iron dome",
+    "kill", "killed", "dead", "casualties", "wounded", "destroyed",
+    # Locations
+    "tehran", "tel aviv", "haifa", "beirut", "damascus", "baghdad", "sanaa",
+    "hormuz", "red sea", "persian gulf", "natanz", "bushehr", "dimona",
+    "gaza", "west bank", "golan", "rafah",
+    # Nuclear
+    "nuclear", "enrichment", "uranium", "centrifuge", "warhead",
+    # Military/escalation
+    "carrier", "warship", "navy", "troops", "military", "escalation",
+    "retaliation", "ceasefire", "war", "combat",
+    # US involvement
+    "pentagon", "centcom", "camp david",
+]
+
+def _is_conflict_relevant(title: str, description: str) -> bool:
+    """Return True if this article is about the Iran-Israel-US conflict."""
+    combined = f"{title} {description}".lower()
+    return any(kw in combined for kw in CONFLICT_KEYWORDS)
+
+
+# ── SEEN ARTICLE CACHE ─────────────────────────────────────────────────────────
+# In-memory set of URL hashes to avoid re-processing on each poll.
+# Cleared on restart (acceptable — dedup check in DB handles that).
+
+_seen_hashes: set[str] = set()
+_MAX_SEEN = 5000  # prevent unbounded growth
+
+
+def _article_hash(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+def _already_seen(url: str) -> bool:
+    h = _article_hash(url)
+    if h in _seen_hashes:
+        return True
+    _seen_hashes.add(h)
+    if len(_seen_hashes) > _MAX_SEEN:
+        # Remove oldest ~500 entries (simple set doesn't track order, just clear half)
+        to_remove = list(_seen_hashes)[:500]
+        for item in to_remove:
+            _seen_hashes.discard(item)
+    return False
+
+
+# ── RSS PARSER ─────────────────────────────────────────────────────────────────
+
+def _parse_rss(xml_text: str) -> list[dict]:
+    """Parse RSS/Atom feed XML and return list of article dicts."""
+    articles = []
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError as e:
+        logger.error("RSS parse error: %s", e)
+        return articles
+
+    # Handle both RSS 2.0 (channel/item) and Atom (feed/entry)
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+    # RSS 2.0
+    channel = root.find("channel")
+    if channel is not None:
+        for item in channel.findall("item"):
+            title = (item.findtext("title") or "").strip()
+            desc = (item.findtext("description") or "").strip()
+            url = (item.findtext("link") or "").strip()
+            pub_date_str = item.findtext("pubDate")
+            try:
+                pub_date = parsedate_to_datetime(pub_date_str) if pub_date_str else datetime.now(timezone.utc)
+            except Exception:
+                pub_date = datetime.now(timezone.utc)
+            if url:
+                articles.append({"title": title, "description": desc, "url": url, "published": pub_date})
+        return articles
+
+    # Atom
+    for entry in root.findall("atom:entry", ns):
+        title = (entry.findtext("atom:title", namespaces=ns) or "").strip()
+        summary = (entry.findtext("atom:summary", namespaces=ns) or "").strip()
+        link_el = entry.find("atom:link", ns)
+        url = (link_el.get("href") if link_el is not None else "") or ""
+        published_str = entry.findtext("atom:published", namespaces=ns) or entry.findtext("atom:updated", namespaces=ns)
+        try:
+            pub_date = datetime.fromisoformat(published_str.replace("Z", "+00:00")) if published_str else datetime.now(timezone.utc)
+        except Exception:
+            pub_date = datetime.now(timezone.utc)
+        if url:
+            articles.append({"title": title, "description": summary, "url": url, "published": pub_date})
+
+    return articles
+
+
+# ── ARTICLE PROCESSOR ──────────────────────────────────────────────────────────
+
+async def _process_article(
+    title: str,
+    description: str,
+    url: str,
+    published: datetime,
+    source_name: str,
+    reliability: int,
+):
+    """Run one article through classify → geocode → save pipeline."""
+    # Build the text we'll classify (title + description)
+    full_text = f"{title}\n\n{description}".strip()
+    if len(full_text) < 20:
+        return
+
+    # Classify
+    result = await classify_message(full_text)
+    severity = result.get("severity", 5)
+
+    # Classifier flagged this as noise/commentary
+    if result.get("is_noise"):
+        logger.debug("RSS: noise/commentary dropped: %s", title[:60])
+        return
+
+    if severity < MIN_SEVERITY:
+        logger.debug("RSS: low severity (%d) — skipping: %s", severity, title[:60])
+        return
+
+    # Geocode
+    location_name = result.get("location_name", "Unknown")
+    coords = await geocode(location_name)
+    if coords:
+        lat, lon = coords
+        is_geolocated = True
+    else:
+        lat, lon = UNKNOWN_LAT, UNKNOWN_LON
+        is_geolocated = False
+
+    geometry = from_shape(Point(lon, lat), srid=4326)
+
+    async with async_session() as session:
+        # Check for semantic duplicates
+        existing = await check_duplicate(
+            session,
+            result.get("summary", ""),
+            result.get("event_type", "military"),
+            lat, lon,
+            published,
+        )
+        if existing:
+            await merge_duplicate(session, existing, source_name, severity, lat, lon)
+            ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
+            await broadcaster.broadcast(ws_payload.model_dump_json())
+            return
+
+        # Check for exact URL duplicate
+        result_check = await session.execute(
+            select(Event.id).where(Event.source_url == url).limit(1)
+        )
+        if result_check.scalar_one_or_none() is not None:
+            return
+
+        db_event = Event(
+            source=f"rss_{source_name}",
+            channel_name=source_name,
+            raw_text=full_text,
+            summary=result.get("summary", full_text[:200]),
+            event_type=result.get("event_type", "military"),
+            severity=severity,
+            lat=lat,
+            lon=lon,
+            geometry=geometry,
+            timestamp=published,
+            source_reliability=reliability,
+            location_name=location_name,
+            telegram_message_id=None,
+            source_url=url,
+            reporting_channels=source_name,
+        )
+        session.add(db_event)
+        await session.commit()
+        await session.refresh(db_event)
+
+        ws_payload = EventWS(type="new_event", event=EventRead.model_validate(db_event))
+        await broadcaster.broadcast(ws_payload.model_dump_json())
+        logger.info(
+            "RSS event #%d | sev=%d | loc='%s' -> (%.2f,%.2f) | geo=%s | %s",
+            db_event.id, severity, location_name, lat, lon, is_geolocated, url[:80],
+        )
+
+
+# ── FEED POLLER ────────────────────────────────────────────────────────────────
+
+async def _poll_feed(feed: dict, http_client: httpx.AsyncClient):
+    """Fetch and process one RSS feed."""
+    url = feed["url"]
+    source = feed["source"]
+    reliability = feed["reliability"]
+
+    try:
+        resp = await http_client.get(url, timeout=15, follow_redirects=True)
+        if resp.status_code != 200:
+            logger.warning("RSS %s returned HTTP %d", source, resp.status_code)
+            return
+    except Exception as e:
+        logger.warning("RSS fetch failed for %s: %s", source, e)
+        return
+
+    articles = _parse_rss(resp.text)
+    if not articles:
+        logger.debug("RSS %s: no articles parsed", source)
+        return
+
+    new_count = 0
+    for article in articles:
+        art_url = article["url"]
+        if not art_url or _already_seen(art_url):
+            continue
+        if not _is_conflict_relevant(article["title"], article["description"]):
+            continue
+        await _process_article(
+            title=article["title"],
+            description=article["description"],
+            url=art_url,
+            published=article["published"],
+            source_name=source,
+            reliability=reliability,
+        )
+        new_count += 1
+        # Small delay between classifier calls to avoid rate limits
+        await asyncio.sleep(0.5)
+
+    if new_count:
+        logger.info("RSS %s: processed %d relevant articles", source, new_count)
+
+
+# ── BACKGROUND TASK ENTRYPOINT ─────────────────────────────────────────────────
+
+async def start_news_feed_poller():
+    """Continuously poll all RSS feeds. Runs forever as a background task."""
+    logger.info("News feed poller starting — monitoring %d feeds", len(FEEDS))
+
+    headers = {
+        "User-Agent": "ConflictMonitor/1.0 (research; contact: admin@localhost)",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+
+    async with httpx.AsyncClient(headers=headers) as http_client:
+        while True:
+            for feed in FEEDS:
+                try:
+                    await _poll_feed(feed, http_client)
+                except Exception as e:
+                    logger.exception("Unhandled error polling %s: %s", feed["source"], e)
+                # Small gap between feeds
+                await asyncio.sleep(2)
+
+            logger.debug("News feed poll cycle complete — sleeping %ds", POLL_INTERVAL)
+            await asyncio.sleep(POLL_INTERVAL)

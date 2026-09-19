@@ -240,8 +240,8 @@ export function CesiumView({
     // Dark space background
     viewer.scene.skyBox = undefined as any;
     viewer.scene.backgroundColor = Cesium.Color.fromCssColorString("#030508");
-    viewer.scene.sun.show = false;
-    viewer.scene.moon.show = false;
+    if (viewer.scene.sun) viewer.scene.sun.show = false;
+    if (viewer.scene.moon) viewer.scene.moon.show = false;
     viewer.scene.globe.enableLighting = false;
     viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#0c1520");
 
@@ -261,11 +261,7 @@ export function CesiumView({
 
     // Terrain
     if (ionToken) {
-      Cesium.createWorldTerrainAsync()
-        .then((terrain) => {
-          viewer.scene.setTerrain(new Cesium.Terrain(terrain));
-        })
-        .catch(() => {});
+      viewer.scene.setTerrain(new Cesium.Terrain(Cesium.createWorldTerrainAsync()));
     }
 
     // Initial camera: Middle East

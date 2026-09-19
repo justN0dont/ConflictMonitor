@@ -33,3 +33,20 @@ class Event(Base):
     report_count: Mapped[int] = mapped_column(Integer, default=1)
     reporting_channels: Mapped[str] = mapped_column(Text, default="")
     source_reliability: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    location_name: Mapped[str] = mapped_column(Text, default="")
+    telegram_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_url: Mapped[str] = mapped_column(Text, default="")
+
+
+class ChannelCheckpoint(Base):
+    """Stores the highest processed Telegram message_id per channel.
+    On restart, backfill only fetches messages NEWER than this ID,
+    so we never re-process old data or waste API credits.
+    """
+    __tablename__ = "channel_checkpoints"
+
+    channel_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    last_message_id: Mapped[int] = mapped_column(Integer, default=0)
+    last_processed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
