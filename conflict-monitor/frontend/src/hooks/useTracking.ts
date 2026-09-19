@@ -39,7 +39,7 @@ export interface JammingStatus {
 
 export type SensorKey = "bgp" | "ping-slash24" | "merit-nt" | "gtr";
 
-/** One IODA sensor, scored against its OWN 24h baseline. */
+/** One IODA sensor, scored against its OWN baseline and its OWN normal swing. */
 export interface ConnectivitySensor {
   /** False means this sensor could not be read OR could not be scored. */
   available: boolean;
@@ -53,8 +53,30 @@ export interface ConnectivitySensor {
   reason: string | null;
   baseline: number | null;
   current: number | null;
-  /** Fraction, e.g. -0.31. null whenever the sensor is unavailable. */
+  /**
+   * Fraction, e.g. -0.31. The human-readable magnitude - and no longer what
+   * decides anything, because the four sensors have wildly different natural
+   * variance and -30% means catastrophe on bgp and a normal evening on gtr.
+   * null whenever the sensor is unavailable.
+   */
   deviation: number | null;
+  /** This sensor's own normal swing, MAD/median. The denominator of robust_z. */
+  typical: number | null;
+  /** deviation / typical. THIS is what decides. null when z_basis is not "relative". */
+  robust_z: number | null;
+  /**
+   * Which rule was applied: "relative" (judged by robust_z) | "flat-sensor-absolute"
+   * (no swing to divide by, so z is null and a 2% move is the test) |
+   * "unavailable". The UI never has to guess why a null z is null.
+   */
+  z_basis: "relative" | "flat-sensor-absolute" | "unavailable";
+  /**
+   * LONG baseline only: the week's slope as a fraction of the baseline per day.
+   * A STEADY decline inflates its own denominator and is pinned at z = -2.33
+   * whatever its slope, so the backend reports this and never votes with it.
+   * null on the short baseline and on any unavailable sensor.
+   */
+  trend_per_day: number | null;
   depressed: boolean;
   points: number;
   /** 24h buckets, downsampled. null = not measured in that bucket, NOT zero. */
@@ -64,16 +86,64 @@ export interface ConnectivitySensor {
   data_age: number | null;
 }
 
+/** One Cloudflare Radar outage annotation - a second organisation's reading. */
+export interface RadarOutage {
+  id: string | null;
+  locations: string[];
+  event_type: string | null;
+  start: string | null;
+  end: string | null;
+  ongoing: boolean;
+  /** POWER_OUTAGE | GOVERNMENT_DIRECTED | CYBERATTACK | NATURAL_DISASTER | ... */
+  cause: string | null;
+  scope: string | null;
+  asns: number[];
+}
+
 export interface CountryConnectivity {
   code: string;
   name: string;
+  /** SHORT baseline: the same clock hours yesterday. Catches a sudden cut. */
   sensors: Record<SensorKey, ConnectivitySensor>;
   sensors_available: number;
   sensors_depressed: number;
+  /**
+   * LONG baseline: the last 24h against the median of days 2-7. Catches a
+   * sustained decline, which the short baseline cannot see at all - after a day
+   * of outage the 24h baseline IS the outage. Never blended with the short one.
+   */
+  sensors_long: Record<SensorKey, ConnectivitySensor>;
+  sensors_long_available: number;
+  sensors_long_depressed: number;
   /** The backend never averages the four; this is the corroboration verdict. */
-  state: "nominal" | "partial" | "disruption" | "degraded";
+  state:
+    | "nominal"
+    | "partial"
+    | "disruption_sudden"
+    | "disruption_sustained"
+    | "degraded";
+  /** Which baseline the state came off. null when nothing fired. */
+  basis: "short" | "long" | "both" | null;
   /** Most negative deviation among AVAILABLE sensors. null = nothing measured. */
   worst_deviation: number | null;
+  worst_deviation_long: number | null;
+  /**
+   * Cloudflare Radar's independent view of the same country. A different
+   * organisation, a different method - reported BESIDE the sensor count and
+   * never folded into it.
+   */
+  corroboration: {
+    source: string;
+    /** False = Radar's OUTAGES call has told us nothing, so neither does this. */
+    available: boolean;
+    /** True = these are the last good annotations, not this poll's. */
+    stale: boolean;
+    /** When the annotations being served were actually fetched. */
+    as_of: number;
+    ongoing_outage: boolean;
+    outages: RadarOutage[];
+    independent: boolean;
+  };
   as_of: number;
 }
 
@@ -82,7 +152,42 @@ export interface ConnectivityStatus {
   as_of: number;
   /** Backend poll cadence in seconds - what "stale" means for these rows. */
   poll_interval: number;
-  cloudflare: { configured: boolean };
+  /** The 7-day baseline runs on its own slower clock and is cached between. */
+  long_poll_interval: number;
+  long_as_of: number;
+  long_status: "ok" | "no_data" | "unavailable";
+  cloudflare: {
+    configured: boolean;
+    status: "ok" | "no_data" | "unconfigured" | "error" | "degraded";
+    error: string | null;
+    as_of: number;
+    poll_interval: number;
+    /**
+     * Radar is TWO calls that fail independently, so each carries its own
+     * status: "stale" means the last good answer is being served because this
+     * poll's call failed. One combined word could not tell "stale outages,
+     * fresh attacks" from its mirror image.
+     */
+    outages_status: "ok" | "stale" | "error" | "unconfigured" | "no_data";
+    outages_as_of: number;
+    attacks_status: "ok" | "stale" | "error" | "unconfigured" | "no_data";
+    attacks_as_of: number;
+    /** Outages in countries NOT on the watchlist - the discovery channel. */
+    discovery: RadarOutage[];
+    attacks: {
+      date_range: string;
+      units: unknown;
+      normalization: string | null;
+      last_updated: string | null;
+      targets: {
+        code: string | null;
+        name: string | null;
+        /** Percentage share of OBSERVED layer-7 attack traffic. Has a denominator. */
+        share: number | null;
+        rank: number | null;
+      }[];
+    } | null;
+  };
 }
 
 export interface Vessel {
@@ -129,7 +234,22 @@ export function useTracking() {
     status: "no_data",
     as_of: 0,
     poll_interval: 300,
-    cloudflare: { configured: false },
+    long_poll_interval: 3600,
+    long_as_of: 0,
+    long_status: "no_data",
+    cloudflare: {
+      configured: false,
+      status: "no_data",
+      error: null,
+      as_of: 0,
+      poll_interval: 900,
+      outages_status: "no_data",
+      outages_as_of: 0,
+      attacks_status: "no_data",
+      attacks_as_of: 0,
+      discovery: [],
+      attacks: null,
+    },
   });
   const [aircraftTracks, setAircraftTracks] = useState<TrackHistory>({});
   const [vesselTracks, setVesselTracks] = useState<TrackHistory>({});
@@ -186,7 +306,22 @@ export function useTracking() {
             status: data.status ?? "no_data",
             as_of: data.as_of ?? 0,
             poll_interval: data.poll_interval ?? 300,
-            cloudflare: data.cloudflare ?? { configured: false },
+            long_poll_interval: data.long_poll_interval ?? 3600,
+            long_as_of: data.long_as_of ?? 0,
+            long_status: data.long_status ?? "no_data",
+            cloudflare: data.cloudflare ?? {
+              configured: false,
+              status: "no_data",
+              error: null,
+              as_of: 0,
+              poll_interval: 900,
+              outages_status: "no_data",
+              outages_as_of: 0,
+              attacks_status: "no_data",
+              attacks_as_of: 0,
+              discovery: [],
+              attacks: null,
+            },
           });
         }
       } catch { /* backend unavailable */ }

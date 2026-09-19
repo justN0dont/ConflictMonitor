@@ -40,12 +40,40 @@ async def connectivity():
 
     Four independent sensors (bgp, ping-slash24, merit-nt, gtr) are reported
     separately and never averaged: agreement between them is the confidence
-    signal.  Per-country `state` is "disruption" (3+ sensors depressed against
-    their own 24h baselines), "partial" (2 — corroborated only in part),
-    "nominal" (0 or 1, since one sensor alone is a measurement artifact) or
-    "degraded" (fewer than 2 sensors available, so no claim is possible).
-    `status` distinguishes a real measurement from an unfetched one: "ok",
-    "no_data" (nothing polled yet) or "unavailable" (IODA did not answer).
+    signal.  Each is judged against ITS OWN normal swing — robust_z =
+    deviation / typical — because the four have wildly different natural
+    variance and one shared percentage threshold cannot serve both a sensor
+    that moves 19% on a quiet evening and one that has not moved all week.
+    `typical` is measured on THE SAME COMPARISON the deviation makes (the
+    short baseline's hourly same-clock-hour test, replayed across the day; the
+    long baseline's daily medians), never on the raw trace, whose spread is
+    the diurnal cycle.  `deviation` is still reported as the human-readable
+    magnitude, but `robust_z` is what decides; `z_basis` says which rule was
+    applied ("relative", or "flat-sensor-absolute" for a sensor with no swing
+    to divide by, whose z is therefore null).
+
+    TWO baselines are scored separately and never blended: `sensors` against
+    the same clock hours yesterday (a sudden cut) and `sensors_long` against
+    the median of days 2-7 (a step down inside the week, which a trailing 24h
+    baseline cannot see because it normalises to the outage).  A STEADY
+    decline is invisible to both — it inflates its own denominator — so the
+    long sensors also carry `trend_per_day`, the week's slope, which is
+    reported and never voted with.  Per-country `state` is "disruption_sudden"
+    / "disruption_sustained" (a MAJORITY of the available sensors depressed on
+    that baseline, and never fewer than two), "partial" (2 depressed on either
+    baseline but not a majority), "nominal" (0 or 1, since one sensor alone is
+    a measurement artifact) or "degraded" (fewer than 2 sensors available on
+    the short baseline and nothing fired, so no claim is possible); `basis`
+    names which baseline fired.
+
+    `corroboration` carries Cloudflare Radar's independent view of the same
+    country — a different organisation measuring by a different method, and
+    reported beside the IODA count rather than averaged into it.  Its
+    `available`/`stale`/`as_of` track the OUTAGES call on its own, because
+    Radar's two calls fail independently and last-good annotations must never
+    read as this poll's.  `status` distinguishes a real measurement from an
+    unfetched one: "ok", "no_data" (nothing polled yet) or "unavailable"
+    (IODA did not answer).
     """
     return get_connectivity()
 

@@ -9,10 +9,19 @@
  * THE Y-DOMAIN IS ANCHORED TO THE BASELINE, NOT MIN-MAXED.
  * Auto-scaling each series to its own min and max is the classic sparkline lie:
  * a BGP series that sat at 4759 +/- 1 all day would draw as a mountain range and
- * read as chaos. Here the domain is a FRACTION OF NORMAL - [0.6, 1.1] of the
- * sensor's level at this hour yesterday, widened only if the data leaves it. So
- * a steady country draws flat near the top, the -30% depression threshold always
- * sits at the same height, and a real collapse actually falls off the box.
+ * read as chaos. Here the domain is a FRACTION OF NORMAL - of the sensor's level
+ * at this hour yesterday, widened only if the data leaves it. So a steady country
+ * draws flat near the top and a real collapse falls off the box.
+ *
+ * THE BOX IS SCALED TO THE RULE THAT JUDGED THIS SENSOR, not to a fixed -30%.
+ * There is no -30% threshold any more: each sensor fires at its own multiple of
+ * its own swing, and a flat sensor fires at -2%. A box pinned to [0.6, 1.1]
+ * drew a firing bgp sensor - routes withdrawn, the exact signature this layer
+ * exists to catch - as a straight line 0.7px below normal on a row lit red, the
+ * picture flatly contradicting the verdict beside it. Passing the sensor's own
+ * firing deviation puts that threshold at the same HEIGHT on every row, which is
+ * the comparison worth keeping: the percentage it stands for differs per sensor
+ * because the sensors differ, and that was always the point.
  *
  * The 24h trace therefore shows a diurnal sensor's nightly dip while the row
  * beside it reads nominal. That is not a contradiction: the dip is measured
@@ -26,9 +35,19 @@
  * there is no draw-in, no dash-offset reveal, no transition on the geometry.
  */
 
-/** Fraction-of-baseline window the box always covers, so rows read alike. */
-const FLOOR = 0.6;
-const CEIL = 1.1;
+/**
+ * Where this sensor's firing deviation sits in the box: a fifth of the way up
+ * from the floor, a quarter of the box above normal. At the -30% these numbers
+ * were derived from they give exactly the [0.6, 1.1] this box used to be fixed
+ * at, so a -30% sensor draws today what it drew before.
+ */
+const BELOW = 4 / 3;
+const ABOVE = 1 / 3;
+/** Fallback when the caller has no rule to hand: the old fixed box. */
+const DEFAULT_THRESHOLD = -0.3;
+/** A box narrower than +/-0.5% would draw quantisation; wider than 60% is a plot. */
+const MIN_THRESHOLD = 0.005;
+const MAX_THRESHOLD = 0.6;
 
 interface SparklineProps {
   /** Downsampled 24h buckets; null = not measured in that bucket. */
@@ -41,6 +60,14 @@ interface SparklineProps {
   color: string;
   /** Names the sensor being drawn - a sparkline has no axis to say it. */
   title: string;
+  /**
+   * The deviation at which THIS sensor fires, as a negative fraction: z
+   * threshold times its own swing, or the flat rule's -2%. The box is built
+   * round it so the drawn line agrees with the verdict.
+   */
+  threshold?: number | null;
+  /** Which clock the buckets came off, for the "nothing to draw" case. */
+  window?: string;
   width?: number;
   height?: number;
 }
@@ -51,6 +78,8 @@ export function Sparkline({
   lit,
   color,
   title,
+  threshold,
+  window: windowLabel = "24h",
   width = 64,
   height = 20,
 }: SparklineProps) {
@@ -67,7 +96,7 @@ export function Sparkline({
       <div
         className="text-[10px] leading-none text-[var(--text-muted)]"
         style={{ width, height, lineHeight: `${height}px` }}
-        title={`${title} — no 24h trace to draw`}
+        title={`${title} — no ${windowLabel} trace to draw`}
       >
         —
       </div>
@@ -79,8 +108,12 @@ export function Sparkline({
     v == null || !Number.isFinite(v) ? null : v / base,
   );
   const measured = ratios.filter((r): r is number => r != null);
-  const lo = Math.min(FLOOR, ...measured);
-  const hi = Math.max(CEIL, ...measured);
+  const fires =
+    threshold != null && Number.isFinite(threshold) && threshold < 0
+      ? Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, Math.abs(threshold)))
+      : Math.abs(DEFAULT_THRESHOLD);
+  const lo = Math.min(1 - fires * BELOW, ...measured);
+  const hi = Math.max(1 + fires * ABOVE, ...measured);
   const span = hi - lo || 1;
 
   // Half the 2px stroke would clip on every edge without this inset.

@@ -67,11 +67,34 @@ export function IndicatorRow({
   row,
   tall,
   spark,
+  badge,
+  quiet,
+  valueCaption,
 }: {
   row: Row;
   tall?: boolean;
   /** Optional 24h trace. Occupies its own fixed column so values stay aligned. */
   spark?: ReactNode;
+  /**
+   * A chip beside the name. CONNECTIVITY hangs its independent-corroboration
+   * mark here, where it sits next to the country rather than inside the note -
+   * it is a different KIND of evidence from the sensor count and must not read
+   * as part of it.
+   */
+  badge?: ReactNode;
+  /**
+   * Demote the value to muted 11px. For rows whose number is measured but
+   * unimportant: on the connectivity rail the percentage is anti-correlated
+   * with what deserves attention, so a row where nothing is wrong must not
+   * shout the loudest number on the panel.
+   */
+  quiet?: boolean;
+  /**
+   * A tiny line under the value saying what it is and which window it came
+   * from ("NORMAL, 7D"). Without it a row showing two clocks makes the reader
+   * guess which one the headline belongs to.
+   */
+  valueCaption?: string | null;
 }) {
   const status = STATUS[STATE_STATUS[row.state]];
   const Icon: LucideIcon = status.Icon;
@@ -84,7 +107,7 @@ export function IndicatorRow({
   // 18px right of the row above it. Without a trace there is no middle column
   // to shift, so IndicatorRail keeps the auto column it always had.
   const cols = spark
-    ? "grid-cols-[14px_minmax(0,1fr)_64px_56px]"
+    ? "grid-cols-[14px_minmax(0,1fr)_56px_68px]"
     : "grid-cols-[14px_minmax(0,1fr)_auto]";
   return (
     <div
@@ -101,8 +124,11 @@ export function IndicatorRow({
         aria-hidden="true"
       />
       <div className="min-w-0">
-        <div className="truncate text-[11px] font-semibold tracking-[0.09em] text-[var(--text-primary)]">
-          {row.name}
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-[11px] font-semibold tracking-[0.09em] text-[var(--text-primary)]">
+            {row.name}
+          </span>
+          {badge}
         </div>
         <div className="mt-[2px] flex min-w-0 items-baseline gap-1.5">
           <span
@@ -127,9 +153,20 @@ export function IndicatorRow({
       </div>
       {spark && <div className="mt-[3px] flex justify-end">{spark}</div>}
       <div className="text-right">
-        <div className="text-[15px] font-semibold leading-[1.2] tabular-nums text-[var(--text-primary)]">
+        <div
+          className={
+            quiet
+              ? "text-[11px] leading-[1.2] tabular-nums text-[var(--text-muted)]"
+              : "text-[15px] font-semibold leading-[1.2] tabular-nums text-[var(--text-primary)]"
+          }
+        >
           {row.value}
         </div>
+        {valueCaption && (
+          <div className="mt-[1px] whitespace-nowrap text-[8px] leading-[1.2] tracking-[0.04em] text-[var(--text-muted)]">
+            {valueCaption}
+          </div>
+        )}
         <div
           className="mt-[3px] text-[10px] tabular-nums text-[var(--text-secondary)]"
           style={{ fontFamily: "var(--font-mono)" }}
