@@ -4,15 +4,9 @@ import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingStatus, JammingZone, TLERecord, TrackHistory, Vessel } from "../hooks/useTracking";
 import { GlobeView } from "./GlobeView";
 import { CesiumView } from "./CesiumView";
+import { EVENT_TYPES, eventVisual } from "../lib/tokens";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
-
-const EVENT_COLORS: Record<string, string> = {
-  military: "#f85149",
-  diplomatic: "#58a6ff",
-  economic: "#d29922",
-  cyber: "#bc8cff",
-};
 
 interface MapPanelProps {
   events: ConflictEvent[];
@@ -35,7 +29,7 @@ function PingMarker({
   isNew: boolean;
   onClick: () => void;
 }) {
-  const color = EVENT_COLORS[evt.event_type] ?? "#888";
+  const color = eventVisual(evt.event_type).color;
   const isHighSeverity = evt.severity >= 8;
   // Core size: 6-10px based on severity
   const dotSize = 6 + evt.severity * 0.4;
@@ -572,9 +566,9 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
               letterSpacing: 0.5,
             }}
           >
-            {Object.entries(EVENT_COLORS).map(([type, color]) => (
+            {EVENT_TYPES.map(({ key, label, color, Icon }) => (
               <div
-                key={type}
+                key={key}
                 style={{ display: "flex", alignItems: "center", gap: 4 }}
               >
                 <div
@@ -586,13 +580,14 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                     boxShadow: `0 0 4px ${color}66`,
                   }}
                 />
+                <Icon size={11} strokeWidth={2.25} style={{ color }} aria-hidden="true" />
                 <span
                   style={{
                     color: "var(--text-secondary)",
                     textTransform: "uppercase",
                   }}
                 >
-                  {type}
+                  {label}
                 </span>
               </div>
             ))}
@@ -676,9 +671,9 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
             }}
           >
             <div style={{ display: "flex", gap: 12 }}>
-              {Object.entries(EVENT_COLORS).map(([type, color]) => (
+              {EVENT_TYPES.map(({ key, label, color, Icon }) => (
                 <div
-                  key={type}
+                  key={key}
                   style={{ display: "flex", alignItems: "center", gap: 4 }}
                 >
                   <div
@@ -689,8 +684,9 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                       background: color,
                     }}
                   />
+                  <Icon size={11} strokeWidth={2.25} style={{ color }} aria-hidden="true" />
                   <span style={{ color: "var(--text-secondary)", textTransform: "uppercase" }}>
-                    {type}
+                    {label}
                   </span>
                 </div>
               ))}

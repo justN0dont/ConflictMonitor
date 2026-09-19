@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConflictEvent } from "../types/event";
-
-const EVENT_COLORS: Record<string, string> = {
-  military: "#f85149",
-  diplomatic: "#58a6ff",
-  economic: "#d29922",
-  cyber: "#bc8cff",
-};
+import { eventVisual } from "../lib/tokens";
 
 const SPEEDS = [1, 2, 5, 10, 30];
 
@@ -285,7 +279,7 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
               transform: "translate(-50%, -50%)",
               width: 1.5,
               height: 4 + tick.severity * 1.5,
-              background: EVENT_COLORS[tick.type] || "#888",
+              background: eventVisual(tick.type).color,
               opacity: 0.6,
               borderRadius: 1,
               pointerEvents: "none",

@@ -12,17 +12,16 @@ import {
 import type { EciVec3 } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
+import { EVENT_TYPES, eventVisual, type EventKey } from "../lib/tokens";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const EVENT_COLORS: Record<string, Cesium.Color> = {
-  military: Cesium.Color.fromCssColorString("#f85149"),
-  diplomatic: Cesium.Color.fromCssColorString("#58a6ff"),
-  economic: Cesium.Color.fromCssColorString("#d29922"),
-  cyber: Cesium.Color.fromCssColorString("#bc8cff"),
-};
+/** Token colours as Cesium.Color, converted once - never in a render loop. */
+const EVENT_CESIUM_COLORS = Object.fromEntries(
+  EVENT_TYPES.map((e) => [e.key, Cesium.Color.fromCssColorString(e.color)]),
+) as Record<EventKey, Cesium.Color>;
 
 const AIRCRAFT_COLOR = Cesium.Color.fromCssColorString("#58d0ff");
 const VESSEL_COLOR = Cesium.Color.fromCssColorString("#40e0d0");
@@ -357,7 +356,7 @@ export function CesiumView({
       const id = `evt-${evt.id}`;
       existingIds.add(id);
       let entity = source.entities.getById(id);
-      const color = EVENT_COLORS[evt.event_type] || Cesium.Color.GRAY;
+      const color = EVENT_CESIUM_COLORS[eventVisual(evt.event_type).key];
       const isHigh = evt.severity >= 8;
       const size = 12 + evt.severity * 3;
 

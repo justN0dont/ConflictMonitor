@@ -13,17 +13,11 @@ import {
 import type { EciVec3, SatRec } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
+import { eventVisual } from "../lib/tokens";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-const EVENT_COLORS: Record<string, string> = {
-  military: "#f85149",
-  diplomatic: "#58a6ff",
-  economic: "#d29922",
-  cyber: "#bc8cff",
-};
 
 const EARTH_RADIUS = 1;
 
@@ -210,7 +204,7 @@ function EventMarker({ evt }: { evt: ConflictEvent }) {
     () => latLonToVec3(evt.lat!, evt.lon!, EARTH_RADIUS * 1.005),
     [evt.lat, evt.lon],
   );
-  const color = EVENT_COLORS[evt.event_type] || "#888";
+  const color = eventVisual(evt.event_type).color;
   const size = 0.003 + evt.severity * 0.0008;
 
   useFrame(({ clock }) => {

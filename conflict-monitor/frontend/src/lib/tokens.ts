@@ -13,10 +13,6 @@
  * than inventing a fourth hue.
  *
  * Identity is never colour alone: each entry also carries a distinct shape.
- *
- * MIGRATION DEBT: MapPanel.tsx, GlobeView.tsx, CesiumView.tsx and
- * TimelineScrubber.tsx still each carry their own local EVENT_COLORS map (five
- * copies, already drifted); they still need migrating onto this module.
  */
 import {
   Banknote,
@@ -36,7 +32,8 @@ export type EventKey = "military" | "diplomatic" | "economic" | "other";
 export interface EventVisual {
   key: EventKey;
   label: string;
-  /** Categorical hue, or secondary ink for "other". */
+  /** Categorical hue, or secondary ink for "other". A literal CSS colour:
+   *  three.js and Cesium parse this themselves and cannot read a `var()`. */
   color: string;
   Icon: LucideIcon;
 }
@@ -46,7 +43,7 @@ export const EVENT_TYPES: EventVisual[] = [
   { key: "military", label: "Military", color: "#3987e5", Icon: Crosshair },
   { key: "diplomatic", label: "Diplomatic", color: "#d95926", Icon: Handshake },
   { key: "economic", label: "Economic", color: "#199e70", Icon: Banknote },
-  { key: "other", label: "Other", color: "var(--text-secondary)", Icon: Diamond },
+  { key: "other", label: "Other", color: "#8ea3bb", Icon: Diamond }, // --cat-other
 ];
 
 const BY_KEY: Record<string, EventVisual> = Object.fromEntries(
