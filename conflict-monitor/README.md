@@ -4,6 +4,10 @@ Real-time geopolitical conflict monitoring dashboard. Ingests OSINT Telegram cha
 
 Built in response to [Bilawal Sidhu's WorldView](https://www.spatialintelligence.ai/p/i-built-a-spy-satellite-simulator) — this is the analysis layer that sits behind the visualization.
 
+> **Known issues, measurements and roadmap:** [`docs/FINDINGS.md`](docs/FINDINGS.md) — a living
+> register of verified defects, sensor-coverage measurements, and the phased plan. Updated in the
+> same commit as the change it describes.
+
 ## Quick Start (Demo Mode)
 
 No API keys required:
