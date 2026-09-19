@@ -9,3 +9,5 @@ sessions/
 dist/
 frontend/dist/
 *.tsbuildinfo
+.cache/
+backend/.cache/
