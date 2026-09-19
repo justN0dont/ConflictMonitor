@@ -88,12 +88,23 @@ async def _fix_null_coords_task():
         location_name = (getattr(ev, "location_name", "") or "").strip()
         new_severity = ev.severity
         new_summary = ev.summary
+        reclassified_model = None
 
         # If location_name is blank/unknown, try re-classifying from raw text
         if not location_name or location_name.lower() in ("unknown", "n/a", ""):
             if ev.raw_text and ev.raw_text.strip():
                 try:
                     classified = await classify_message(ev.raw_text)
+                    if classified.get("extraction_status") != "ok":
+                        # A fallback is a regex scrape of the raw text, not a
+                        # classification. Writing its summary onto the row while
+                        # the row keeps its old status files output no model
+                        # produced as though it had been extracted.
+                        logger.debug(
+                            "Re-classify for #%d returned %s — leaving the row alone",
+                            ev.id, classified.get("extraction_status"),
+                        )
+                        continue
                     location_name = (classified.get("location_name") or "").strip()
                     # A re-classification that produced no severity must not
                     # erase the one already on the row.
@@ -101,6 +112,7 @@ async def _fix_null_coords_task():
                     if reclassified_severity is not None:
                         new_severity = reclassified_severity
                     new_summary = classified.get("summary", ev.summary)
+                    reclassified_model = classified.get("extraction_model")
                 except Exception as e:
                     logger.warning("Re-classify failed for event #%d: %s", ev.id, e)
                     continue
@@ -126,6 +138,12 @@ async def _fix_null_coords_task():
                 db_ev.location_name = location_name
                 db_ev.severity = new_severity
                 db_ev.summary = new_summary
+                if reclassified_model:
+                    # The row now carries this model's output, so it carries its
+                    # provenance too — otherwise a healed row still reads as the
+                    # failure it used to be.
+                    db_ev.extraction_status = "ok"
+                    db_ev.extraction_model = reclassified_model
                 db_ev.is_geolocated = True
                 db_ev.geo_precision = geo.precision
                 db_ev.geo_uncertainty_m = geo.uncertainty_m
@@ -193,6 +211,10 @@ async def _reclassify_vague_locations_task():
     for ev in to_fix:
         try:
             classified = await classify_message(ev.raw_text)
+            if classified.get("extraction_status") != "ok":
+                # Same rule as fix-null-coords: only a real classification may
+                # overwrite a row, and only while stamping its own provenance.
+                continue
             new_loc = (classified.get("location_name") or "").strip()
 
             # Only update if we got something more specific
@@ -221,6 +243,8 @@ async def _reclassify_vague_locations_task():
                         db_ev.severity = classified["severity"]
                     if classified.get("summary"):
                         db_ev.summary = classified["summary"]
+                    db_ev.extraction_status = "ok"
+                    db_ev.extraction_model = classified.get("extraction_model")
                     await session.commit()
                     improved += 1
                     logger.info(

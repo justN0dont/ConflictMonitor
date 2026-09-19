@@ -37,11 +37,19 @@ export interface ConflictEvent {
   source_url?: string;
   /**
    * "ok" when classification succeeded; "rate_limited" / "parse_failed" /
-   * "llm_failed" / "api_<code>" when it did NOT and the row is a regex-only
-   * fallback (which stamps event_type=military and leaves severity null). null
-   * when the field was never written - unknown, not a failure.
+   * "llm_failed" / "api_<code>" / "no_backend" / "bad_backend" /
+   * "ollama_unreachable" / "ollama_timeout" / "ollama_model_missing" /
+   * "ollama_http_<code>" when it did NOT and the row is a regex-only fallback
+   * (which stamps event_type=military and leaves severity null). null when the
+   * field was never written - unknown, not a failure.
    */
   extraction_status?: string | null;
+  /**
+   * Which model classified this row ("qwen3:8b", "claude-haiku-4-5-20251001").
+   * null on rows written before the column existed, and on fallbacks that
+   * never reached a model.
+   */
+  extraction_model?: string | null;
   /** false when lat/lon are a guess rather than a resolved location. */
   is_geolocated?: boolean | null;
 

@@ -4,6 +4,7 @@ import logging
 import re
 
 import anthropic
+import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config import settings
@@ -248,6 +249,24 @@ def _regex_location_fallback(text: str) -> str | None:
 
 _client: anthropic.AsyncAnthropic | None = None
 
+# Recorded as extraction_model on every row this backend produces, so a row
+# can say which model classified it instead of the reader having to guess.
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"  # Haiku: faster + cheaper for classification
+
+# There is ONE GPU. The RSS poller classifies articles in a loop, and
+# concurrent /api/generate calls would thrash VRAM (and on a cold start can
+# make Ollama load the model more than once). One generate at a time.
+_OLLAMA_SEM = asyncio.Semaphore(1)
+
+# One budget, named once. A cold start loads the model into VRAM and measured
+# ~20s, so 30s would fail every cold start; a bigger model would take longer.
+_OLLAMA_TIMEOUT = 180.0
+
+# qwen3 is a reasoning model. With format:"json" it emitted no <think> block in
+# testing, but if it ever does the block precedes the JSON and would otherwise
+# read as a parse failure. Leading only — never strip mid-payload.
+_THINK_RE = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
+
 
 def _get_client() -> anthropic.AsyncAnthropic:
     global _client
@@ -256,97 +275,221 @@ def _get_client() -> anthropic.AsyncAnthropic:
     return _client
 
 
+def _handle_response(
+    text: str, raw_text: str, flag_countries: list[str], model: str
+) -> dict:
+    """Turn one LLM reply into a classified dict.
+
+    Shared by BOTH backends deliberately: fence stripping, schema validation,
+    the [NOISE]/severity-1 rule and the location fallback have to be identical
+    for Anthropic and Ollama, or the archive stops being comparable across the
+    two. Raises on unusable output — the caller decides retry vs parse_failed.
+    """
+    text = text.strip()
+    # Strip any accidental markdown fences
+    text = re.sub(r"^```json\s*|```$", "", text, flags=re.MULTILINE).strip()
+    raw = json.loads(text)
+    if not isinstance(raw, dict):
+        # Valid JSON, but a list/number/string is not a classification. Raised
+        # as a decode error so both backends record it as parse_failed.
+        raise json.JSONDecodeError("expected a JSON object", text, 0)
+    result = ClassifierResult(**raw)
+    classified = result.model_dump()
+    if classified["severity"] is None:
+        # The prompt mandates a severity, so a reply without one ("{}", or an
+        # object of keys we do not know) extracted nothing. Recording that as
+        # extraction_status "ok" files a row claiming a classification that
+        # never happened — severity NULL and summary empty, but indistinguishable
+        # from a real result by its status. Same rule as the out-of-range case:
+        # a schema violation is a parse failure, not a measurement.
+        raise json.JSONDecodeError("reply carried no severity", text, 0)
+    # Which model actually produced this row. Without it an archive mixing
+    # Haiku and qwen3 rows is uninterpretable.
+    classified["extraction_model"] = model
+
+    # The LLM signals noise/commentary by returning summary="[NOISE]" or severity=1
+    # Mark it so callers can fast-drop without geocoding.
+    # A missing severity is NOT a severity of 1: an omitted key says
+    # nothing about whether the message was noise, so it must not
+    # short-circuit to a drop here.
+    severity = classified["severity"]
+    if classified["summary"] == "[NOISE]" or (severity is not None and severity <= 1):
+        classified["is_noise"] = True
+        classified["extraction_status"] = "ok"
+        logger.debug("Classifier: noise/commentary dropped: %s", raw_text[:80])
+        return classified
+
+    # If the LLM returned Unknown, try regex fallback before giving up
+    if classified["location_name"] == "Unknown":
+        regex_loc = _regex_location_fallback(raw_text)
+        if regex_loc:
+            classified["location_name"] = regex_loc
+            logger.debug("Regex fallback location: '%s'", regex_loc)
+        elif flag_countries:
+            # Last resort: use primary flag country
+            classified["location_name"] = flag_countries[0]
+            logger.debug("Flag fallback location: '%s'", flag_countries[0])
+
+    classified["is_noise"] = False
+    classified["extraction_status"] = "ok"
+    logger.info(
+        "Classified [%s]: type=%s sev=%s loc='%s'",
+        model,
+        classified["event_type"],
+        classified["severity"],
+        classified["location_name"],
+    )
+    return classified
+
+
+async def _classify_ollama(raw_text: str, hint: str, flag_countries: list[str]) -> dict:
+    """Classify against a local Ollama model. Returns a fallback tagged with the
+    specific failure mode rather than switching to another backend."""
+    model = settings.ollama_model
+    url = settings.ollama_url.rstrip("/") + "/api/generate"
+    payload = {
+        "model": model,
+        "system": SYSTEM_PROMPT,
+        "prompt": raw_text[:2000] + hint,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0, "num_predict": 250},
+    }
+
+    try:
+        async with _OLLAMA_SEM:
+            # The client — and so the timeout clock — is built AFTER the
+            # semaphore is acquired, so a queued request does not spend its
+            # budget waiting for the one GPU.
+            async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
+                response = await client.post(url, json=payload)
+    except httpx.TimeoutException as e:
+        # Caught before RequestError, which it subclasses. A daemon that took
+        # the connection and then hung is not a daemon that is down, and an
+        # archive filing both as "unreachable" cannot tell them apart later.
+        logger.error("Ollama timed out after %ss at %s: %s", _OLLAMA_TIMEOUT, url, e)
+        return _build_fallback(raw_text, "ollama_timeout")
+    except httpx.RequestError as e:
+        # Connection refused or DNS failure — nothing reached the model.
+        logger.error("Ollama unreachable at %s: %s", url, e)
+        return _build_fallback(raw_text, "ollama_unreachable")
+
+    if response.status_code != 200:
+        body = response.text[:300]
+        if response.status_code == 404 and "not found" in body.lower():
+            # A model name that was never pulled must not look like a parse error.
+            logger.error("Ollama model '%s' not pulled: %s", model, body)
+            return _build_fallback(raw_text, "ollama_model_missing")
+        logger.error("Ollama HTTP %d: %s", response.status_code, body)
+        return _build_fallback(raw_text, f"ollama_http_{response.status_code}")
+
+    try:
+        text = response.json()["response"]
+        # Stripped INSIDE the guard: a non-string "response" makes re.sub raise
+        # TypeError straight out of classify_message, and one raise costs the
+        # rest of that feed cycle — the poller only guards per feed, and the
+        # raising article is already marked seen, so it is never retried.
+        text = _THINK_RE.sub("", text)
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error("Ollama envelope unreadable: %s", e)
+        return _build_fallback(raw_text, "parse_failed", model)
+
+    try:
+        return _handle_response(text, raw_text, flag_countries, model)
+    except (json.JSONDecodeError, ValidationError) as e:
+        logger.error("Ollama output not a valid classification: %s | got: %s", e, text[:300])
+        return _build_fallback(raw_text, "parse_failed", model)
+
+
 async def classify_message(raw_text: str) -> dict:
     """Classify a Telegram message. Returns structured dict with event_type,
     severity, location_name, summary."""
 
-    if not settings.anthropic_api_key:
-        logger.warning("No Anthropic API key — using regex fallback")
-        return _build_fallback(raw_text, "no_api_key")
+    # Normalised: a stray space or a capital in .env must not change which
+    # backend runs.
+    backend = settings.llm_backend.strip().lower()
 
-    # Pre-extract flag countries to hint Claude
+    if backend == "none":
+        return _build_fallback(raw_text, "no_backend")
+
+    # Pre-extract flag countries to hint the model
     flag_countries = _extract_flags(raw_text)
     hint = ""
     if flag_countries:
         hint = f"\n\nFlag context: {', '.join(flag_countries)} are involved."
 
+    if backend == "ollama":
+        # No silent fall-through to Anthropic if Ollama is down: a backend
+        # switch nobody recorded makes the archive uninterpretable later.
+        return await _classify_ollama(raw_text, hint, flag_countries)
+
+    if backend != "anthropic":
+        # Anything unrecognised used to fall through to Anthropic, so a typo
+        # ("olama", or a trailing space) silently sent traffic and spend to the
+        # paid API — the same unrecorded backend switch the branch above
+        # refuses to make when Ollama is down.
+        logger.error(
+            "Unknown llm_backend %r — refusing to guess a backend", settings.llm_backend
+        )
+        return _build_fallback(raw_text, "bad_backend")
+
+    if not settings.anthropic_api_key:
+        logger.warning("No Anthropic API key — using regex fallback")
+        return _build_fallback(raw_text, "no_api_key")
+
     client = _get_client()
     status = "llm_failed"
+    # Travels with the status so a parse_failed row names whose output failed to
+    # parse. None for statuses where no output was ever produced, and re-set on
+    # every attempt so a later failure cannot inherit an earlier attribution.
+    status_model: str | None = None
 
     for attempt in range(3):
         try:
             response = await client.messages.create(
-                model="claude-haiku-4-5-20251001",  # Haiku: faster + cheaper for classification
+                model=ANTHROPIC_MODEL,
                 max_tokens=200,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": raw_text[:2000] + hint}],
             )
-            text = response.content[0].text.strip()
-            # Strip any accidental markdown fences
-            text = re.sub(r"^```json\s*|```$", "", text, flags=re.MULTILINE).strip()
-            raw = json.loads(text)
-            result = ClassifierResult(**raw)
-            classified = result.model_dump()
-
-            # Claude signals noise/commentary by returning summary="[NOISE]" or severity=1
-            # Mark it so callers can fast-drop without geocoding.
-            # A missing severity is NOT a severity of 1: an omitted key says
-            # nothing about whether the message was noise, so it must not
-            # short-circuit to a drop here.
-            severity = classified["severity"]
-            if classified["summary"] == "[NOISE]" or (severity is not None and severity <= 1):
-                classified["is_noise"] = True
-                classified["extraction_status"] = "ok"
-                logger.debug("Classifier: noise/commentary dropped: %s", raw_text[:80])
-                return classified
-
-            # If Claude returned Unknown, try regex fallback before giving up
-            if classified["location_name"] == "Unknown":
-                regex_loc = _regex_location_fallback(raw_text)
-                if regex_loc:
-                    classified["location_name"] = regex_loc
-                    logger.debug("Regex fallback location: '%s'", regex_loc)
-                elif flag_countries:
-                    # Last resort: use primary flag country
-                    classified["location_name"] = flag_countries[0]
-                    logger.debug("Flag fallback location: '%s'", flag_countries[0])
-
-            classified["is_noise"] = False
-            classified["extraction_status"] = "ok"
-            logger.info(
-                "Classified: type=%s sev=%s loc='%s'",
-                classified["event_type"],
-                classified["severity"],
-                classified["location_name"],
+            return _handle_response(
+                response.content[0].text, raw_text, flag_countries, ANTHROPIC_MODEL
             )
-            return classified
 
         except anthropic.RateLimitError:
             status = "rate_limited"
+            status_model = None
             wait = 2 ** (attempt + 1)
             logger.warning("Rate limited, retrying in %ds", wait)
             await asyncio.sleep(wait)
         except (json.JSONDecodeError, ValidationError) as e:
             status = "parse_failed"
+            status_model = ANTHROPIC_MODEL
             logger.error("Classification error (attempt %d): %s", attempt + 1, e)
             if attempt == 2:
                 break
         except anthropic.APIStatusError as e:
             status = f"api_{e.status_code}"
+            status_model = None
             logger.error("Classification error (attempt %d): %s", attempt + 1, e)
             if attempt == 2:
                 break
         except Exception as e:
             status = "llm_failed"
+            status_model = None
             logger.error("Classification error (attempt %d): %s", attempt + 1, e)
             if attempt == 2:
                 break
 
-    return _build_fallback(raw_text, status)
+    return _build_fallback(raw_text, status, status_model)
 
 
-def _build_fallback(raw_text: str, status: str) -> dict:
-    """Build best-effort result without API — uses regex + flag extraction."""
+def _build_fallback(raw_text: str, status: str, model: str | None = None) -> dict:
+    """Build best-effort result without API — uses regex + flag extraction.
+
+    model is the model id only when a model actually produced output we then
+    failed to parse; it stays None when nothing ever reached a model.
+    """
     flag_countries = _extract_flags(raw_text)
     regex_loc = _regex_location_fallback(raw_text)
     location = regex_loc or (flag_countries[0] if flag_countries else "Unknown")
@@ -359,4 +502,5 @@ def _build_fallback(raw_text: str, status: str) -> dict:
         "location_name": location,
         "summary": raw_text[:200],
         "extraction_status": status,
+        "extraction_model": model,
     }

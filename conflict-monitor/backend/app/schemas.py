@@ -36,6 +36,9 @@ class EventRead(BaseModel):
     telegram_message_id: int | None = None
     source_url: str = ""
     extraction_status: str | None = None
+    # null on rows classified before this column existed, and on fallbacks that
+    # never reached a model — not an empty string.
+    extraction_model: str | None = None
     is_geolocated: bool | None = None
     geo_precision: str | None = None
     geo_uncertainty_m: int | None = None

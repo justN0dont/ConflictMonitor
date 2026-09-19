@@ -318,6 +318,21 @@ async def _process_article(
     if len(full_text) < 20:
         return
 
+    # Already stored under this URL? Then this article has been all the way
+    # through the pipeline before — a restart empties _seen_hashes, so every
+    # stored URL comes round again. Checked BEFORE classifying, because the old
+    # order classified first and threw the result away further down: one GPU
+    # inference per stored article per restart (~105 measured), and worse, the
+    # re-seen article reached the semantic-duplicate check first and could merge
+    # into some other row, inflating its report_count for an article already in
+    # the table.
+    async with async_session() as session:
+        stored = await session.execute(
+            select(Event.id).where(Event.source_url == url).limit(1)
+        )
+        if stored.scalar_one_or_none() is not None:
+            return
+
     # Classify. severity may be None: the classifier no longer invents one.
     result = await classify_message(full_text)
     severity = result.get("severity")
@@ -355,16 +370,22 @@ async def _process_article(
             published,
         )
         if existing:
+            # Only a row whose own classification succeeded may take a severity
+            # from another report. Otherwise the surviving row reads
+            # "extraction_status=api_400, extraction_model=NULL" while carrying
+            # a qwen3 number — a measurement its own provenance says nothing
+            # produced. Those rows are healed by re-classifying them, not by
+            # having a number quietly appear on them.
+            if severity is not None and existing.extraction_status != "ok":
+                logger.info(
+                    "Not raising severity of #%s (extraction_status=%s) from a %s report",
+                    existing.id, existing.extraction_status,
+                    result.get("extraction_status"),
+                )
+                severity = None
             await merge_duplicate(session, existing, source_name, severity)
             ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
             await broadcaster.broadcast(ws_payload.model_dump_json())
-            return
-
-        # Check for exact URL duplicate
-        result_check = await session.execute(
-            select(Event.id).where(Event.source_url == url).limit(1)
-        )
-        if result_check.scalar_one_or_none() is not None:
             return
 
         db_event = Event(
@@ -384,6 +405,7 @@ async def _process_article(
             source_url=url,
             reporting_channels=source_name,
             extraction_status=result.get("extraction_status"),
+            extraction_model=result.get("extraction_model"),
             is_geolocated=is_geolocated,
             geo_precision=geo.precision if geo else None,
             geo_uncertainty_m=geo.uncertainty_m if geo else None,

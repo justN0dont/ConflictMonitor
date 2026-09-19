@@ -298,6 +298,19 @@ async def _process_message(
             message_date,
         )
         if existing:
+            # Only a row whose own classification succeeded may take a severity
+            # from another report. Otherwise the surviving row reads
+            # "extraction_status=api_400, extraction_model=NULL" while carrying
+            # a qwen3 number — a measurement its own provenance says nothing
+            # produced. Those rows are healed by re-classifying them, not by
+            # having a number quietly appear on them.
+            if severity is not None and existing.extraction_status != "ok":
+                logger.info(
+                    "Not raising severity of #%s (extraction_status=%s) from a %s report",
+                    existing.id, existing.extraction_status,
+                    result.get("extraction_status"),
+                )
+                severity = None
             await merge_duplicate(session, existing, channel_name, severity)
             ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
             await broadcaster.broadcast(ws_payload.model_dump_json())
@@ -320,6 +333,7 @@ async def _process_message(
             source_url=source_url,
             reporting_channels=channel_name,
             extraction_status=result.get("extraction_status"),
+            extraction_model=result.get("extraction_model"),
             is_geolocated=is_geolocated,
             geo_precision=geo.precision if geo else None,
             geo_uncertainty_m=geo.uncertainty_m if geo else None,

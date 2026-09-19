@@ -41,6 +41,11 @@ class Event(Base):
     telegram_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_url: Mapped[str] = mapped_column(Text, default="")
     extraction_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Which model produced this row ("qwen3:8b", "claude-haiku-4-5-20251001").
+    # NULL on rows written before this column existed and on fallbacks that
+    # never reached a model — without it an archive mixing backends cannot be
+    # read, and a classifier evaluation cannot tell whose output it is scoring.
+    extraction_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_geolocated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # How precisely the location resolved, and how. NULL on every row written
     # before these columns existed, so the archive stays distinguishable from
