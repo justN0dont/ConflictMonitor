@@ -98,7 +98,12 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
   const [newEventIds, setNewEventIds] = useState<Set<number>>(new Set());
   const prevIdsRef = useRef<Set<number>>(new Set());
-  const [viewMode, setViewMode] = useState<"2d" | "globe" | "terrain">("2d");
+  // 2D is Mapbox-only: with no token mapbox-gl throws and react-map-gl swallows
+  // it, leaving a black panel. The globe needs no key, so keyless installs open
+  // on it instead.
+  const [viewMode, setViewMode] = useState<"2d" | "globe" | "terrain">(
+    MAPBOX_TOKEN ? "2d" : "globe",
+  );
 
   const geoEvents = useMemo(
     () => events.filter((e) => e.lat != null && e.lon != null),

@@ -216,14 +216,22 @@ def _extract_flags(text: str) -> list[str]:
     return countries
 
 
+# Word-boundary patterns, compiled once at import — _regex_location_fallback runs
+# per message. A plain substring test matched "Kirya" (IDF HQ, Tel Aviv) inside
+# "Kiryat Shemona" on the Lebanese border.
+_LOCATION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (loc, re.compile(r"\b" + re.escape(loc.lower()) + r"\b"))
+    for loc in LOCATION_KEYWORDS
+]
+
+
 def _regex_location_fallback(text: str) -> str | None:
     """Find the most specific (longest) location keyword in the text."""
     text_lower = text.lower()
     best: str | None = None
     best_len = 0
-    for loc in LOCATION_KEYWORDS:
-        loc_lower = loc.lower()
-        if loc_lower in text_lower and len(loc) > best_len:
+    for loc, pattern in _LOCATION_PATTERNS:
+        if len(loc) > best_len and pattern.search(text_lower):
             best = loc
             best_len = len(loc)
     return best

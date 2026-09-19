@@ -73,6 +73,11 @@ async def check_duplicate(
             )
         )
 
+    # Deterministic order: without it Postgres may hand back any 20 candidates,
+    # so the real duplicate can fall outside the window and dedup stops being
+    # reproducible (and therefore stops being measurable).
+    stmt = stmt.order_by(Event.timestamp.desc(), Event.id.desc())
+
     result = await session.execute(stmt.limit(20))
     candidates = result.scalars().all()
 

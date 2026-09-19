@@ -22,6 +22,7 @@ PRECISION PHILOSOPHY:
 
 import asyncio
 import logging
+import re
 from collections import OrderedDict
 
 import httpx
@@ -151,8 +152,9 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "hemmat":                      (35.7512, 51.2226),
     "shahid bagheri":              (35.6848, 51.4634),   # missile factory E Tehran
     "bagheri":                     (35.6848, 51.4634),
-    "aerospace force":             (35.7100, 51.4200),   # IRGC aerospace, Tehran
-    "irgc aerospace":              (35.7100, 51.4200),
+    # ('aerospace force' / 'irgc aerospace' deleted: the IRGC Aerospace Force is
+    #  the branch that launches the missiles, so it is named in reports of strikes
+    #  that landed 1,500km away. 'irgc hq' below is a building and stays.)
     "masjed soleyman":             (31.9390, 49.3050),   # IRGC air base, SW Iran
     "dezful":                      (32.3811, 48.4018),
     "dezful airbase":              (32.3811, 48.4018),
@@ -469,7 +471,6 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "manama":                      (26.2154, 50.5832),
     "bahrain":                     (26.2154, 50.5832),
     "nsf bahrain":                 (26.2200, 50.5500),   # US Naval Support Facility
-    "us fifth fleet":              (26.2200, 50.5500),
     "mina salman":                 (26.2000, 50.6000),
 
     # ─── OMAN ───────────────────────────────────────────────────────────────
@@ -543,14 +544,33 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
 
     # ─── ADDITIONAL KEY ALIASES ─────────────────────────────────────────────
     "khomeini":                    (35.6892, 51.3890),   # refers to Tehran
-    "central command":             (25.1175, 51.3150),   # CENTCOM = Al Udeid
-    "centcom":                     (25.1175, 51.3150),
-    "us central command":          (25.1175, 51.3150),
-    "fifth fleet":                 (26.2200, 50.5500),
-    "iaf":                         (31.2083, 34.9390),   # Israeli AF → Nevatim
-    "idf":                         (32.0790, 34.7860),   # IDF HQ → Kirya
-    "irgc":                        (35.7156, 51.4063),   # IRGC HQ
+    # DO NOT re-add 'idf', 'iaf', 'irgc', 'centcom', 'central command',
+    # 'us central command', 'fifth fleet' or 'us fifth fleet' here. They are
+    # actors, not places: "IDF confirms strikes in Gaza" would pin on IDF HQ in
+    # Tel Aviv, the wrong side of a border, and "US Central Command confirms
+    # strikes in Yemen" would pin on Al Udeid in Qatar. Word boundaries cannot
+    # save them — the name really is a whole word. An event is located by where
+    # it happened, not by who is named in it. A headquarters is a building and
+    # may stay ('idf hq', 'irgc headquarters'); a command or a fleet is not.
 }
+
+# =========================================================================
+# WORD-BOUNDARY PATTERNS FOR PARTIAL MATCHING
+# A plain substring test put 'arak' inside "Maarakeh" (south Lebanon → Arak,
+# Iran, 1,100km away), 'kirya' inside "Kiryat Shemona" and 'oman' inside
+# "Romania". Compiled once at import — the partial-match loop runs per message.
+# =========================================================================
+
+_KNOWN_PATTERNS: list[tuple[str, tuple[float, float], re.Pattern[str]]] = [
+    (name, coords, re.compile(r"\b" + re.escape(name) + r"\b"))
+    for name, coords in KNOWN_LOCATIONS.items()
+]
+
+_DIRECTIONAL_PATTERNS: list[tuple[str, tuple[float, float], re.Pattern[str]]] = [
+    (name, coords, re.compile(r"\b" + re.escape(name) + r"\b"))
+    for name, coords in _DIRECTIONAL_REGIONS.items()
+]
+
 
 # =========================================================================
 # NOMINATIM CLIENT
@@ -603,6 +623,19 @@ async def _query_nominatim(location_name: str) -> tuple[float, float] | None:
     return None
 
 
+# Values that are not locations and must never be geocoded. Removing the actor
+# acronyms from KNOWN_LOCATIONS stopped them hijacking a real place ("IDF confirms
+# strikes in Gaza" used to pin on IDF HQ in Tel Aviv), but a BARE acronym then fell
+# through to Nominatim, which answers confidently and wrongly — "IDF" resolved to
+# (40.18, 44.51), in Armenia. An actor is not a place; the honest answer is None.
+_NOT_A_PLACE: frozenset[str] = frozenset({
+    "unknown", "n/a", "", "various", "multiple", "none", "unspecified",
+    # actors, not places
+    "idf", "irgc", "iaf", "centcom", "isis", "nato", "un", "hamas", "hezbollah",
+    "houthi", "houthis", "cia", "mossad", "pmf", "sdf",
+})
+
+
 # =========================================================================
 # PUBLIC API
 # =========================================================================
@@ -617,7 +650,7 @@ async def geocode(location_name: str) -> tuple[float, float] | None:
       4. Partial match (longest matching substring wins)
       5. Nominatim API
     """
-    if not location_name or location_name.strip().lower() in ("unknown", "n/a", "", "various", "multiple"):
+    if not location_name or location_name.strip().lower() in _NOT_A_PLACE:
         return None
 
     name = location_name.strip()
@@ -642,17 +675,17 @@ async def geocode(location_name: str) -> tuple[float, float] | None:
         logger.debug("Precision table exact '%s' → %s", name, coords)
         return coords
 
-    # 4. Partial match — find longest known name contained in the query
+    # 4. Partial match — find longest known name appearing as whole words in the query
     #    (handles "strike near Natanz" → "natanz", "Fordow enrichment complex" → "fordow enrichment")
     best_match: tuple[float, float] | None = None
     best_len = 0
-    for known_name, coords in KNOWN_LOCATIONS.items():
-        if known_name in normalized and len(known_name) > best_len:
+    for known_name, coords, pattern in _KNOWN_PATTERNS:
+        if len(known_name) > best_len and pattern.search(normalized):
             best_match = coords
             best_len = len(known_name)
     if not best_match:
-        for known_name, coords in _DIRECTIONAL_REGIONS.items():
-            if known_name in normalized and len(known_name) > best_len:
+        for known_name, coords, pattern in _DIRECTIONAL_PATTERNS:
+            if len(known_name) > best_len and pattern.search(normalized):
                 best_match = coords
                 best_len = len(known_name)
     if best_match:
