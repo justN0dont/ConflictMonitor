@@ -205,10 +205,16 @@ function EventMarker({ evt }: { evt: ConflictEvent }) {
     [evt.lat, evt.lon],
   );
   const color = eventVisual(evt.event_type).color;
-  const size = 0.003 + evt.severity * 0.0008;
+  // severity is null when it was never measured. JS coerces null to 0, so
+  // `evt.severity * 0.0008` silently drew an unmeasured event at the smallest,
+  // least alarming size on the scale - a measurement it never made. A size
+  // channel cannot express "unmeasured", so these draw at the scale's base
+  // size and are dimmed, which reads as "no reading" rather than "lowest".
+  const unmeasured = evt.severity == null;
+  const size = 0.003 + (evt.severity ?? 0) * 0.0008;
 
   useFrame(({ clock }) => {
-    if (meshRef.current && evt.severity >= 7) {
+    if (meshRef.current && evt.severity != null && evt.severity >= 7) {
       const s = 1 + Math.sin(clock.elapsedTime * 3) * 0.25;
       meshRef.current.scale.setScalar(s);
     }
@@ -217,7 +223,7 @@ function EventMarker({ evt }: { evt: ConflictEvent }) {
   return (
     <mesh ref={meshRef} position={pos}>
       <sphereGeometry args={[size, 10, 10]} />
-      <meshBasicMaterial color={color} transparent opacity={0.95} />
+      <meshBasicMaterial color={color} transparent opacity={unmeasured ? 0.45 : 0.95} />
     </mesh>
   );
 }

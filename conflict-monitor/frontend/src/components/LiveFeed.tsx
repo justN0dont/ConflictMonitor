@@ -8,12 +8,23 @@
  *
  * Provenance the UI used to discard is surfaced here (ledger finding C47). A
  * row whose classification FAILED must not look identical to one that
- * succeeded - the fallback path stamps event_type=military / severity=5 on
- * every failure, so an unmarked failed row reads as a confident military call.
+ * succeeded - the fallback path stamps event_type=military on every failure, so
+ * an unmarked failed row reads as a confident military call.
+ *
+ * Severity and geo precision may both be absent. An absent severity renders as
+ * a dash, never as 5 and never as 0, and a coarse coordinate says how coarse it
+ * is, because "country-level" and "facility" are not the same claim.
  */
 import { MapPin, MapPinOff } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { EVENT_TYPES, STATUS, eventVisual, formatAge } from "../lib/tokens";
+import {
+  EVENT_TYPES,
+  STATUS,
+  eventVisual,
+  formatAge,
+  formatUncertainty,
+  geoPrecision,
+} from "../lib/tokens";
 import type { ConflictEvent } from "../types/event";
 
 function timeAgo(ts: string): string {
@@ -188,6 +199,8 @@ export function LiveFeed({ events }: LiveFeedProps) {
           const noGeo = geoMissing(evt);
           const place = (evt.location_name ?? "").trim();
           const sources = evt.report_count ?? 1;
+          const precision = geoPrecision(evt.geo_precision);
+          const uncertainty = formatUncertainty(evt.geo_uncertainty_m);
 
           return (
             <div
@@ -243,9 +256,13 @@ export function LiveFeed({ events }: LiveFeedProps) {
                 <span
                   className="shrink-0 text-[9.5px] tabular-nums text-[var(--text-muted)]"
                   style={{ fontFamily: "var(--font-mono)" }}
-                  title="Severity (1-10). Near-constant in the archive - low information."
+                  title={
+                    evt.severity == null
+                      ? "Severity was never measured for this event. Not 5, not 0 - absent."
+                      : "Severity (1-10). Near-constant in the archive - low information."
+                  }
                 >
-                  SEV {evt.severity}
+                  SEV {evt.severity ?? "\u2014"}
                 </span>
               </div>
 
@@ -260,6 +277,17 @@ export function LiveFeed({ events }: LiveFeedProps) {
                   <span className="flex items-center gap-1 text-[9.5px] text-[var(--text-secondary)]">
                     <MapPin size={10} strokeWidth={2} aria-hidden="true" />
                     {place}
+                  </span>
+                )}
+                {/* A coarse coordinate is an area, not a position. Saying so
+                    here is the difference between "Tehran" and "Iran". */}
+                {precision?.coarse && (
+                  <span
+                    className="rounded-[2px] border border-[var(--border)] px-1 text-[9px] tracking-[0.06em] text-[var(--text-secondary)]"
+                    style={{ fontFamily: "var(--font-mono)" }}
+                    title={`This coordinate is ${precision.label}, not a point${uncertainty ? ` (${uncertainty})` : ""}.`}
+                  >
+                    {precision.label.toUpperCase()}
                   </span>
                 )}
                 {sources > 1 && (
@@ -301,7 +329,7 @@ export function LiveFeed({ events }: LiveFeedProps) {
                   <span
                     className="flex items-center gap-1 rounded-[2px] px-1 text-[9px] font-semibold tracking-[0.06em] text-[var(--text-primary)]"
                     style={{ border: `1px solid ${STATUS.serious.color}` }}
-                    title="Classification failed; type and severity are fallback defaults, not findings."
+                    title="Classification failed; the type is a regex fallback, not a finding, and no severity was measured at all."
                   >
                     <STATUS.serious.Icon
                       size={10}

@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 
-UNKNOWN_LAT = -25.0
-UNKNOWN_LON = 80.0   # Indian Ocean parking for unresolvable locations
+# There is no UNKNOWN_LAT/UNKNOWN_LON any more. An unresolvable location is
+# written as NULL lat/lon/geometry with is_geolocated=False. The old Indian
+# Ocean sentinel put 47.6% of the archive on a real point in open water and
+# then had to be filtered back out by three separate query predicates.
 
 MIN_SEVERITY = 3
 
@@ -134,8 +136,13 @@ def _get_conflict_cutoff() -> datetime:
         return datetime.now(timezone.utc) - timedelta(days=30)
 
 
-def _is_noise(text: str, severity: int) -> bool:
-    """Return True if this message should be dropped as noise/commentary."""
+def _is_noise(text: str, severity: int | None) -> bool:
+    """Return True if this message should be dropped as noise/commentary.
+
+    severity=None means it was never measured. That is not a low score, so it
+    does not trip the MIN_SEVERITY gate — an otherwise-fine event is never
+    dropped for a number we failed to obtain. Only the text rules apply.
+    """
     stripped = text.strip()
 
     # Too short to contain useful intelligence
@@ -165,8 +172,8 @@ def _is_noise(text: str, severity: int) -> bool:
                 logger.debug("Commentary starter '%s': %s", starter, stripped[:60])
                 return True
 
-    # Severity below threshold
-    if severity < MIN_SEVERITY:
+    # Severity below threshold — only when we actually have one
+    if severity is not None and severity < MIN_SEVERITY:
         return True
 
     return False
@@ -246,34 +253,40 @@ async def _process_message(
             logger.debug("Skipping already-saved msg_id=%d from %s", message_id, channel_name)
             return
 
-    # Pre-filter using local noise rules (fast, no API call)
-    # Run a quick severity-5 check first so we don't waste tokens on obvious noise
-    if _is_noise(raw_text, 5):
+    # Pre-filter using local noise rules (fast, no API call).
+    # severity=None here because we have not classified yet — the text rules
+    # run, the severity gate does not. (It used to pass a literal 5, which was
+    # the same thing said dishonestly.)
+    if _is_noise(raw_text, None):
         logger.debug("Pre-filter noise: %s", raw_text[:60])
         return
 
-    # Classify
+    # Classify. severity may be None: the classifier no longer invents one.
     result = await classify_message(raw_text)
-    severity = result.get("severity", 5)
+    severity = result.get("severity")
 
     # Classifier returned [NOISE] tag or severity=1 — drop immediately
     if result.get("is_noise") or _is_noise(raw_text, severity):
-        logger.debug("Skipping noise (sev=%d): %s", severity, raw_text[:60])
+        logger.debug("Skipping noise (sev=%s): %s", severity, raw_text[:60])
         return
 
     # Geocode
     location_name = result.get("location_name", "Unknown")
-    coords = await geocode(location_name)
+    geo = await geocode(location_name)
 
-    if coords:
-        lat, lon = coords
+    if geo:
+        lat, lon = geo.lat, geo.lon
+        geometry = from_shape(Point(lon, lat), srid=4326)
         is_geolocated = True
     else:
-        lat, lon = UNKNOWN_LAT, UNKNOWN_LON
+        # Unresolvable. Write NULL, not a coordinate — is_geolocated carries
+        # the fact and the row stays off the map instead of onto open ocean.
+        lat = lon = geometry = None
         is_geolocated = False
-        logger.info("No coords for '%s' — parking at Indian Ocean (msg_id=%d)", location_name, message_id)
+        logger.info(
+            "No coords for '%s' — stored unlocated (msg_id=%d)", location_name, message_id
+        )
 
-    geometry = from_shape(Point(lon, lat), srid=4326)
     source_url = _build_source_url(channel_name, message_id)
 
     async with async_session() as session:
@@ -285,7 +298,7 @@ async def _process_message(
             message_date,
         )
         if existing:
-            await merge_duplicate(session, existing, channel_name, severity, lat, lon)
+            await merge_duplicate(session, existing, channel_name, severity)
             ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
             await broadcaster.broadcast(ws_payload.model_dump_json())
             return
@@ -308,6 +321,9 @@ async def _process_message(
             reporting_channels=channel_name,
             extraction_status=result.get("extraction_status"),
             is_geolocated=is_geolocated,
+            geo_precision=geo.precision if geo else None,
+            geo_uncertainty_m=geo.uncertainty_m if geo else None,
+            geo_method=geo.method if geo else None,
         )
         session.add(db_event)
         await session.commit()
@@ -316,8 +332,10 @@ async def _process_message(
         ws_payload = EventWS(type="new_event", event=EventRead.model_validate(db_event))
         await broadcaster.broadcast(ws_payload.model_dump_json())
         logger.info(
-            "Event #%d saved | sev=%d | loc='%s' -> (%.2f,%.2f) | geo=%s | %s",
-            db_event.id, severity, location_name, lat, lon, is_geolocated, source_url,
+            "Event #%d saved | sev=%s | loc='%s' -> %s | geo=%s | %s",
+            db_event.id, severity, location_name,
+            f"({lat:.2f},{lon:.2f}) {geo.precision} ±{geo.uncertainty_m}m" if geo else "NULL",
+            is_geolocated, source_url,
         )
 
     # Update checkpoint so next restart won't re-process this message

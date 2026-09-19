@@ -357,8 +357,14 @@ export function CesiumView({
       existingIds.add(id);
       let entity = source.entities.getById(id);
       const color = EVENT_CESIUM_COLORS[eventVisual(evt.event_type).key];
-      const isHigh = evt.severity >= 8;
-      const size = 12 + evt.severity * 3;
+      // severity is null when it was never measured. null >= 8 is false (so
+      // isHigh is correct by accident) but `12 + null * 3` coerces to 12 and
+      // drew the mark at the bottom of the scale as though it had been read
+      // and found harmless. The size channel cannot say "unmeasured"; the
+      // description below says it in words instead.
+      const isHigh = evt.severity != null && evt.severity >= 8;
+      const size = 12 + (evt.severity ?? 0) * 3;
+      const severityText = evt.severity == null ? "&mdash; NOT MEASURED" : `${evt.severity}/10`;
 
       if (!entity) {
         const billboard = getBillboard(
@@ -398,7 +404,7 @@ export function CesiumView({
               <div style="font-weight: 600; margin-bottom: 8px; font-size: 13px;">${evt.summary}</div>
               <div style="color: #5a6a7e;">
                 <span style="color: ${color.toCssColorString()}; font-weight: 600;">${evt.event_type.toUpperCase()}</span>
-                &nbsp;|&nbsp; SEVERITY ${evt.severity}/10
+                &nbsp;|&nbsp; SEVERITY ${severityText}
               </div>
               <div style="color: #5a6a7e; margin-top: 4px;">
                 ${evt.channel_name} &middot; ${new Date(evt.timestamp).toUTCString()}

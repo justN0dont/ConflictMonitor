@@ -278,9 +278,13 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
               top: "50%",
               transform: "translate(-50%, -50%)",
               width: 1.5,
-              height: 4 + tick.severity * 1.5,
+              // severity may be null ("never measured"). null * 1.5 is 0 in
+              // JS, so these used to draw as the shortest tick - the look of
+              // a measured, trivial event. Base height plus a lower opacity
+              // reads as "no reading" instead.
+              height: 4 + (tick.severity ?? 0) * 1.5,
               background: eventVisual(tick.type).color,
-              opacity: 0.6,
+              opacity: tick.severity == null ? 0.28 : 0.6,
               borderRadius: 1,
               pointerEvents: "none",
             }}

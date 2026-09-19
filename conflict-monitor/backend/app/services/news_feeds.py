@@ -65,9 +65,9 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL = 300  # seconds between feed polls (5 min)
 MIN_SEVERITY = 3
 
-# Coordinates for unresolvable locations (Indian Ocean parking)
-UNKNOWN_LAT = -25.0
-UNKNOWN_LON = 80.0
+# There is no UNKNOWN_LAT/UNKNOWN_LON any more. An unresolvable location is
+# written as NULL lat/lon/geometry with is_geolocated=False, rather than
+# parked on a real point in the Indian Ocean.
 
 # ── FEED REGISTRY ──────────────────────────────────────────────────────────────
 
@@ -318,30 +318,32 @@ async def _process_article(
     if len(full_text) < 20:
         return
 
-    # Classify
+    # Classify. severity may be None: the classifier no longer invents one.
     result = await classify_message(full_text)
-    severity = result.get("severity", 5)
+    severity = result.get("severity")
 
     # Classifier flagged this as noise/commentary
     if result.get("is_noise"):
         logger.debug("RSS: noise/commentary dropped: %s", title[:60])
         return
 
-    if severity < MIN_SEVERITY:
-        logger.debug("RSS: low severity (%d) — skipping: %s", severity, title[:60])
+    # An unmeasured severity is not a low severity. Dropping on None would
+    # silently discard an otherwise-fine article for a number we never got.
+    if severity is not None and severity < MIN_SEVERITY:
+        logger.debug("RSS: low severity (%s) — skipping: %s", severity, title[:60])
         return
 
     # Geocode
     location_name = result.get("location_name", "Unknown")
-    coords = await geocode(location_name)
-    if coords:
-        lat, lon = coords
+    geo = await geocode(location_name)
+    if geo:
+        lat, lon = geo.lat, geo.lon
+        geometry = from_shape(Point(lon, lat), srid=4326)
         is_geolocated = True
     else:
-        lat, lon = UNKNOWN_LAT, UNKNOWN_LON
+        # Unresolvable. Write NULL, not a coordinate.
+        lat = lon = geometry = None
         is_geolocated = False
-
-    geometry = from_shape(Point(lon, lat), srid=4326)
 
     async with async_session() as session:
         # Check for semantic duplicates
@@ -353,7 +355,7 @@ async def _process_article(
             published,
         )
         if existing:
-            await merge_duplicate(session, existing, source_name, severity, lat, lon)
+            await merge_duplicate(session, existing, source_name, severity)
             ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
             await broadcaster.broadcast(ws_payload.model_dump_json())
             return
@@ -383,6 +385,9 @@ async def _process_article(
             reporting_channels=source_name,
             extraction_status=result.get("extraction_status"),
             is_geolocated=is_geolocated,
+            geo_precision=geo.precision if geo else None,
+            geo_uncertainty_m=geo.uncertainty_m if geo else None,
+            geo_method=geo.method if geo else None,
         )
         session.add(db_event)
         await session.commit()
@@ -391,8 +396,10 @@ async def _process_article(
         ws_payload = EventWS(type="new_event", event=EventRead.model_validate(db_event))
         await broadcaster.broadcast(ws_payload.model_dump_json())
         logger.info(
-            "RSS event #%d | sev=%d | loc='%s' -> (%.2f,%.2f) | geo=%s | %s",
-            db_event.id, severity, location_name, lat, lon, is_geolocated, url[:80],
+            "RSS event #%d | sev=%s | loc='%s' -> %s | geo=%s | %s",
+            db_event.id, severity, location_name,
+            f"({lat:.2f},{lon:.2f}) {geo.precision} ±{geo.uncertainty_m}m" if geo else "NULL",
+            is_geolocated, url[:80],
         )
 
 

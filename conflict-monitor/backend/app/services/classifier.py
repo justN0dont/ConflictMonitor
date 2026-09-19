@@ -176,7 +176,11 @@ Example: {"event_type":"military","severity":7,"location_name":"Natanz","summary
 
 class ClassifierResult(BaseModel):
     event_type: str = "military"
-    severity: int = Field(default=5, ge=1, le=10)
+    # default=None, NOT 5. With default=5 a reply that simply omitted the key
+    # validated clean and emerged as a median threat stamped
+    # extraction_status="ok" — an invented measurement indistinguishable from
+    # a real one. None means Claude did not give us a severity.
+    severity: int | None = Field(default=None, ge=1, le=10)
     location_name: str = "Unknown"
     summary: str = ""
     is_noise: bool = False   # set by post-init logic, not from Claude output
@@ -187,10 +191,15 @@ class ClassifierResult(BaseModel):
         allowed = {"military", "diplomatic", "economic", "humanitarian", "cyber"}
         return v if v in allowed else "military"
 
-    @field_validator("severity")
-    @classmethod
-    def clamp_severity(cls, v):
-        return max(1, min(10, v))
+    # clamp_severity was deleted here, not repaired. It was dead code:
+    # Field(ge=1, le=10) rejects an out-of-range value before a mode="after"
+    # validator ever runs, so severity=11 raised ValidationError and never
+    # reached the clamp. Moving the clamp to mode="before" would have brought
+    # it to life — and that is the wrong repair. A reply of 11 is not a 10; it
+    # is a reply that did not follow the schema. Clamping would manufacture a
+    # measurement out of a parse failure, which is the exact defect this pass
+    # exists to remove. Out of range stays a parse failure, retried, and
+    # finally recorded as a fallback with no severity at all.
 
     @field_validator("location_name")
     @classmethod
@@ -280,8 +289,12 @@ async def classify_message(raw_text: str) -> dict:
             classified = result.model_dump()
 
             # Claude signals noise/commentary by returning summary="[NOISE]" or severity=1
-            # Mark it so callers can fast-drop without geocoding
-            if classified["summary"] == "[NOISE]" or classified["severity"] <= 1:
+            # Mark it so callers can fast-drop without geocoding.
+            # A missing severity is NOT a severity of 1: an omitted key says
+            # nothing about whether the message was noise, so it must not
+            # short-circuit to a drop here.
+            severity = classified["severity"]
+            if classified["summary"] == "[NOISE]" or (severity is not None and severity <= 1):
                 classified["is_noise"] = True
                 classified["extraction_status"] = "ok"
                 logger.debug("Classifier: noise/commentary dropped: %s", raw_text[:80])
@@ -301,7 +314,7 @@ async def classify_message(raw_text: str) -> dict:
             classified["is_noise"] = False
             classified["extraction_status"] = "ok"
             logger.info(
-                "Classified: type=%s sev=%d loc='%s'",
+                "Classified: type=%s sev=%s loc='%s'",
                 classified["event_type"],
                 classified["severity"],
                 classified["location_name"],
@@ -337,9 +350,12 @@ def _build_fallback(raw_text: str, status: str) -> dict:
     flag_countries = _extract_flags(raw_text)
     regex_loc = _regex_location_fallback(raw_text)
     location = regex_loc or (flag_countries[0] if flag_countries else "Unknown")
+    # No "severity" key at all. A fallback is a regex scrape of the raw text,
+    # not a threat assessment — it has no severity to report, and writing 5
+    # here is what put a median threat score on 86.3% of the archive. Callers
+    # read this with .get("severity"), so the absent key surfaces as None.
     return {
         "event_type": "military",
-        "severity": 5,
         "location_name": location,
         "summary": raw_text[:200],
         "extraction_status": status,

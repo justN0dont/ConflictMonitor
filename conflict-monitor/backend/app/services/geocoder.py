@@ -24,20 +24,175 @@ import asyncio
 import logging
 import re
 from collections import OrderedDict
+from math import cos, hypot, radians
+from typing import NamedTuple
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 # =========================================================================
+# PRECISION MODEL
+# =========================================================================
+# A bare (lat, lon) is the same shape whether it came from a centrifuge hall
+# or from "United States", so the caller could not tell a 500m answer from a
+# continental one. GeoResult carries how precise the answer is and how it was
+# reached. Returning None still means "not a place / unresolved" — that case
+# is not a coordinate and must never be given one.
+
+class GeoResult(NamedTuple):
+    lat: float
+    lon: float
+    precision: str       # facility | city | admin1 | country_centroid | region_named
+    # None means the extent was never measured and no estimate applies. It is
+    # not "zero" and not "small": callers must render it as unknown rather
+    # than invent a bound. Only the Nominatim path can produce it, when the
+    # response carried no bounding box.
+    uncertainty_m: int | None
+    method: str          # table-exact | directional-exact | partial | nominatim
+
+
+PRECISION_FACILITY = "facility"
+PRECISION_CITY = "city"
+PRECISION_ADMIN1 = "admin1"
+PRECISION_COUNTRY = "country_centroid"
+PRECISION_REGION = "region_named"
+
+# Per-tier uncertainty for table hits. THESE ARE ESTIMATES, NOT MEASUREMENTS.
+# The table stores one point per name and carries no extent, so there is
+# nothing here to measure: a facility is a few hundred metres across, a city
+# centroid is wrong by single-digit kilometres at the edges, an admin1
+# centroid by ~100km, and a named sea or strait is tens of km wide. Nominatim
+# hits do NOT use this map — their uncertainty is computed from the response's
+# own bounding box, which is a real measurement of the thing that was found.
+_TIER_UNCERTAINTY_M: dict[str, int] = {
+    PRECISION_FACILITY: 500,
+    PRECISION_CITY: 10_000,
+    PRECISION_ADMIN1: 100_000,
+    PRECISION_REGION: 50_000,
+    PRECISION_COUNTRY: 500_000,
+}
+
+# Exactly one tier coarser. A partial match ("strike near Natanz") names a
+# place the event was NEAR, not the place itself, so it may never claim the
+# tier an exact hit would have claimed. Tiers not listed are unchanged: a
+# region or a country centroid is already as coarse as it gets.
+_COARSER: dict[str, str] = {
+    PRECISION_FACILITY: PRECISION_CITY,
+    PRECISION_CITY: PRECISION_ADMIN1,
+}
+
+# Most precise first. Used to pick a winner when several table keys share one
+# coordinate (see _build_coord_precision).
+_PRECISION_RANK: dict[str, int] = {
+    PRECISION_FACILITY: 0,
+    PRECISION_CITY: 1,
+    PRECISION_REGION: 2,
+    PRECISION_ADMIN1: 3,
+    PRECISION_COUNTRY: 4,
+}
+
+# Water names, split by scale. Both are derived from the key itself so that
+# adding "Gulf of Sidra" to the table needs no second edit here.
+#
+# The split exists because one water tier was a lie at both ends: a strait is
+# a chokepoint tens of km across, while "Arabian Sea" is 2,400km across and
+# "Mediterranean" 3,900km. Calling both region_named stamped ±50km on a body
+# of water the size of a continent — a 48x understatement in the one field
+# that is supposed to bound the answer.
+_CHOKEPOINT_RE = re.compile(
+    r"\b(strait|straits|bab|mandeb|mandab|hormuz|channel|canal|bay)\b"
+)
+_OPEN_WATER_RE = re.compile(r"\b(sea|gulf|ocean|waters)\b|mediterranean")
+
+# Either kind of water, for callers that only care that it is not land.
+_WATER_RE = re.compile(
+    _CHOKEPOINT_RE.pattern + "|" + _OPEN_WATER_RE.pattern
+)
+
+# Key text that names a built facility rather than a settlement.
+_FACILITY_RE = re.compile(
+    r"\b(airbase|air base|afb|base|facility|enrichment|port|refinery|terminal"
+    r"|plant|reactor|airport|field|complex|hq)\b"
+)
+
+# Table keys that name an area rather than a settlement or a structure.
+#
+# This is an explicit list, and it is explicit on purpose. Every other tier in
+# this file is derived from the key's own text, because "airbase" and "strait"
+# are words that carry their own scale. "Oman", "Sinai" and "Nineveh" do not:
+# nothing in those strings distinguishes a governorate of 37,000 km2 from a
+# town, and no regex ever will — it is world knowledge, not spelling. The
+# alternative was to keep defaulting them to city, which is what shipped:
+# Oman resolved to a point in empty desert and claimed ±10km, while Iran, the
+# same class of name, reached Nominatim and honestly reported ±1,231km. Two
+# orders of magnitude apart, and the confident one was the wrong one.
+#
+# It names only the exceptions — a dozen entries out of 375, not an audit of
+# the table. Anything absent keeps its derived tier.
+_AREA_KEYS: dict[str, str] = {
+    "oman":                 PRECISION_COUNTRY,   # country centroid, empty desert
+    "kuwait":               PRECISION_ADMIN1,    # the country, not Kuwait City
+    "sinai":                PRECISION_ADMIN1,    # ~60,000 km2
+    "west bank":            PRECISION_ADMIN1,
+    "golan":                PRECISION_ADMIN1,
+    "golan heights":        PRECISION_ADMIN1,
+    "nineveh":              PRECISION_ADMIN1,    # governorate
+    "bekaa":                PRECISION_ADMIN1,    # governorate
+    "beqaa":                PRECISION_ADMIN1,
+    "west bekaa":           PRECISION_ADMIN1,
+    "nabatieh governorate": PRECISION_ADMIN1,    # 'nabatieh' the city stays city
+    "baalbek district":     PRECISION_ADMIN1,    # 'baalbek' the city stays city
+    "qalamoun":             PRECISION_ADMIN1,    # mountain region
+    "ghawar":               PRECISION_ADMIN1,    # oil field, ~280km long
+}
+
+
+def _key_precision(key: str) -> str:
+    """Tier implied by one table key's own text."""
+    area = _AREA_KEYS.get(key)
+    if area is not None:
+        return area
+    if _CHOKEPOINT_RE.search(key):
+        return PRECISION_REGION
+    if _OPEN_WATER_RE.search(key):
+        return PRECISION_COUNTRY
+    if _FACILITY_RE.search(key):
+        return PRECISION_FACILITY
+    return PRECISION_CITY
+
+
+def _build_coord_precision(
+    table: dict[str, tuple[float, float]]
+) -> dict[tuple[float, float], str]:
+    """Resolve a tier per COORDINATE, not per key.
+
+    A bare name and its qualified aliases share one point: "natanz",
+    "natanz enrichment" and "natanz nuclear" are all (33.7224, 51.7261), and
+    that point is the enrichment complex — the module docstring says so. The
+    bare key names no facility, so keying off it alone would call the
+    centrifuge halls a city. Instead every key pointing at a point votes and
+    the most precise vote wins. That keeps the tier derived from the table
+    rather than from a hand-audit of 385 entries.
+    """
+    best: dict[tuple[float, float], str] = {}
+    for key, coords in table.items():
+        tier = _key_precision(key)
+        current = best.get(coords)
+        if current is None or _PRECISION_RANK[tier] < _PRECISION_RANK[current]:
+            best[coords] = tier
+    return best
+
+
+# =========================================================================
 # LRU CACHE
 # =========================================================================
 
-_cache: OrderedDict[str, tuple[float, float] | None] = OrderedDict()
+_cache: OrderedDict[str, GeoResult | None] = OrderedDict()
 _CACHE_MAX = 1000
 
 
-def _cache_get(key: str) -> tuple[float, float] | None | bool:
+def _cache_get(key: str) -> GeoResult | None | bool:
     normalized = key.strip().lower()
     if normalized in _cache:
         _cache.move_to_end(normalized)
@@ -45,7 +200,7 @@ def _cache_get(key: str) -> tuple[float, float] | None | bool:
     return False
 
 
-def _cache_set(key: str, value: tuple[float, float] | None):
+def _cache_set(key: str, value: GeoResult | None):
     normalized = key.strip().lower()
     _cache[normalized] = value
     _cache.move_to_end(normalized)
@@ -162,7 +317,13 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "ahvaz airbase":               (31.3183, 48.6706),
     "omidiyeh":                    (30.8350, 49.5350),   # IRIAF base
     "hamadan":                     (34.8685, 48.5355),
-    "shahrokhi airbase":           (34.8685, 48.5355),
+    # Shahrokhi is the pre-1979 name of Shahid Nojeh Air Base, which this
+    # table already places at (35.2100, 48.6500) under three other keys. It
+    # was tabled here on Hamadan CITY CENTRE, 40km away — an internal
+    # contradiction the table settles by itself. Left as it was, the shared
+    # coordinate made the tier vote stamp "facility ±500m" on a city of
+    # 550,000 people.
+    "shahrokhi airbase":           (35.2100, 48.6500),
     "nojeh":                       (35.2100, 48.6500),
     "shahid nojeh":                (35.2100, 48.6500),
     "nojeh airbase":               (35.2100, 48.6500),
@@ -571,6 +732,47 @@ _DIRECTIONAL_PATTERNS: list[tuple[str, tuple[float, float], re.Pattern[str]]] = 
     for name, coords in _DIRECTIONAL_REGIONS.items()
 ]
 
+# Derived tiers, built once at import from the tables above.
+# A directional region is an admin1-scale area unless its name is water.
+_KNOWN_PRECISION: dict[tuple[float, float], str] = _build_coord_precision(KNOWN_LOCATIONS)
+_DIRECTIONAL_PRECISION: dict[str, str] = {
+    name: (
+        PRECISION_REGION if _CHOKEPOINT_RE.search(name)
+        else PRECISION_COUNTRY if _OPEN_WATER_RE.search(name)
+        else PRECISION_ADMIN1
+    )
+    for name in _DIRECTIONAL_REGIONS
+}
+
+
+def _precision_for_key(key: str, coords: tuple[float, float]) -> str:
+    """Tier for one table lookup.
+
+    _KNOWN_PRECISION resolves a tier per COORDINATE, which is what lets a bare
+    "natanz" inherit "facility" from the qualified aliases sharing its point.
+    That inference must not outrank a declaration: "nineveh" is tabled on
+    Mosul's coordinate and "baalbek district" on Baalbek's, so the
+    most-precise-vote rule handed a governorate the city's ±10km. An entry in
+    _AREA_KEYS is a statement about what the NAME covers, so it wins over a
+    tier inferred from whatever else happens to sit on the same point.
+    """
+    declared = _AREA_KEYS.get(key)
+    if declared is not None:
+        return declared
+    return _KNOWN_PRECISION[coords]
+
+
+def _table_result(
+    coords: tuple[float, float], precision: str, method: str
+) -> GeoResult:
+    return GeoResult(
+        lat=coords[0],
+        lon=coords[1],
+        precision=precision,
+        uncertainty_m=_TIER_UNCERTAINTY_M[precision],
+        method=method,
+    )
+
 
 # =========================================================================
 # NOMINATIM CLIENT
@@ -581,7 +783,48 @@ _last_nominatim_call = 0.0
 _VIEWBOX = "25,8,70,42"  # lon_min, lat_min, lon_max, lat_max  (wider Middle East)
 
 
-async def _query_nominatim(location_name: str) -> tuple[float, float] | None:
+def _precision_from_bbox(bbox) -> tuple[str, int | None]:
+    """Derive the tier from Nominatim's own bounding box.
+
+    Nominatim returns "boundingbox" as [lat_min, lat_max, lon_min, lon_max]
+    and this code used to throw it away, which is why "United States" came
+    back looking exactly like a street address. The box is the extent of the
+    thing that was found, so its diagonal is the only honest measure of how
+    precise the returned centroid is.
+    """
+    # No usable extent in the response. Claim the coarsest tier — we cannot
+    # tell a building from a country — and report uncertainty as None.
+    #
+    # It used to borrow 500km from _TIER_UNCERTAINTY_M here, which was the
+    # one thing this function exists to stop: that map is a set of estimates
+    # for table hits, nothing measured it, and on a Nominatim reply it is not
+    # even the right order of magnitude (a measured US bbox is ±18,267km,
+    # 36x larger). A number nobody measured does not belong in the field
+    # whose whole purpose is to carry a measured bound.
+    if not bbox or len(bbox) != 4:
+        return PRECISION_COUNTRY, None
+    try:
+        lat_min, lat_max, lon_min, lon_max = (float(v) for v in bbox)
+    except (TypeError, ValueError):
+        return PRECISION_COUNTRY, None
+
+    mid_lat = (lat_min + lat_max) / 2.0
+    lat_span_m = abs(lat_max - lat_min) * 111_320.0
+    lon_span_m = abs(lon_max - lon_min) * 111_320.0 * cos(radians(mid_lat))
+    diagonal_m = hypot(lat_span_m, lon_span_m)
+
+    if diagonal_m < 2_000:
+        precision = PRECISION_FACILITY
+    elif diagonal_m < 25_000:
+        precision = PRECISION_CITY
+    elif diagonal_m < 200_000:
+        precision = PRECISION_ADMIN1
+    else:
+        precision = PRECISION_COUNTRY
+    return precision, int(diagonal_m / 2)
+
+
+async def _query_nominatim(location_name: str) -> GeoResult | None:
     global _last_nominatim_call
 
     async with _nominatim_semaphore:
@@ -611,10 +854,26 @@ async def _query_nominatim(location_name: str) -> tuple[float, float] | None:
                 if resp.status_code == 200:
                     results = resp.json()
                     if results:
-                        lat = float(results[0]["lat"])
-                        lon = float(results[0]["lon"])
-                        logger.info("Nominatim resolved '%s' → (%.4f, %.4f)", location_name, lat, lon)
-                        return (lat, lon)
+                        top = results[0]
+                        lat = float(top["lat"])
+                        lon = float(top["lon"])
+                        precision, uncertainty_m = _precision_from_bbox(
+                            top.get("boundingbox")
+                        )
+                        logger.info(
+                            "Nominatim resolved '%s' → (%.4f, %.4f) "
+                            "[%s ±%sm, addresstype=%s]",
+                            location_name, lat, lon, precision,
+                            uncertainty_m if uncertainty_m is not None else "unmeasured",
+                            top.get("addresstype") or top.get("type") or "?",
+                        )
+                        return GeoResult(
+                            lat=lat,
+                            lon=lon,
+                            precision=precision,
+                            uncertainty_m=uncertainty_m,
+                            method="nominatim",
+                        )
                 else:
                     logger.warning("Nominatim HTTP %d for '%s'", resp.status_code, location_name)
         except Exception as e:
@@ -640,15 +899,18 @@ _NOT_A_PLACE: frozenset[str] = frozenset({
 # PUBLIC API
 # =========================================================================
 
-async def geocode(location_name: str) -> tuple[float, float] | None:
-    """Resolve a location name to (lat, lon).
+async def geocode(location_name: str) -> GeoResult | None:
+    """Resolve a location name to a GeoResult, or None if it is not a place.
 
     Pipeline:
       1. Cache
       2. Directional region table ("southern Lebanon" → Tyre region)
       3. Precision facility table (400+ entries)
-      4. Partial match (longest matching substring wins)
+      4. Partial match (longest matching substring wins), one tier coarser
       5. Nominatim API
+
+    None means "not a place, or unresolved". Callers must persist that as NULL
+    geometry — there is no placeholder coordinate for an unknown location.
     """
     if not location_name or location_name.strip().lower() in _NOT_A_PLACE:
         return None
@@ -663,35 +925,49 @@ async def geocode(location_name: str) -> tuple[float, float] | None:
 
     # 2. Directional region table (exact match on normalized)
     if normalized in _DIRECTIONAL_REGIONS:
-        coords = _DIRECTIONAL_REGIONS[normalized]
-        _cache_set(name, coords)
-        logger.debug("Directional region '%s' → %s", name, coords)
-        return coords
+        result = _table_result(
+            _DIRECTIONAL_REGIONS[normalized],
+            _DIRECTIONAL_PRECISION[normalized],
+            "directional-exact",
+        )
+        _cache_set(name, result)
+        logger.debug("Directional region '%s' → %s", name, result)
+        return result
 
     # 3. Precision table — exact match
     if normalized in KNOWN_LOCATIONS:
         coords = KNOWN_LOCATIONS[normalized]
-        _cache_set(name, coords)
-        logger.debug("Precision table exact '%s' → %s", name, coords)
-        return coords
+        result = _table_result(
+            coords, _precision_for_key(normalized, coords), "table-exact"
+        )
+        _cache_set(name, result)
+        logger.debug("Precision table exact '%s' → %s", name, result)
+        return result
 
     # 4. Partial match — find longest known name appearing as whole words in the query
     #    (handles "strike near Natanz" → "natanz", "Fordow enrichment complex" → "fordow enrichment")
+    #    The event happened NEAR the matched place, not AT it, so the tier drops
+    #    one step: "strike near Natanz" is not Natanz.
     best_match: tuple[float, float] | None = None
+    best_precision = PRECISION_CITY
     best_len = 0
     for known_name, coords, pattern in _KNOWN_PATTERNS:
         if len(known_name) > best_len and pattern.search(normalized):
             best_match = coords
+            best_precision = _precision_for_key(known_name, coords)
             best_len = len(known_name)
     if not best_match:
         for known_name, coords, pattern in _DIRECTIONAL_PATTERNS:
             if len(known_name) > best_len and pattern.search(normalized):
                 best_match = coords
+                best_precision = _DIRECTIONAL_PRECISION[known_name]
                 best_len = len(known_name)
     if best_match:
-        _cache_set(name, best_match)
-        logger.debug("Partial match '%s' (len=%d) → %s", name, best_len, best_match)
-        return best_match
+        coarser = _COARSER.get(best_precision, best_precision)
+        result = _table_result(best_match, coarser, "partial")
+        _cache_set(name, result)
+        logger.debug("Partial match '%s' (len=%d) → %s", name, best_len, result)
+        return result
 
     # 5. Nominatim
     result = await _query_nominatim(name)

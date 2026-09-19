@@ -18,7 +18,11 @@ class Event(Base):
     raw_text: Mapped[str] = mapped_column(Text, default="")
     summary: Mapped[str] = mapped_column(Text, default="")
     event_type: Mapped[str] = mapped_column(String(50), default="military")
-    severity: Mapped[int] = mapped_column(Integer, default=5)
+    # Nullable with no default: "we did not measure severity" has to be
+    # representable. A default of 5 wrote the classifier's failure fallback to
+    # disk as though it were a classification (86.3% of the archive is exactly
+    # 5). NULL means unmeasured; it is not a low score and not a high one.
+    severity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     lat: Mapped[float | None] = mapped_column(Float, nullable=True)
     lon: Mapped[float | None] = mapped_column(Float, nullable=True)
     geometry: Mapped[str | None] = mapped_column(
@@ -38,6 +42,12 @@ class Event(Base):
     source_url: Mapped[str] = mapped_column(Text, default="")
     extraction_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     is_geolocated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # How precisely the location resolved, and how. NULL on every row written
+    # before these columns existed, so the archive stays distinguishable from
+    # a row that was actually measured.
+    geo_precision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    geo_uncertainty_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    geo_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class ChannelCheckpoint(Base):

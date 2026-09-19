@@ -45,6 +45,9 @@ async def lifespan(app: FastAPI):
             ("source_url",          "TEXT",    "''"),
             ("extraction_status",   "TEXT",    "NULL"),
             ("is_geolocated",       "BOOLEAN", "NULL"),
+            ("geo_precision",       "TEXT",    "NULL"),
+            ("geo_uncertainty_m",   "INTEGER", "NULL"),
+            ("geo_method",          "TEXT",    "NULL"),
         ]
         for col, col_type, default in migrations:
             try:
@@ -54,6 +57,55 @@ async def lifespan(app: FastAPI):
                 ))
             except Exception:
                 pass
+
+        # severity was created NOT NULL DEFAULT 5, which made "we did not
+        # measure severity" unrepresentable and stamped the classifier's
+        # fallback on disk as a finding. create_all never alters an existing
+        # column, so the constraint has to be dropped explicitly. Idempotent:
+        # DROP NOT NULL on an already-nullable column is a no-op.
+        try:
+            await conn.execute(text("ALTER TABLE events ALTER COLUMN severity DROP NOT NULL"))
+            await conn.execute(text("ALTER TABLE events ALTER COLUMN severity DROP DEFAULT"))
+        except Exception:
+            pass
+
+        # ── One-off: retire the Indian Ocean sentinel ───────────────────────
+        # Unlocated events used to be written to (-25.0, 80.0), open ocean
+        # south-west of Australia, because the schema had no way to say "we
+        # could not place this". They are now written with NULL coordinates,
+        # but every row already on disk still carries the sentinel — and the
+        # definition of "located" moved to "geometry IS NOT NULL" underneath
+        # them. That made the archive read as MORE located than before this
+        # change: geo-stats counted them as geolocated, _fix_null_coords_task
+        # (which now selects geometry IS NULL) could no longer see the only
+        # rows that actually need repair, and the map kept drawing them in
+        # the sea. Normalising them is what makes the new definition true of
+        # the whole table instead of only of new writes.
+        #
+        # (-25.0, 80.0) is not a place any event has ever happened, and
+        # nothing geocodes there any more, so this cannot destroy a real
+        # coordinate. Idempotent: after the first run no row matches.
+        #
+        # Deliberately NOT done here: nulling severity on rows whose
+        # extraction_status is a failure value. Those 5s are provably the old
+        # _build_fallback default rather than measurements, but the
+        # re-classify admin task writes a real severity without clearing the
+        # stale status, so the same predicate would also erase measured
+        # values. That one needs a decision, not a startup migration.
+        try:
+            res = await conn.execute(text(
+                "UPDATE events SET lat = NULL, lon = NULL, geometry = NULL, "
+                "is_geolocated = false, geo_precision = NULL, "
+                "geo_uncertainty_m = NULL, geo_method = NULL "
+                "WHERE lat = -25.0 AND lon = 80.0"
+            ))
+            if res.rowcount:
+                logger.info(
+                    "  Retired Indian Ocean sentinel on %d event(s) — "
+                    "they are now honestly unlocated", res.rowcount,
+                )
+        except Exception:
+            logger.exception("Sentinel retirement migration failed")
 
         # Index on telegram_message_id for fast dedup lookups
         try:

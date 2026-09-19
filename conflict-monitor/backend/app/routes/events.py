@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
-from sqlalchemy import delete, func, select, or_, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import async_session as make_session, get_session
@@ -20,8 +20,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/events", tags=["events"])
 
-_UNKNOWN_LAT = -25.0
-_UNKNOWN_LON = 80.0
+# The unknown-coordinate sentinel constants are gone. "Unlocated" is now a
+# single fact in one place: geometry IS NULL. Float-equality against the old
+# sentinel latitude also miscounted any genuine event sitting at that
+# latitude, so this is a correctness fix as well as a cleanup.
 
 
 @router.get("", response_model=list[EventRead])
@@ -71,17 +73,11 @@ async def get_event(event_id: int, session: AsyncSession = Depends(get_session))
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def _fix_null_coords_task():
-    """Background: re-geocode all events with null or Indian Ocean lat/lon."""
+    """Background: re-geocode every event that has no location."""
     from app.db import async_session as make_session
 
     async with make_session() as session:
-        stmt = select(Event).where(
-            or_(
-                Event.lat.is_(None),
-                Event.lon.is_(None),
-                (Event.lat == _UNKNOWN_LAT),
-            )
-        ).order_by(Event.id)
+        stmt = select(Event).where(Event.geometry.is_(None)).order_by(Event.id)
         result = await session.execute(stmt)
         events = result.scalars().all()
 
@@ -99,7 +95,11 @@ async def _fix_null_coords_task():
                 try:
                     classified = await classify_message(ev.raw_text)
                     location_name = (classified.get("location_name") or "").strip()
-                    new_severity = classified.get("severity", ev.severity)
+                    # A re-classification that produced no severity must not
+                    # erase the one already on the row.
+                    reclassified_severity = classified.get("severity")
+                    if reclassified_severity is not None:
+                        new_severity = reclassified_severity
                     new_summary = classified.get("summary", ev.summary)
                 except Exception as e:
                     logger.warning("Re-classify failed for event #%d: %s", ev.id, e)
@@ -108,14 +108,14 @@ async def _fix_null_coords_task():
         if not location_name or location_name.lower() in ("unknown", "n/a", ""):
             continue
 
-        coords = await geocode(location_name)
-        if not coords:
+        geo = await geocode(location_name)
+        if not geo:
             logger.debug("Still no coords for event #%d (loc='%s')", ev.id, location_name)
             # Nominatim rate-limits — still sleep before next request
             await asyncio.sleep(1.2)
             continue
 
-        lat, lon = coords
+        lat, lon = geo.lat, geo.lon
         async with make_session() as session:
             result = await session.execute(select(Event).where(Event.id == ev.id))
             db_ev = result.scalar_one_or_none()
@@ -126,10 +126,15 @@ async def _fix_null_coords_task():
                 db_ev.location_name = location_name
                 db_ev.severity = new_severity
                 db_ev.summary = new_summary
+                db_ev.is_geolocated = True
+                db_ev.geo_precision = geo.precision
+                db_ev.geo_uncertainty_m = geo.uncertainty_m
+                db_ev.geo_method = geo.method
                 await session.commit()
                 fixed += 1
                 logger.info(
-                    "Fixed event #%d: loc='%s' -> (%.2f, %.2f)", ev.id, location_name, lat, lon
+                    "Fixed event #%d: loc='%s' -> (%.2f, %.2f) %s ±%dm",
+                    ev.id, location_name, lat, lon, geo.precision, geo.uncertainty_m,
                 )
 
         await asyncio.sleep(1.2)  # Nominatim: max 1 req/sec
@@ -194,12 +199,12 @@ async def _reclassify_vague_locations_task():
             if not new_loc or new_loc.lower() in _VAGUE_LOCATIONS:
                 continue
 
-            coords = await geocode(new_loc)
-            if not coords:
+            geo = await geocode(new_loc)
+            if not geo:
                 await asyncio.sleep(1.2)
                 continue
 
-            lat, lon = coords
+            lat, lon = geo.lat, geo.lon
             async with make_session() as session:
                 db_result = await session.execute(select(Event).where(Event.id == ev.id))
                 db_ev = db_result.scalar_one_or_none()
@@ -208,6 +213,10 @@ async def _reclassify_vague_locations_task():
                     db_ev.lat = lat
                     db_ev.lon = lon
                     db_ev.geometry = from_shape(Point(lon, lat), srid=4326)
+                    db_ev.is_geolocated = True
+                    db_ev.geo_precision = geo.precision
+                    db_ev.geo_uncertainty_m = geo.uncertainty_m
+                    db_ev.geo_method = geo.method
                     if classified.get("severity"):
                         db_ev.severity = classified["severity"]
                     if classified.get("summary"):
@@ -287,18 +296,16 @@ async def dedup_events(session: AsyncSession = Depends(get_session)):
 
 @router.get("/admin/geo-stats")
 async def geo_stats(session: AsyncSession = Depends(get_session)):
-    """Show counts of geolocated vs unknown-location events."""
+    """Show counts of geolocated vs unknown-location events.
+
+    One definition of located, used by both halves: geometry IS NOT NULL.
+    """
     total = (await session.execute(select(func.count(Event.id)))).scalar_one()
     geolocated = (await session.execute(
-        select(func.count(Event.id)).where(
-            Event.lat.isnot(None),
-            Event.lat != _UNKNOWN_LAT,
-        )
+        select(func.count(Event.id)).where(Event.geometry.isnot(None))
     )).scalar_one()
     unknown = (await session.execute(
-        select(func.count(Event.id)).where(
-            or_(Event.lat.is_(None), Event.lat == _UNKNOWN_LAT)
-        )
+        select(func.count(Event.id)).where(Event.geometry.is_(None))
     )).scalar_one()
     return {
         "total": total,

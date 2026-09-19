@@ -4,7 +4,7 @@ import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingStatus, JammingZone, TLERecord, TrackHistory, Vessel } from "../hooks/useTracking";
 import { GlobeView } from "./GlobeView";
 import { CesiumView } from "./CesiumView";
-import { EVENT_TYPES, eventVisual } from "../lib/tokens";
+import { EVENT_TYPES, eventVisual, formatUncertainty, geoPrecision } from "../lib/tokens";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
 
@@ -19,7 +19,19 @@ interface MapPanelProps {
   vesselTracks: TrackHistory;
 }
 
-/** Small diamond marker with type color and severity ring */
+/**
+ * Event mark. Geometry carries the geocoder's precision, size carries severity.
+ *
+ * A facility fix and a country centroid used to draw the same 8px dot, which
+ * read every coordinate as a street address. Now only the tiers that really are
+ * points keep a crisp edge; admin1 / region_named / country_centroid draw as a
+ * blurred disc whose diameter grows with how vague the claim is. The blur is a
+ * static CSS filter, not motion, so prefers-reduced-motion has nothing to undo.
+ *
+ * A null geo_precision means the tier was never measured, so the mark falls back
+ * to the neutral dot and claims nothing about extent. A null severity takes the
+ * smallest core rather than the size a severity of 5 would have drawn.
+ */
 function PingMarker({
   evt,
   isNew,
@@ -30,23 +42,34 @@ function PingMarker({
   onClick: () => void;
 }) {
   const color = eventVisual(evt.event_type).color;
-  const isHighSeverity = evt.severity >= 8;
-  // Core size: 6-10px based on severity
-  const dotSize = 6 + evt.severity * 0.4;
+  const sev = evt.severity;
+  const isHighSeverity = sev != null && sev >= 8;
+  // Core size: 6-10px based on severity; the floor when it was never measured.
+  const dotSize = sev == null ? 6 : 6 + sev * 0.4;
+
+  const spec = geoPrecision(evt.geo_precision);
+  const diffuse = spec != null && spec.blur > 0;
+  const discSize = dotSize + (spec?.spread ?? 0);
+  // The box has to hold the widest thing drawn in it, or the disc gets clipped.
+  const box = Math.max(24, discSize + 12);
 
   return (
     <div
       style={{
         position: "relative",
-        width: 24,
-        height: 24,
+        width: box,
+        height: box,
         cursor: "pointer",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
       }}
       onClick={onClick}
-      title={evt.summary}
+      title={
+        spec
+          ? `${evt.summary} — ${spec.label}`
+          : `${evt.summary} — precision not recorded`
+      }
     >
       {/* Radar ping on new events */}
       {isNew && (
@@ -63,8 +86,41 @@ function PingMarker({
         />
       )}
 
-      {/* Outer severity ring (only for severity >= 5) */}
-      {evt.severity >= 5 && (
+      {/* Diffuse disc: for a coarse tier the mark IS the uncertainty, so it has
+          no hard edge and no crisp core to mistake for a position. */}
+      {spec != null && spec.blur > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            width: discSize,
+            height: discSize,
+            borderRadius: "50%",
+            background: `radial-gradient(circle, ${color}66 0%, ${color}22 55%, transparent 75%)`,
+            filter: `blur(${spec.blur}px)`,
+            pointerEvents: "none",
+          }}
+        />
+      )}
+
+      {/* A named region keeps a dashed edge, so it stays distinct from the
+          equally diffuse admin1 disc. */}
+      {spec?.ring === "dashed" && (
+        <div
+          style={{
+            position: "absolute",
+            width: discSize,
+            height: discSize,
+            borderRadius: "50%",
+            border: `1px dashed ${color}`,
+            opacity: 0.45,
+            pointerEvents: "none",
+          }}
+        />
+      )}
+
+      {/* Soft ring: city tier always, and the legacy severity ring on rows whose
+          precision was never measured. */}
+      {(spec?.ring === "soft" || (spec == null && sev != null && sev >= 5)) && (
         <div
           style={{
             position: "absolute",
@@ -72,22 +128,30 @@ function PingMarker({
             height: dotSize + 6,
             borderRadius: "50%",
             border: `1px solid ${color}`,
-            opacity: 0.3 + (evt.severity / 10) * 0.4,
+            opacity: sev == null ? 0.3 : 0.3 + (sev / 10) * 0.4,
           }}
         />
       )}
 
-      {/* Core diamond dot */}
-      <div
-        style={{
-          width: dotSize,
-          height: dotSize,
-          borderRadius: isHighSeverity ? "2px" : "50%",
-          transform: isHighSeverity ? "rotate(45deg)" : undefined,
-          background: color,
-          boxShadow: `0 0 ${3 + evt.severity}px ${color}88`,
-        }}
-      />
+      {/* Core diamond dot - only where the evidence really is a point.
+          A row with no geo_precision at all is NOT that case: nothing
+          recorded how precise its coordinate is, and a filled hard-edged dot
+          claims a point regardless of what the data says. Those draw hollow -
+          the position is shown, the extent is left unstated - which is
+          distinct from every measured tier and from the dashed region rim. */}
+      {!diffuse && (
+        <div
+          style={{
+            width: dotSize,
+            height: dotSize,
+            borderRadius: isHighSeverity ? "2px" : "50%",
+            transform: isHighSeverity ? "rotate(45deg)" : undefined,
+            background: spec == null ? "transparent" : color,
+            border: spec == null ? `1px solid ${color}` : undefined,
+            boxShadow: spec == null ? undefined : `0 0 ${3 + (sev ?? 0)}px ${color}88`,
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -105,10 +169,29 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
     MAPBOX_TOKEN ? "2d" : "globe",
   );
 
+  // One definition of "located", shared with the feed (LiveFeed.geoMissing).
+  //
+  // A null coordinate is not the only way a row can be unlocated. Every event
+  // written before the sentinel was retired carries (-25.0, 80.0) - open
+  // ocean south-west of Australia - with is_geolocated false. Filtering on
+  // lat/lon alone drew each of those in the Indian Ocean while the feed
+  // labelled the same row NOT GEOLOCATED and the counter below reported zero:
+  // three surfaces, two definitions. is_geolocated is the row's own statement
+  // about whether it was ever placed, so it decides here too.
   const geoEvents = useMemo(
-    () => events.filter((e) => e.lat != null && e.lon != null),
+    () =>
+      events.filter(
+        (e) => e.lat != null && e.lon != null && e.is_geolocated !== false,
+      ),
     [events],
   );
+
+  // Events in the current window that have no resolved coordinates. They are
+  // deliberately absent from the map - there is no placeholder position - but
+  // they must not vanish without trace, so the legend counts them.
+  const unlocatedCount = events.length - geoEvents.length;
+
+  const selectedPrecision = selected ? geoPrecision(selected.geo_precision) : null;
 
   const airborneAircraft = useMemo(
     () => aircraft.filter((a) => !a.on_ground),
@@ -467,9 +550,26 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                       fontFamily: "var(--font-mono)",
                     }}
                   >
-                    {selected.event_type.toUpperCase()} | SEV{" "}
-                    {selected.severity}/10
+                    {selected.event_type.toUpperCase()} |{" "}
+                    {selected.severity == null
+                      ? "SEV —"
+                      : `SEV ${selected.severity}/10`}
                   </div>
+                  {selectedPrecision && (
+                    <div
+                      style={{
+                        fontSize: 10,
+                        color: "#5a6a7e",
+                        marginTop: 2,
+                        fontFamily: "var(--font-mono)",
+                      }}
+                      title="How precise this coordinate is, from the geocoder."
+                    >
+                      {selectedPrecision.label.toUpperCase()}
+                      {formatUncertainty(selected.geo_uncertainty_m) &&
+                        ` ${formatUncertainty(selected.geo_uncertainty_m)}`}
+                    </div>
+                  )}
                   <div
                     style={{
                       fontSize: 10,
@@ -596,6 +696,25 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 </span>
               </div>
             ))}
+            {unlocatedCount > 0 && (
+              <div
+                style={{ display: "flex", alignItems: "center", gap: 4 }}
+                title="Events in this window that were never placed - no coordinate, or a legacy placeholder coordinate the row itself marks as not geolocated. They are not drawn, and no position is invented for them."
+              >
+                <div
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: "transparent",
+                    border: "1px dashed var(--text-muted)",
+                  }}
+                />
+                <span style={{ color: "var(--text-muted)" }}>
+                  UNLOCATED {unlocatedCount}
+                </span>
+              </div>
+            )}
             {airborneAircraft.length > 0 && (
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="#58d0ff">
