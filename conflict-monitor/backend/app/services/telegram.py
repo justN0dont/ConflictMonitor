@@ -306,6 +306,8 @@ async def _process_message(
             telegram_message_id=message_id,
             source_url=source_url,
             reporting_channels=channel_name,
+            extraction_status=result.get("extraction_status"),
+            is_geolocated=is_geolocated,
         )
         session.add(db_event)
         await session.commit()

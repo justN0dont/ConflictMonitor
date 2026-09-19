@@ -33,6 +33,8 @@ class EventRead(BaseModel):
     location_name: str = ""
     telegram_message_id: int | None = None
     source_url: str = ""
+    extraction_status: str | None = None
+    is_geolocated: bool | None = None
 
     model_config = {"from_attributes": True}
 

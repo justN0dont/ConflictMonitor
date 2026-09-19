@@ -1,7 +1,7 @@
 import datetime
 
 from geoalchemy2 import Geometry
-from sqlalchemy import DateTime, Float, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -36,6 +36,8 @@ class Event(Base):
     location_name: Mapped[str] = mapped_column(Text, default="")
     telegram_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_url: Mapped[str] = mapped_column(Text, default="")
+    extraction_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    is_geolocated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class ChannelCheckpoint(Base):

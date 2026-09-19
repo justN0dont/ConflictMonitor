@@ -42,6 +42,8 @@ async def lifespan(app: FastAPI):
             ("location_name",       "TEXT",    "''"),
             ("telegram_message_id", "INTEGER", "NULL"),
             ("source_url",          "TEXT",    "''"),
+            ("extraction_status",   "TEXT",    "NULL"),
+            ("is_geolocated",       "BOOLEAN", "NULL"),
         ]
         for col, col_type, default in migrations:
             try:

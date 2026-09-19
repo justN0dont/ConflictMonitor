@@ -4,7 +4,7 @@ import logging
 import re
 
 import anthropic
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config import settings
 
@@ -245,7 +245,7 @@ async def classify_message(raw_text: str) -> dict:
 
     if not settings.anthropic_api_key:
         logger.warning("No Anthropic API key — using regex fallback")
-        return _build_fallback(raw_text)
+        return _build_fallback(raw_text, "no_api_key")
 
     # Pre-extract flag countries to hint Claude
     flag_countries = _extract_flags(raw_text)
@@ -254,6 +254,7 @@ async def classify_message(raw_text: str) -> dict:
         hint = f"\n\nFlag context: {', '.join(flag_countries)} are involved."
 
     client = _get_client()
+    status = "llm_failed"
 
     for attempt in range(3):
         try:
@@ -274,6 +275,7 @@ async def classify_message(raw_text: str) -> dict:
             # Mark it so callers can fast-drop without geocoding
             if classified["summary"] == "[NOISE]" or classified["severity"] <= 1:
                 classified["is_noise"] = True
+                classified["extraction_status"] = "ok"
                 logger.debug("Classifier: noise/commentary dropped: %s", raw_text[:80])
                 return classified
 
@@ -289,6 +291,7 @@ async def classify_message(raw_text: str) -> dict:
                     logger.debug("Flag fallback location: '%s'", flag_countries[0])
 
             classified["is_noise"] = False
+            classified["extraction_status"] = "ok"
             logger.info(
                 "Classified: type=%s sev=%d loc='%s'",
                 classified["event_type"],
@@ -298,18 +301,30 @@ async def classify_message(raw_text: str) -> dict:
             return classified
 
         except anthropic.RateLimitError:
+            status = "rate_limited"
             wait = 2 ** (attempt + 1)
             logger.warning("Rate limited, retrying in %ds", wait)
             await asyncio.sleep(wait)
-        except (json.JSONDecodeError, Exception) as e:
+        except (json.JSONDecodeError, ValidationError) as e:
+            status = "parse_failed"
+            logger.error("Classification error (attempt %d): %s", attempt + 1, e)
+            if attempt == 2:
+                break
+        except anthropic.APIStatusError as e:
+            status = f"api_{e.status_code}"
+            logger.error("Classification error (attempt %d): %s", attempt + 1, e)
+            if attempt == 2:
+                break
+        except Exception as e:
+            status = "llm_failed"
             logger.error("Classification error (attempt %d): %s", attempt + 1, e)
             if attempt == 2:
                 break
 
-    return _build_fallback(raw_text)
+    return _build_fallback(raw_text, status)
 
 
-def _build_fallback(raw_text: str) -> dict:
+def _build_fallback(raw_text: str, status: str) -> dict:
     """Build best-effort result without API — uses regex + flag extraction."""
     flag_countries = _extract_flags(raw_text)
     regex_loc = _regex_location_fallback(raw_text)
@@ -319,4 +334,5 @@ def _build_fallback(raw_text: str) -> dict:
         "severity": 5,
         "location_name": location,
         "summary": raw_text[:200],
+        "extraction_status": status,
     }

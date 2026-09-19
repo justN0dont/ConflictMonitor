@@ -308,6 +308,43 @@ async def geo_stats(session: AsyncSession = Depends(get_session)):
     }
 
 
+@router.get("/stats/extraction")
+async def extraction_stats(session: AsyncSession = Depends(get_session)):
+    """Counts by extraction_status and is_geolocated. NULL = row written before
+    these columns existed, so it is distinguishable from a tagged row."""
+    total = (await session.execute(select(func.count(Event.id)))).scalar_one()
+
+    status_rows = await session.execute(
+        select(Event.extraction_status, func.count(Event.id)).group_by(Event.extraction_status)
+    )
+    geo_rows = await session.execute(
+        select(Event.is_geolocated, func.count(Event.id)).group_by(Event.is_geolocated)
+    )
+    # The NULL bucket fuses the pre-existing archive with writers that do not tag
+    # (demo.py, the OSINT import, dedup merges) — split it so it stays readable.
+    untagged_rows = await session.execute(
+        select(Event.source, func.count(Event.id))
+        .where(Event.extraction_status.is_(None))
+        .group_by(Event.source)
+    )
+
+    return {
+        "total": total,
+        "by_extraction_status": {
+            (status if status is not None else "null"): count
+            for status, count in status_rows.all()
+        },
+        "by_is_geolocated": {
+            (str(flag).lower() if flag is not None else "null"): count
+            for flag, count in geo_rows.all()
+        },
+        "untagged_by_source": {
+            (source if source else "null"): count
+            for source, count in untagged_rows.all()
+        },
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ADMIN: One-time import of danielrosehill OSINT confirmed wave dataset
 # Source: https://github.com/danielrosehill/Iran-Israel-War-2026-OSINT-Data

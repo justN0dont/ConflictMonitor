@@ -381,6 +381,8 @@ async def _process_article(
             telegram_message_id=None,
             source_url=url,
             reporting_channels=source_name,
+            extraction_status=result.get("extraction_status"),
+            is_geolocated=is_geolocated,
         )
         session.add(db_event)
         await session.commit()
