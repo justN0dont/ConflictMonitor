@@ -13,6 +13,7 @@ from app.routes.channels import router as channels_router
 from app.routes.events import router as events_router
 from app.routes.tracking import router as tracking_router
 from app.routes.ws import router as ws_router
+from app.services.connectivity import start_connectivity_poller
 from app.services.satellites import start_tle_fetcher
 
 logger = logging.getLogger("conflict-monitor")
@@ -92,6 +93,10 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(start_tle_fetcher()))
         logger.info("CelesTrak TLE fetcher started (real data)")
 
+        # IODA is free, still use real internet-disruption data
+        tasks.append(asyncio.create_task(start_connectivity_poller()))
+        logger.info("IODA connectivity poller started (real data)")
+
     else:
         # ── PRODUCTION MODE ────────────────────────────────────────
         from app.services.telegram import start_telegram_listener
@@ -112,6 +117,10 @@ async def lifespan(app: FastAPI):
         # Satellite TLEs
         tasks.append(asyncio.create_task(start_tle_fetcher()))
         logger.info("CelesTrak TLE fetcher started")
+
+        # Internet-disruption sensors
+        tasks.append(asyncio.create_task(start_connectivity_poller()))
+        logger.info("IODA connectivity poller started")
 
         # Maritime vessels
         tasks.append(asyncio.create_task(start_maritime_poller()))

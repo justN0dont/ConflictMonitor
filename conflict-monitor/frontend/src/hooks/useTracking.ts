@@ -37,6 +37,54 @@ export interface JammingStatus {
   aircraft_evaluable: number;
 }
 
+export type SensorKey = "bgp" | "ping-slash24" | "merit-nt" | "gtr";
+
+/** One IODA sensor, scored against its OWN 24h baseline. */
+export interface ConnectivitySensor {
+  /** False means this sensor could not be read OR could not be scored. */
+  available: boolean;
+  /**
+   * Why it is unavailable, in the backend's own words: fetch_failed (IODA did
+   * not answer) | no_series | all_null | bad_values | stale_series (it stopped
+   * reporting) | insufficient_points | low_baseline (too small to carry a
+   * ratio) | score_failed. "I could not reach it" and "it had nothing to say"
+   * are different facts and stay different here.
+   */
+  reason: string | null;
+  baseline: number | null;
+  current: number | null;
+  /** Fraction, e.g. -0.31. null whenever the sensor is unavailable. */
+  deviation: number | null;
+  depressed: boolean;
+  points: number;
+  /** 24h buckets, downsampled. null = not measured in that bucket, NOT zero. */
+  spark: (number | null)[];
+  /** Seconds between the last real measurement and the poll. IODA's ingest lag
+   *  is part of how old the number is, so the row's age adds it in. */
+  data_age: number | null;
+}
+
+export interface CountryConnectivity {
+  code: string;
+  name: string;
+  sensors: Record<SensorKey, ConnectivitySensor>;
+  sensors_available: number;
+  sensors_depressed: number;
+  /** The backend never averages the four; this is the corroboration verdict. */
+  state: "nominal" | "partial" | "disruption" | "degraded";
+  /** Most negative deviation among AVAILABLE sensors. null = nothing measured. */
+  worst_deviation: number | null;
+  as_of: number;
+}
+
+export interface ConnectivityStatus {
+  status: "ok" | "no_data" | "unavailable";
+  as_of: number;
+  /** Backend poll cadence in seconds - what "stale" means for these rows. */
+  poll_interval: number;
+  cloudflare: { configured: boolean };
+}
+
 export interface Vessel {
   mmsi: string;
   name: string;
@@ -62,6 +110,7 @@ const JAMMING_POLL_MS = 15_000;
 const VESSEL_POLL_MS = 10_000;
 const TLE_POLL_MS = 6 * 3600 * 1000;
 const TRACK_POLL_MS = 15_000;
+const CONNECTIVITY_POLL_MS = 60_000;
 
 export function useTracking() {
   const [aircraft, setAircraft] = useState<Aircraft[]>([]);
@@ -75,6 +124,13 @@ export function useTracking() {
     aircraft_evaluable: 0,
   });
   const [vessels, setVessels] = useState<Vessel[]>([]);
+  const [connectivity, setConnectivity] = useState<CountryConnectivity[]>([]);
+  const [connectivityStatus, setConnectivityStatus] = useState<ConnectivityStatus>({
+    status: "no_data",
+    as_of: 0,
+    poll_interval: 300,
+    cloudflare: { configured: false },
+  });
   const [aircraftTracks, setAircraftTracks] = useState<TrackHistory>({});
   const [vesselTracks, setVesselTracks] = useState<TrackHistory>({});
   const mountedRef = useRef(true);
@@ -113,6 +169,30 @@ export function useTracking() {
     };
     fetchJamming();
     const interval = setInterval(fetchJamming, JAMMING_POLL_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Poll measured internet disruption (IODA). Same shape as the jamming poll:
+  // a status object beside the data, because an empty list of countries and a
+  // feed that has never answered are different facts.
+  useEffect(() => {
+    const fetchConnectivity = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/tracking/connectivity`);
+        if (res.ok) {
+          const data = await res.json();
+          setConnectivity(data.countries ?? []);
+          setConnectivityStatus({
+            status: data.status ?? "no_data",
+            as_of: data.as_of ?? 0,
+            poll_interval: data.poll_interval ?? 300,
+            cloudflare: data.cloudflare ?? { configured: false },
+          });
+        }
+      } catch { /* backend unavailable */ }
+    };
+    fetchConnectivity();
+    const interval = setInterval(fetchConnectivity, CONNECTIVITY_POLL_MS);
     return () => clearInterval(interval);
   }, []);
 
@@ -159,5 +239,5 @@ export function useTracking() {
     return () => clearInterval(interval);
   }, []);
 
-  return { aircraft, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks };
+  return { aircraft, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus };
 }

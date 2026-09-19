@@ -13,7 +13,6 @@
  * DEGRADED means "coverage insufficient to evaluate". It is first-class,
  * because without it a dead sensor launders into a calm reading.
  */
-import type { LucideIcon } from "lucide-react";
 import type {
   Aircraft,
   JammingStatus,
@@ -21,43 +20,10 @@ import type {
   TLERecord,
   Vessel,
 } from "../hooks/useTracking";
-import { STATUS, type StatusKey, formatAge } from "../lib/tokens";
+import { formatAge } from "../lib/tokens";
 import { STALE_AFTER, useFeedAges, type FeedAges } from "../lib/useFeedAges";
 import type { ConflictEvent } from "../types/event";
-
-type RailState = "NOT-OBSERVED" | "WATCH" | "TRIPPED" | "STALE" | "DEGRADED";
-
-const STATE_STATUS: Record<RailState, StatusKey> = {
-  "NOT-OBSERVED": "unknown",
-  WATCH: "good",
-  TRIPPED: "critical",
-  STALE: "warning",
-  DEGRADED: "serious",
-};
-
-/**
- * WATCH is the nominal state and carries no hue at all.
- *
- * Two reasons. (1) status-good is #199e70, which is also the ECONOMIC series
- * hue: a green WATCH chip means the same green says "economic" beside an event
- * and "healthy" 300px below it. (2) Five rows of identical green ticks is a
- * wall, not a scan - nothing stands out because everything is lit. Colour is
- * reserved for the exception, so a TRIPPED, STALE or DEGRADED row is the only
- * thing burning in the rail.
- *
- * And per the palette rules, the hue only ever lands on the MARK (the glyph and
- * the row's left edge). Text always wears a text token.
- */
-const NOMINAL: RailState = "WATCH";
-
-interface Row {
-  name: string;
-  value: string;
-  state: RailState;
-  note: string;
-  age: number | null;
-  detail?: string;
-}
+import { IndicatorRow, type RailState, type Row } from "./IndicatorRow";
 
 interface IndicatorRailProps {
   /** Events inside the active time window. */
@@ -232,68 +198,6 @@ function eventVolumeRow(
     note = "in active window · volume is not escalation";
   }
   return { name: "EVENT VOLUME", value: String(events.length), state, note, age: ages.stream };
-}
-
-function IndicatorRow({ row, tall }: { row: Row; tall?: boolean }) {
-  const status = STATUS[STATE_STATUS[row.state]];
-  const Icon: LucideIcon = status.Icon;
-  const nominal = row.state === NOMINAL;
-  // Hue lands on the mark and the row's left edge only, and only when the row
-  // is an exception. Never on text: text wears text tokens.
-  const mark = nominal ? "var(--text-muted)" : status.color;
-  return (
-    <div
-      className={`grid grid-cols-[14px_minmax(0,1fr)_auto] items-start gap-x-2 border-t border-[var(--border)] pr-3 pl-[10px] ${
-        tall ? "py-2" : "py-[7px]"
-      }`}
-      style={{ borderLeft: `2px solid ${nominal ? "transparent" : status.color}` }}
-    >
-      <Icon
-        size={13}
-        strokeWidth={nominal ? 1.75 : 2.25}
-        style={{ color: mark }}
-        className="mt-[2px]"
-        aria-hidden="true"
-      />
-      <div className="min-w-0">
-        <div className="truncate text-[11px] font-semibold tracking-[0.09em] text-[var(--text-primary)]">
-          {row.name}
-        </div>
-        <div className="mt-[2px] flex min-w-0 items-baseline gap-1.5">
-          <span
-            className={`shrink-0 text-[9px] font-bold tracking-[0.08em] ${
-              nominal ? "text-[var(--text-muted)]" : "text-[var(--text-primary)]"
-            }`}
-          >
-            {row.state}
-          </span>
-          <span className="min-w-0 text-[10px] leading-[1.35] text-[var(--text-muted)]">
-            {row.note}
-          </span>
-        </div>
-        {row.detail && (
-          <div
-            className="mt-[3px] truncate text-[9.5px] tabular-nums tracking-[0.02em] text-[var(--text-muted)]"
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {row.detail}
-          </div>
-        )}
-      </div>
-      <div className="text-right">
-        <div className="text-[15px] font-semibold leading-[1.2] tabular-nums text-[var(--text-primary)]">
-          {row.value}
-        </div>
-        <div
-          className="mt-[3px] text-[10px] tabular-nums text-[var(--text-secondary)]"
-          style={{ fontFamily: "var(--font-mono)" }}
-          title="Age of the data behind this row"
-        >
-          {formatAge(row.age)}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 export function IndicatorRail({

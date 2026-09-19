@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ConnectivityRail } from "./components/ConnectivityRail";
 import { Header } from "./components/Header";
 import { IndicatorRail } from "./components/IndicatorRail";
 import { LiveFeed } from "./components/LiveFeed";
@@ -11,7 +12,7 @@ const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:800
 
 export default function App() {
   const { events, isConnected } = useEventStream();
-  const { aircraft, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks } = useTracking();
+  const { aircraft, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus } = useTracking();
   const [demoMode, setDemoMode] = useState(false);
   const [timeRange, setTimeRange] = useState<{ earliest: Date; latest: Date } | null>(null);
   const [activeRange, setActiveRange] = useState<{ start: Date; end: Date } | null>(null);
@@ -74,6 +75,9 @@ export default function App() {
       <MapPanel events={filteredEvents} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} />
       <div className="sidebar">
         <div className="sidebar-feed"><LiveFeed events={filteredEvents} /></div>
+        <div className="sidebar-connectivity">
+          <ConnectivityRail countries={connectivity} status={connectivityStatus} />
+        </div>
         <div className="sidebar-rail">
           <IndicatorRail
             events={filteredEvents}

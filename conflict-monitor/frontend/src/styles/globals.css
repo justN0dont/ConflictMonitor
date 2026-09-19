@@ -133,6 +133,21 @@ body::before {
   box-shadow: 0 0 1px var(--border-glow), inset 0 0 1px rgba(88, 166, 255, 0.05);
 }
 
+.sidebar-connectivity {
+  /* Nine countries do not fit beside the feed, so this panel takes an equal
+     share of the leftover (measured: ~295px each, about four rows of nine) and
+     scrolls the rest. Two things make that honest, and the panel depends on
+     BOTH: rows are ordered worst-first, so a disruption is always the top row;
+     and the panel's own footer counts the rows that are off screen and the
+     countries nothing is measuring, so the absence signal cannot be the thing
+     that scrolled away. */
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-secondary);
+  box-shadow: 0 0 1px var(--border-glow), inset 0 0 1px rgba(88, 166, 255, 0.05);
+}
+
 .sidebar-rail {
   /* Content-sized: the rail is exactly as tall as its rows, and the feed
      absorbs whatever is left. No magic number to drift when a row is added. */

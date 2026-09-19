@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     opensky_username: str = ""
     opensky_password: str = ""
     aisstream_api_key: str = ""
+    cloudflare_radar_token: str = ""  # optional; empty means Radar is skipped, not failed
     demo_mode: bool = False
     # Only ingest events on or after this date (ISO YYYY-MM-DD)
     conflict_start_date: str = "2026-02-28"

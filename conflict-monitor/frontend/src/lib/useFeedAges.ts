@@ -38,8 +38,9 @@ export const STALE_AFTER: Record<keyof FeedAges, number> = {
 
 const UNSEEN = Symbol("unseen");
 
-/** Wall-clock now, re-read every `intervalMs`. */
-function useNow(intervalMs = 1000): number {
+/** Wall-clock now, re-read every `intervalMs`. Shared: an age that does not
+ *  climb on its own is indistinguishable from a fresh one. */
+export function useNow(intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), intervalMs);
