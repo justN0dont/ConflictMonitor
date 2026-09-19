@@ -7,8 +7,71 @@ than deleting it.
 | | |
 |---|---|
 | Branch | `v3-rebuild` |
-| HEAD at last update | `64b690a` |
+| HEAD at last update | `7ddbe58` |
 | Last updated | 2026-09-18 |
+
+---
+
+## Picking this up again
+
+**State at the last stopping point — 2026-09-18.**
+
+```
+branch  v3-rebuild        HEAD 7ddbe58
+        pre-v3-rebuild-backup  716ffec   snapshot of the tree before the rebuild
+        main                   0f4ad05   the OLD lineage; superseded, kept for reference
+```
+
+Restart the stack (demo mode, no keys needed):
+
+```bash
+cd conflict-monitor
+DEMO_MODE=true docker compose up -d
+# frontend  http://localhost:5173      backend  http://localhost:8000
+```
+
+Two gotchas that will waste your time otherwise:
+
+- **Vite's file watcher does not fire across the Windows bind mount.** Frontend edits appear to do
+  nothing until `docker compose restart frontend`. (Finding `C68`; fix is `server.watch.usePolling`.)
+- **`docker compose restart backend` kills anything you have `exec`'d into that container**, including
+  a long-running probe. Run probes from the host.
+
+### Things that exist outside this repo
+
+| What | Where | Why it matters |
+|---|---|---|
+| Recovered v3 source | `C:/Users/mtt_j/conflict-monitor-v3-recovered/` | 933 KB, **untracked**. Extracted from the local Docker images `conflict-monitor_v3-backend/-frontend` (built 2026-03-15). Includes 52 files reconstructed from the VPS Claude transcripts and the Aug-18 production schema. If those images are pruned this is the only copy. |
+| Production archive | `truthevades:/root/archive/conflict_monitor-20260818.sql.gz` | 193 MB / 83,938 events. The only copy of five months of real ingest. Every statistic in this document comes from it. Not backed up anywhere else. |
+| Local v3 database | docker volume `conflict-monitor_v3_pgdata` | Created 2026-03-16, untouched. |
+
+Query the archive without downloading it — see [`../tools/README.md`](../tools/README.md):
+
+```bash
+scp tools/archive_source_stats.py truthevades:/tmp/
+ssh truthevades 'python3 /tmp/archive_source_stats.py'
+```
+
+### Next three actions
+
+1. **`opensky.py:160`** — the interference fix re-centred the primary poll path but left the OpenSky
+   fallback requesting the old `lamin 15 / lamax 45 / lomin 25 / lomax 65` box. The two paths now
+   disagree about where the AO is. Small, and it is drift introduced on 2026-09-18.
+2. **The three open criticals** — `C5` (geocoder substring match; the word-boundary fix is already
+   simulated across all 3,665 archive strings with zero regressions), `C8` (dedup drops its spatial
+   predicate on NULL coordinates — this one **blocks Phase 1**, it must land in the same commit as
+   the sentinel removal), `C41` (the documented quick start renders a black map).
+3. **Phase 0's last step** — run for a week and record the real fallback rate. Blocked until the
+   Anthropic key is restored.
+
+### Blocked, and not fixable from the code
+
+- **Anthropic key returns `400 organization_on_hold`.** Live classification cannot run at all. Appeal
+  at `console.anthropic.com/appeal` or swap the key. Until then the Phase 0 measurement is stalled and
+  live mode produces 100% `llm_failed` rows.
+- **AISStream has no Persian Gulf coverage.** No code change fixes this; it needs a different source.
+- **CelesTrak IP-blocked this host** for excessive downloads on 2026-09-18 (self-inflicted by repeated
+  restarts — the TLE fetcher refetches on every process start, finding `C20`). It clears on its own.
 
 ---
 
