@@ -1,28 +1,70 @@
+@import "tailwindcss";
+
+/*
+ * Token layer.
+ *
+ * Colour values below are computed, not chosen: the three categorical hues were
+ * validated all-pairs against this app's dark panel surface (#0d1219) with the
+ * dataviz palette validator (lightness band, chroma floor, CVD separation,
+ * normal-vision floor, contrast). A fourth categorical hue fails, so a fourth
+ * event type folds to "Other" in secondary ink instead of getting its own hue.
+ *
+ *   validator: node scripts/validate_palette.js "#3987e5,#d95926,#199e70" \
+ *                --mode dark --surface "#0d1219" --pairs all   -> ALL CHECKS PASS
+ *              worst all-pairs CVD dE 9.4 (deutan), normal-vision dE 20.9
+ *
+ * Ink is held to >= 4.5:1 against every surface in this app.
+ */
 :root {
-  --bg-primary: #0a0e14;
-  --bg-secondary: #0d1219;
-  --bg-card: #111822;
+  /* Surfaces */
+  --bg-primary: #0a0e14;    /* page plane */
+  --bg-secondary: #0d1219;  /* panel surface - the validated surface */
+  --bg-card: #111822;       /* raised row / card */
   --border: #1a2332;
   --border-glow: rgba(88, 166, 255, 0.3);
-  --text-primary: #c8d6e5;
-  --text-secondary: #5a6a7e;
-  --accent-red: #f85149;
-  --accent-yellow: #d29922;
-  --accent-green: #3fb950;
-  --accent-blue: #58a6ff;
-  --accent-purple: #bc8cff;
-  --severity-low: #3fb950;
-  --severity-mid: #d29922;
-  --severity-high: #f85149;
+
+  /* Ink scale (contrast vs panel #0d1219) */
+  --text-primary: #c8d6e5;   /* 12.71:1 */
+  --text-secondary: #8ea3bb; /*  7.25:1  (was #5a6a7e = 3.40:1) */
+  --text-muted: #74869c;     /*  5.04:1 */
+
+  /* Categorical - event identity. Three hues, fixed order, never cycled.
+     Anything past these three is "Other" and wears secondary ink. */
+  --cat-military: #3987e5;
+  --cat-diplomatic: #d95926;
+  --cat-economic: #199e70;
+  --cat-other: #8ea3bb;
+
+  /* Status - RESERVED for feed liveness / indicator state. Never a category.
+     Always shipped with an icon AND a text label, never colour alone. */
+  --status-good: #199e70;
+  --status-warning: #c98500;
+  --status-serious: #d95926;
+  --status-critical: #e66767;
+  --status-unknown: #74869c;
+
+  /* Legacy accents - still read by MapPanel / GlobeView / CesiumView /
+     TimelineScrubber, which have not been migrated to lib/tokens.ts yet. */
+  --accent-red: #e66767;
+  --accent-yellow: #c98500;
+  --accent-green: #199e70;
+  --accent-blue: #3987e5;
+  --accent-purple: #9085e9;
+  --severity-low: #199e70;
+  --severity-mid: #c98500;
+  --severity-high: #e66767;
+
   --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/*
+ * The old `* { margin:0; padding:0; box-sizing:border-box }` reset lived here.
+ * It is gone deliberately: Tailwind's preflight applies exactly that in
+ * @layer base, and an UNLAYERED rule outranks every layered one - so keeping
+ * it silently stripped the padding and margin off every Tailwind utility in
+ * the app. Everything below is unlayered on purpose (structure and overrides).
+ */
 
 body {
   font-family: var(--font-sans);
@@ -85,13 +127,16 @@ body::before {
 
 .sidebar-feed {
   flex: 1;
+  min-height: 0;
   overflow: hidden;
   background: var(--bg-secondary);
   box-shadow: 0 0 1px var(--border-glow), inset 0 0 1px rgba(88, 166, 255, 0.05);
 }
 
-.sidebar-gauge {
-  height: 200px;
+.sidebar-rail {
+  /* Content-sized: the rail is exactly as tall as its rows, and the feed
+     absorbs whatever is left. No magic number to drift when a row is added. */
+  height: auto;
   flex-shrink: 0;
   background: var(--bg-secondary);
   box-shadow: 0 0 1px var(--border-glow), inset 0 0 1px rgba(88, 166, 255, 0.05);
@@ -154,6 +199,20 @@ body::before {
   }
 }
 
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(57, 135, 229, 0.03) 50%,
+    transparent 100%
+  );
+  animation: scanLine 8s linear infinite;
+}
+
 /* Smooth event slide-in */
 @keyframes slideIn {
   0% {
@@ -188,10 +247,10 @@ body::before {
 
 @keyframes statusPulse {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.6);
+    box-shadow: 0 0 0 0 rgba(25, 158, 112, 0.6);
   }
   50% {
-    box-shadow: 0 0 0 4px rgba(63, 185, 80, 0);
+    box-shadow: 0 0 0 4px rgba(25, 158, 112, 0);
   }
 }
 
@@ -227,11 +286,34 @@ body::before {
 }
 
 .mapboxgl-popup-close-button {
-  color: #5a6a7e !important;
+  color: #8ea3bb !important;
   font-size: 16px !important;
 }
 
 .mapboxgl-popup-close-button:hover {
   color: #c8d6e5 !important;
   background: transparent !important;
+}
+
+/*
+ * Reduced motion. Every keyframe animation and transition in this app is
+ * decorative - none of them carry information - so all of them are switched
+ * off here, including the live-feed scan line and the map's radar pings.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after,
+  .panel *:not(.mapboxgl-marker *) {
+    animation-delay: -1ms !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .scan-line {
+    display: none;
+  }
 }

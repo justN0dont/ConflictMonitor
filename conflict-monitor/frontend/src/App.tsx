@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { EscalationGauge } from "./components/EscalationGauge";
 import { Header } from "./components/Header";
+import { IndicatorRail } from "./components/IndicatorRail";
 import { LiveFeed } from "./components/LiveFeed";
 import { MapPanel } from "./components/MapPanel";
 import { TimelineScrubber } from "./components/TimelineScrubber";
@@ -62,17 +62,31 @@ export default function App() {
   return (
     <div className="app-grid">
       <Header
+        events={filteredEvents}
+        allEvents={events}
+        aircraft={aircraft}
+        vessels={vessels}
+        tleData={tleData}
+        jammingStatus={jammingStatus}
         isConnected={isConnected}
-        eventCount={filteredEvents.length}
-        aircraftCount={aircraft.filter((a) => !a.on_ground).length}
-        vesselCount={vessels.length}
-        satelliteCount={tleData.length}
         demoMode={demoMode}
       />
       <MapPanel events={filteredEvents} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} />
       <div className="sidebar">
         <div className="sidebar-feed"><LiveFeed events={filteredEvents} /></div>
-        <div className="sidebar-gauge"><EscalationGauge events={filteredEvents} /></div>
+        <div className="sidebar-rail">
+          <IndicatorRail
+            events={filteredEvents}
+            allEvents={events}
+            aircraft={aircraft}
+            vessels={vessels}
+            tleData={tleData}
+            jammingStatus={jammingStatus}
+            jammingZones={jammingZones}
+            isConnected={isConnected}
+            demoMode={demoMode}
+          />
+        </div>
       </div>
       <TimelineScrubber
         allEvents={events}

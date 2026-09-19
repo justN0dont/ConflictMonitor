@@ -1,28 +1,24 @@
+/**
+ * LiveFeed.
+ *
+ * Identity is shape + colour from lib/tokens.ts, never colour alone, and any
+ * type outside the three validated hues folds to "Other" instead of inventing a
+ * fourth hue. Severity is a small numeral: in the archive it is 86.3% constant,
+ * so it must not outweigh identity.
+ *
+ * Provenance the UI used to discard is surfaced here (ledger finding C47). A
+ * row whose classification FAILED must not look identical to one that
+ * succeeded - the fallback path stamps event_type=military / severity=5 on
+ * every failure, so an unmarked failed row reads as a confident military call.
+ */
+import { MapPin, MapPinOff } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { EVENT_TYPES, STATUS, eventVisual, formatAge } from "../lib/tokens";
 import type { ConflictEvent } from "../types/event";
 
-const TYPE_COLORS: Record<string, string> = {
-  military: "#f85149",
-  diplomatic: "#58a6ff",
-  economic: "#d29922",
-  cyber: "#bc8cff",
-};
-
-function severityColor(s: number): string {
-  if (s <= 3) return "var(--severity-low)";
-  if (s <= 6) return "var(--severity-mid)";
-  return "var(--severity-high)";
-}
-
 function timeAgo(ts: string): string {
-  const diff = Date.now() - new Date(ts).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ago`;
+  const seconds = (Date.now() - new Date(ts).getTime()) / 1000;
+  return formatAge(seconds);
 }
 
 function formatTimestamp(ts: string): string {
@@ -33,6 +29,15 @@ function formatTimestamp(ts: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** null = never recorded (unknown), not a failure. */
+function extractionFailed(evt: ConflictEvent): boolean {
+  return evt.extraction_status != null && evt.extraction_status !== "ok";
+}
+
+function geoMissing(evt: ConflictEvent): boolean {
+  return evt.is_geolocated === false || evt.lat == null || evt.lon == null;
 }
 
 // Tiny blip sound via Web Audio API
@@ -97,232 +102,214 @@ export function LiveFeed({ events }: LiveFeedProps) {
     setAutoScroll(containerRef.current.scrollTop < 10);
   }, []);
 
-  const lastUpdated =
-    events.length > 0
-      ? `Last: ${timeAgo(events[0].timestamp)}`
-      : "";
+  const lastUpdated = events.length > 0 ? timeAgo(events[0].timestamp) : "—";
 
   return (
-    <div
-      className="panel"
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        position: "relative",
-        height: "100%",
-      }}
-    >
-      {/* Scan-line overlay */}
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          pointerEvents: "none",
-          overflow: "hidden",
-          zIndex: 2,
-        }}
-      >
-        <div
-          style={{
-            position: "absolute",
-            left: 0,
-            right: 0,
-            height: "60px",
-            background:
-              "linear-gradient(180deg, transparent 0%, rgba(88,166,255,0.03) 50%, transparent 100%)",
-            animation: "scanLine 8s linear infinite",
-          }}
-        />
+    <div className="panel relative flex h-full flex-col">
+      {/* Scan-line overlay (switched off under prefers-reduced-motion) */}
+      <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+        <div className="scan-line" />
       </div>
 
       {/* Header bar */}
-      <div
-        style={{
-          padding: "10px 16px",
-          fontSize: 11,
-          fontWeight: 600,
-          letterSpacing: 2,
-          borderBottom: "1px solid var(--border)",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          fontFamily: "var(--font-sans)",
-        }}
-      >
-        <span>LIVE FEED</span>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+      <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
+        <span className="text-[11px] font-semibold tracking-[0.18em] text-[var(--text-primary)]">
+          LIVE FEED
+        </span>
+        <div className="flex items-center gap-3">
           <button
             onClick={() => setSoundEnabled((p) => !p)}
             title={soundEnabled ? "Mute alerts" : "Enable alert sounds"}
+            className="rounded-[3px] border px-1.5 py-[1px] text-[9px] font-semibold tracking-[0.1em]"
             style={{
-              background: "none",
-              border: `1px solid ${soundEnabled ? "var(--accent-blue)" : "var(--border)"}`,
-              color: soundEnabled ? "var(--accent-blue)" : "var(--text-secondary)",
-              fontSize: 10,
-              padding: "2px 6px",
-              borderRadius: 3,
-              cursor: "pointer",
-              fontFamily: "var(--font-sans)",
-              letterSpacing: 1,
-              fontWeight: 600,
-              transition: "all 0.2s ease",
+              borderColor: soundEnabled ? "var(--text-secondary)" : "var(--border)",
+              color: soundEnabled ? "var(--text-primary)" : "var(--text-muted)",
             }}
           >
             {soundEnabled ? "SND ON" : "SND OFF"}
           </button>
+          {/* Both numbers carry their own unit: an unlabelled "4s  51" makes
+              the reader guess which is age and which is a count. */}
           <span
-            style={{
-              color: "var(--text-secondary)",
-              fontWeight: 400,
-              fontSize: 10,
-              fontFamily: "var(--font-mono)",
-            }}
+            className="flex items-baseline gap-1"
+            title="Age of the newest event in this window"
           >
-            {lastUpdated}
+            <span className="text-[9px] tracking-[0.1em] text-[var(--text-muted)]">NEWEST</span>
+            <span
+              className="text-[10px] tabular-nums text-[var(--text-secondary)]"
+              style={{ fontFamily: "var(--font-mono)" }}
+            >
+              {lastUpdated}
+            </span>
           </span>
-          <span
-            style={{
-              color: "var(--text-secondary)",
-              fontWeight: 400,
-              fontSize: 10,
-              fontFamily: "var(--font-mono)",
-            }}
-          >
-            {events.length}
+          <span className="flex items-baseline gap-1" title="Events in the active window">
+            <span
+              className="text-[10px] tabular-nums text-[var(--text-secondary)]"
+              style={{ fontFamily: "var(--font-mono)" }}
+            >
+              {events.length}
+            </span>
+            <span className="text-[9px] tracking-[0.1em] text-[var(--text-muted)]">IN WINDOW</span>
           </span>
         </div>
+      </div>
+
+      {/* Legend - identity is never colour alone */}
+      <div className="flex items-center gap-3 border-b border-[var(--border)] px-4 py-[5px]">
+        {EVENT_TYPES.map(({ key, label, color, Icon }) => (
+          <span key={key} className="flex items-center gap-1">
+            <Icon size={13} strokeWidth={2.25} style={{ color }} aria-hidden="true" />
+            <span className="text-[9px] tracking-[0.08em] text-[var(--text-muted)]">
+              {label.toUpperCase()}
+            </span>
+          </span>
+        ))}
       </div>
 
       {/* Event list */}
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        style={{ flex: 1, overflowY: "auto", padding: "4px 0", position: "relative", zIndex: 1 }}
+        className="relative z-[1] flex-1 overflow-y-auto py-1"
       >
         {events.length === 0 && (
           <div
-            style={{
-              padding: 20,
-              textAlign: "center",
-              color: "var(--text-secondary)",
-              fontSize: 12,
-              fontFamily: "var(--font-mono)",
-              letterSpacing: 1,
-            }}
+            className="p-5 text-center text-[11px] tracking-[0.1em] text-[var(--text-muted)]"
+            style={{ fontFamily: "var(--font-mono)" }}
           >
             AWAITING EVENTS...
           </div>
         )}
         {events.map((evt, idx) => {
           const isNew = newIds.has(evt.id);
-          const isHighSeverity = evt.severity >= 8;
+          const visual = eventVisual(evt.event_type);
+          const TypeIcon = visual.Icon;
+          const failed = extractionFailed(evt);
+          const noGeo = geoMissing(evt);
+          const place = (evt.location_name ?? "").trim();
+          const sources = evt.report_count ?? 1;
+
           return (
             <div
               key={evt.id}
+              className="mb-px bg-[var(--bg-card)] py-[9px] pl-3 pr-3.5"
               style={{
-                padding: "9px 14px",
-                borderLeft: `3px solid ${isHighSeverity ? "var(--accent-red)" : severityColor(evt.severity)}`,
-                marginBottom: 1,
-                background: isNew
-                  ? "rgba(56, 139, 253, 0.06)"
-                  : "var(--bg-card)",
-                animation: isNew ? "slideIn 0.4s ease" : undefined,
+                borderLeft: `2px solid ${visual.color}`,
+                // Neutral lift, not the MILITARY blue: "new" is not a category,
+                // so it must not borrow a series hue.
+                background: isNew ? "rgba(142, 163, 187, 0.08)" : "var(--bg-card)",
+                // Longhands only. Mixing the `animation` shorthand with
+                // animationDelay/animationFillMode makes React warn on every
+                // rerender ("Updating a style property during rerender...").
+                animationName: isNew ? "slideIn" : undefined,
+                animationDuration: isNew ? "0.4s" : undefined,
+                animationTimingFunction: isNew ? "ease" : undefined,
                 animationDelay: isNew ? `${idx * 30}ms` : undefined,
-                animationFillMode: "backwards",
+                animationFillMode: isNew ? "backwards" : undefined,
               }}
             >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginBottom: 3,
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              {/* Identity line */}
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1">
+                  {/* The shape channel has to survive at true 1x: at 12px the
+                      handshake was an orange smudge and identity collapsed back
+                      onto colour alone. */}
+                  <TypeIcon
+                    size={14}
+                    strokeWidth={2.25}
+                    style={{ color: visual.color }}
+                    className="shrink-0"
+                    aria-hidden="true"
+                  />
+                  <span className="shrink-0 text-[9px] font-semibold tracking-[0.1em] text-[var(--text-secondary)]">
+                    {visual.label.toUpperCase()}
+                  </span>
                   {isNew && (
                     <span
-                      style={{
-                        fontSize: 8,
-                        padding: "1px 4px",
-                        borderRadius: 2,
-                        background: "var(--accent-blue)",
-                        color: "#fff",
-                        fontWeight: 700,
-                        fontFamily: "var(--font-mono)",
-                        animation: "pulse 1s ease-in-out 3",
-                      }}
+                      className="shrink-0 rounded-[2px] px-1 text-[8px] font-bold tracking-[0.08em]"
+                      style={{ background: "var(--text-secondary)", color: "#0a0e14" }}
                     >
                       NEW
                     </span>
                   )}
                   <span
-                    style={{
-                      fontSize: 10,
-                      color: "var(--text-secondary)",
-                      fontFamily: "var(--font-mono)",
-                    }}
+                    className="truncate text-[9.5px] tabular-nums text-[var(--text-muted)]"
+                    style={{ fontFamily: "var(--font-mono)" }}
                   >
-                    {formatTimestamp(evt.timestamp)}{" "}
-                    <span style={{ opacity: 0.5 }}>({timeAgo(evt.timestamp)})</span>
-                    {" "}&middot; {evt.channel_name}
+                    {formatTimestamp(evt.timestamp)} ({timeAgo(evt.timestamp)}) &middot;{" "}
+                    {evt.channel_name}
                   </span>
                 </div>
-                <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                  <span
-                    style={{
-                      fontSize: 9,
-                      padding: "1px 5px",
-                      borderRadius: 2,
-                      background: `${TYPE_COLORS[evt.event_type] ?? "#555"}22`,
-                      color: TYPE_COLORS[evt.event_type] ?? "#888",
-                      fontWeight: 600,
-                      textTransform: "uppercase",
-                      fontFamily: "var(--font-mono)",
-                      border: `1px solid ${TYPE_COLORS[evt.event_type] ?? "#555"}44`,
-                    }}
-                  >
-                    {evt.event_type}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: 9,
-                      padding: "1px 5px",
-                      borderRadius: 2,
-                      background: isHighSeverity ? "var(--accent-red)" : "transparent",
-                      color: isHighSeverity ? "#fff" : severityColor(evt.severity),
-                      fontWeight: 700,
-                      fontFamily: "var(--font-mono)",
-                      border: isHighSeverity ? "none" : `1px solid ${severityColor(evt.severity)}44`,
-                    }}
-                  >
-                    {evt.severity}
-                  </span>
-                </div>
+                <span
+                  className="shrink-0 text-[9.5px] tabular-nums text-[var(--text-muted)]"
+                  style={{ fontFamily: "var(--font-mono)" }}
+                  title="Severity (1-10). Near-constant in the archive - low information."
+                >
+                  SEV {evt.severity}
+                </span>
               </div>
-              <div
-                style={{
-                  fontSize: 12,
-                  lineHeight: 1.5,
-                  color: "var(--text-primary)",
-                  opacity: 0.9,
-                }}
-              >
+
+              {/* Summary */}
+              <div className="mt-1 text-[12px] leading-[1.45] text-[var(--text-primary)]">
                 {evt.summary}
-                {(evt.report_count ?? 1) > 1 && (
+              </div>
+
+              {/* Provenance */}
+              <div className="mt-[5px] flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                {place && (
+                  <span className="flex items-center gap-1 text-[9.5px] text-[var(--text-secondary)]">
+                    <MapPin size={10} strokeWidth={2} aria-hidden="true" />
+                    {place}
+                  </span>
+                )}
+                {sources > 1 && (
                   <span
-                    style={{
-                      marginLeft: 6,
-                      fontSize: 9,
-                      padding: "1px 5px",
-                      borderRadius: 2,
-                      background: "rgba(88,166,255,0.12)",
-                      color: "var(--accent-blue)",
-                      fontFamily: "var(--font-mono)",
-                      fontWeight: 600,
-                    }}
+                    className="text-[9.5px] tabular-nums text-[var(--text-secondary)]"
+                    style={{ fontFamily: "var(--font-mono)" }}
                   >
-                    {evt.report_count} sources
+                    {sources} sources
+                  </span>
+                )}
+                {evt.source_reliability != null && (
+                  <span
+                    className="text-[9.5px] tabular-nums text-[var(--text-secondary)]"
+                    style={{ fontFamily: "var(--font-mono)" }}
+                    title="Source reliability score"
+                  >
+                    REL {evt.source_reliability}
+                  </span>
+                )}
+                {/* Hue rides the border and the glyph; the words stay in ink.
+                    Otherwise these chips put #c98500 and #d95926 on text right
+                    beside an event whose identity hue is also #d95926. */}
+                {noGeo && (
+                  <span
+                    className="flex items-center gap-1 rounded-[2px] px-1 text-[9px] font-semibold tracking-[0.06em] text-[var(--text-primary)]"
+                    style={{ border: `1px solid ${STATUS.warning.color}` }}
+                    title="No resolved coordinates - this event is not on the map."
+                  >
+                    <MapPinOff
+                      size={10}
+                      strokeWidth={2.5}
+                      style={{ color: STATUS.warning.color }}
+                      aria-hidden="true"
+                    />
+                    NOT GEOLOCATED
+                  </span>
+                )}
+                {failed && (
+                  <span
+                    className="flex items-center gap-1 rounded-[2px] px-1 text-[9px] font-semibold tracking-[0.06em] text-[var(--text-primary)]"
+                    style={{ border: `1px solid ${STATUS.serious.color}` }}
+                    title="Classification failed; type and severity are fallback defaults, not findings."
+                  >
+                    <STATUS.serious.Icon
+                      size={10}
+                      strokeWidth={2.5}
+                      style={{ color: STATUS.serious.color }}
+                      aria-hidden="true"
+                    />
+                    CLASSIFY FAILED: {evt.extraction_status}
                   </span>
                 )}
               </div>
