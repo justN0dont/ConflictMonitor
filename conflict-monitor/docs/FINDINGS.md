@@ -7,8 +7,8 @@ than deleting it.
 | | |
 |---|---|
 | Branch | `v3-rebuild` |
-| HEAD at last update | `7ddbe58` |
-| Last updated | 2026-09-18 |
+| HEAD at last update | `4e59ede` |
+| Last updated | 2026-09-19 |
 
 ---
 
@@ -54,14 +54,11 @@ ssh truthevades 'python3 /tmp/archive_source_stats.py'
 
 ### Next three actions
 
-1. **`opensky.py:160`** — the interference fix re-centred the primary poll path but left the OpenSky
-   fallback requesting the old `lamin 15 / lamax 45 / lomin 25 / lomax 65` box. The two paths now
-   disagree about where the AO is. Small, and it is drift introduced on 2026-09-18.
-2. **The three open criticals** — `C5` (geocoder substring match; the word-boundary fix is already
+1. **The three open criticals** — `C5` (geocoder substring match; the word-boundary fix is already
    simulated across all 3,665 archive strings with zero regressions), `C8` (dedup drops its spatial
    predicate on NULL coordinates — this one **blocks Phase 1**, it must land in the same commit as
    the sentinel removal), `C41` (the documented quick start renders a black map).
-3. **Phase 0's last step** — run for a week and record the real fallback rate. Blocked until the
+2. **Phase 0's last step** — run for a week and record the real fallback rate. Blocked until the
    Anthropic key is restored.
 
 ### Blocked, and not fixable from the code
@@ -670,7 +667,7 @@ document that silently edits away its own mistakes would fail its own standard.
 | "No distinguishable `parse_failed` path exists" — written in commit `9fd3fbf`'s own message | It does exist. That same commit split the catch-all into `rate_limited` / `parse_failed` / `api_NNN` / `llm_failed`. The commit message is stale about its own diff | The audit read `classifier.py:303-319` instead of trusting the note |
 | Four severity-5 defaults | **Six**, plus a seventh probe — and `clamp_severity` is dead code: `Field(ge=1, le=10)` raises before the validator runs, so 11 becomes a parse failure instead of clamping to 10 | Grepping for the literal rather than recalling the list |
 | `frontend/dist` is committed | It is untracked; the amend that removed it worked | `git ls-files` |
-| The interference fix re-centred the AO | It re-centred the **primary** path only. `opensky.py:160` still requests the old `lamin 15 / lamax 45 / lomin 25 / lomax 65` box on the OpenSky fallback, so the two paths now disagree about where the AO is | The audit compared the two poll functions |
+| The interference fix re-centred the AO | It re-centred the **primary** path only. `opensky.py:160` still requests the old `lamin 15 / lamax 45 / lomin 25 / lomax 65` box on the OpenSky fallback, so the two paths now disagree about where the AO is | The audit compared the two poll functions. **Fixed 2026-09-19 in `4e59ede`**: both paths derive the AO from `CENTRE_LAT`/`CENTRE_LON`/`RADIUS_NM`, and OpenSky results are clipped to the circle |
 
 ---
 
@@ -682,3 +679,6 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-18 | `0bd4835` | Rebuilt from the recovered v3 lineage (extracted from local Docker images) |
 | 2026-09-18 | `9fd3fbf` | Phase 0 — tag the classifier failure path and geocode outcome |
 | 2026-09-18 | `64b690a` | Fix the GPS interference layer: right AO, right test, real denominator |
+| 2026-09-18 | `7ddbe58` | Add `docs/FINDINGS.md` — this register |
+| 2026-09-18 | `de831ed` | Add `tools/` (reproduction scripts) and the resume section |
+| 2026-09-19 | `4e59ede` | One AO for both aircraft poll paths; OpenSky bbox derived from the constants and clipped to the circle |

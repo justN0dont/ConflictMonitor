@@ -7,6 +7,7 @@ zones by clustering aircraft with degraded navigation accuracy.
 
 import asyncio
 import logging
+import math
 import time
 from collections import defaultdict
 
@@ -23,6 +24,33 @@ CENTRE_LON = 45.5
 RADIUS_NM = 650  # ~lat 23-40, lon 33-56 (Levant -> Hormuz); measured 139 aircraft / 84KB per poll
 
 POLL_INTERVAL = 15  # seconds
+
+
+def _nm_from_centre(lat: float, lon: float) -> float:
+    """Great-circle distance from the AO centre, in nautical miles."""
+    dlat = math.radians(lat - CENTRE_LAT)
+    dlon = math.radians(lon - CENTRE_LON)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(CENTRE_LAT)) * math.cos(math.radians(lat)) * math.sin(dlon / 2) ** 2)
+    return 3440.065 * 2 * math.asin(math.sqrt(min(1.0, a)))
+
+
+def _opensky_bbox() -> dict:
+    """The smallest lat/lon box containing the AO circle.
+
+    adsb.lol takes a centre and a radius; OpenSky only takes a bounding box. Deriving
+    the box from the same constants keeps the two poll paths pointed at one AO — they
+    disagreed before, with the fallback still requesting the pre-2026-09-18 box. The
+    box circumscribes the circle, so results are filtered back to RADIUS_NM by the caller.
+    """
+    dlat = RADIUS_NM / 60.0  # one nautical mile is 1/60 degree of latitude
+    dlon = dlat / max(math.cos(math.radians(CENTRE_LAT)), 0.01)
+    return {
+        "lamin": round(max(CENTRE_LAT - dlat, -90.0), 4),
+        "lamax": round(min(CENTRE_LAT + dlat, 90.0), 4),
+        "lomin": round(max(CENTRE_LON - dlon, -180.0), 4),
+        "lomax": round(min(CENTRE_LON + dlon, 180.0), 4),
+    }
 
 # Published gpsjam.org degradation threshold: nic < 7 OR nac_p < 8.
 NIC_THRESHOLD = 7
@@ -157,7 +185,7 @@ async def _poll_adsb_lol(client: httpx.AsyncClient) -> list[dict] | None:
 
 async def _poll_opensky(client: httpx.AsyncClient, auth: tuple | None) -> list[dict] | None:
     """Fetch aircraft from OpenSky Network (fallback)."""
-    bbox = {"lamin": 15, "lamax": 45, "lomin": 25, "lomax": 65}
+    bbox = _opensky_bbox()
     try:
         resp = await client.get(
             "https://opensky-network.org/api/states/all",
@@ -181,6 +209,7 @@ async def _poll_opensky(client: httpx.AsyncClient, auth: tuple | None) -> list[d
                 }
                 for s in states_raw
                 if s[5] is not None and s[6] is not None
+                and _nm_from_centre(s[6], s[5]) <= RADIUS_NM
             ]
             return states
         elif resp.status_code in (429, 401):
