@@ -7,7 +7,7 @@ than deleting it.
 | | |
 |---|---|
 | Branch | `v3-rebuild` |
-| Covers work through | `949aca8` |
+| Covers work through | `0051932` |
 | Last updated | 2026-09-20 |
 
 ---
@@ -17,7 +17,7 @@ than deleting it.
 **State at the last stopping point — 2026-09-20.**
 
 ```
-branch  v3-rebuild        HEAD 949aca8
+branch  v3-rebuild        HEAD 0051932
         pre-v3-rebuild-backup  716ffec   snapshot of the tree before the rebuild
         main                   0f4ad05   the OLD lineage; superseded, kept for reference
 ```
@@ -73,13 +73,7 @@ ssh truthevades 'python3 /tmp/archive_source_stats.py'
    removed by the amend to `de146f6`, which also added `.env.*` to `.gitignore`. Nothing was pushed,
    but the orphaned commit lives in this machine's reflog until it is expired and the values were
    displayed in a terminal session. Telegram, Mapbox, AISStream, OpenSky, Cloudflare Radar, Postgres.
-2. **Run the sentinel `UPDATE` and record the rowcount it logs.** It is the last un-run Phase 0 item
-   and the audit is finished: the predicate selects **39,949** rows, with zero near-misses, zero
-   half-matches and zero geometry disagreements, so a real run should log exactly that — and a
-   different number would itself be the finding. Recommended route: gunzip the dump into a *new*
-   database inside the already-running `conflict-monitor-db-1`, point a backend at it, let the startup
-   migration run, capture the line, delete the copy. Never the dump, never the VPS original.
-3. **Start the week that only wall clock can buy.** The model-failure half of the fallback rate is
+2. **Start the week that only wall clock can buy.** The model-failure half of the fallback rate is
    measured and bounded (below); the time-varying half — timeouts under load, unreachable bursts, GPU
    contention — is not, and an archive run structurally cannot see it. `GET /events/stats/extraction`
    has existed since `9fd3fbf`, so this costs nothing but patience. Name the model in the result: it
@@ -872,17 +866,40 @@ Make failure visible before changing any behaviour.
   wall clock; the archive run classifies 568 rows one at a time on a quiet machine. This is the half
   that still needs a real week. It costs nothing but patience: `GET /events/stats/extraction` has
   existed since `9fd3fbf`, so the number is watchable without SQL. Record the model with it
-- [ ] Label the archive's sentinel rows with a single `UPDATE` ($0, no reprocessing) — **the code
-  shipped and the audit is now done; the run did not**: `89c6f54` added an idempotent startup
-  migration (`main.py`, logging "Retired Indian Ocean sentinel on %d event(s)") that NULLs
-  lat/lon/geometry and sets `is_geolocated = false` wherever `lat = -25.0 AND lon = 80.0`. It runs
-  against whatever database the backend starts on; nothing evidences it having run against the
-  83,938-event VPS archive, which is what "the archive" means everywhere else in this document.
-  Outstanding is the run and its rowcount, not the SQL. The 2026-09-20 audit predicts **39,949** rows
-  — zero near-misses out to 5°, zero half-matches, zero geometry disagreements, so it should log
-  exactly that, and a different number would itself be the finding. **39,949 stays quoted as a
-  PREDICTION until a run logs it.** Recommended route: restore the dump into a scratch database
-  inside the running `conflict-monitor-db-1` and let the startup migration run against the copy
+- [x] **Label the archive's sentinel rows — RUN, 2026-09-20.** `89c6f54` added an idempotent startup
+  migration (`main.py:97-108`) that NULLs lat/lon/geometry and sets `is_geolocated = false` wherever
+  `lat = -25.0 AND lon = 80.0`. The audit predicted **39,949** rows. The migration logged:
+
+  ```
+  INFO:conflict-monitor:  Retired Indian Ocean sentinel on 39949 event(s) - they are now honestly unlocated
+  ```
+
+  Predicted and actual agree exactly. Method: the dump was copied from the VPS (md5
+  `3da7684f9dc9fbfd210679e02710b37c`, verified identical to the original both before and after),
+  restored into a throwaway `sentinel_run` database inside `conflict-monitor-db-1`, and the **real
+  backend** was pointed at it with `LLM_BACKEND=none` so the run could not touch the GPU. The VPS
+  original was never written to and the dev database was never connected to; the copy was dropped
+  afterwards. Archive rows only, before and after:
+
+  | | before | after |
+  |---|---|---|
+  | rows | 83,938 | 83,938 |
+  | on the sentinel | 39,949 | **0** |
+  | `geometry IS NOT NULL` | 83,938 (100%) | 43,989 (**52.4%**) |
+  | `lat IS NULL` | 0 | 39,949 |
+
+  The 100% "located" figure was never coverage — the old schema had no way to write "I could not
+  place this", so every row carried a coordinate whether or not anyone knew where it happened. 52.4%
+  is the honest number and the drop is the repair, not a regression.
+
+  Idempotency, claimed in the code comment and now demonstrated rather than asserted: the probe was
+  started twice against the same database. Two `Application startup complete` lines, **one** `Retired`
+  line. The second pass matched zero rows and said nothing.
+
+  Caveat kept deliberately: this is the run against a *restored copy*. The VPS dump is unchanged, so
+  the archive as stored on that box still carries the sentinel. Anyone restoring it gets the
+  migration on first backend start, which is the design — but do not read this row as "the file has
+  been fixed".
 
 ### Phase 1 — Let the schema say "I guessed"
 
@@ -997,3 +1014,4 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-20 | `fe5d2d4` | Record the live verification of `killed_reported` - migration, classification and the merge policy exercised against a running stack; `C74` given its measured margin |
 | 2026-09-20 | `949aca8` | Switch the classifier to **qwen3.8-27b:latest** and send `"think": False` — a thinking model puts its reasoning in a separate field and returns an empty `response`, so every row came back `parse_failed`. qwen3:8b answered anyway, which is why the defect was invisible while only the small model ran |
 | 2026-09-20 | *this commit* | Close out Phase 0: the fallback rate measured and bounded on 568 archive messages for **both** models, the sentinel migration audited before it runs, the "one week" line split into the half that is measured and the half only wall clock can reach, and two long-standing register numbers corrected to the estimator that produced them (`C75`) |
+| 2026-09-20 | *this commit* | Run the sentinel migration against a restored copy of the archive: 39,949 rows retired, exactly as predicted; geolocation 100% -> 52.4%; idempotency demonstrated. Phase 0's last un-run item closed |
