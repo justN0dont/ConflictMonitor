@@ -7,20 +7,25 @@ than deleting it.
 | | |
 |---|---|
 | Branch | `v3-rebuild` |
-| Covers work through | `74f09f0` |
+| Covers work through | `e5ad5ae` |
 | Last updated | 2026-09-19 |
 
 ---
 
 ## Picking this up again
 
-**State at the last stopping point — 2026-09-18.**
+**State at the last stopping point — 2026-09-19.**
 
 ```
-branch  v3-rebuild        HEAD 7ddbe58
+branch  v3-rebuild        HEAD e5ad5ae
         pre-v3-rebuild-backup  716ffec   snapshot of the tree before the rebuild
         main                   0f4ad05   the OLD lineage; superseded, kept for reference
 ```
+
+`de146f6` is an amend of `c460f5e`, which had committed `.env.bak`. Nothing was pushed — `origin`
+carries only `main` at `0f4ad05` — but see the Corrections log: the credentials still need rotating.
+`ab9420c` then measured the archive's death-toll rate and `e5ad5ae` landed `killed_reported`; both are
+described below, and neither has been exercised against a running stack.
 
 Restart the stack (demo mode, no keys needed):
 
@@ -54,21 +59,33 @@ ssh truthevades 'python3 /tmp/archive_source_stats.py'
 
 ### Next three actions
 
-1. **The three open criticals** — `C5` (geocoder substring match; the word-boundary fix is already
-   simulated across all 3,665 archive strings with zero regressions), `C8` (dedup drops its spatial
-   predicate on NULL coordinates — this one **blocks Phase 1**, it must land in the same commit as
-   the sentinel removal), `C41` (the documented quick start renders a black map).
-2. **Phase 0's last step** — run for a week and record the real fallback rate. Blocked until the
-   Anthropic key is restored.
+1. **Exercise `killed_reported` against a running stack.** It landed in `e5ad5ae` — compiling clean,
+   `tsc` at zero, validators run against the real `ClassifierResult` — but nothing in it has seen a
+   live session or a database. Specifically unverified: that a real duplicate fills an empty count,
+   that a disagreement logs both numbers rather than silently keeping one, and that the startup
+   migration adds the column to the existing `conflict-monitor_v3_pgdata` volume. There is no test
+   suite to catch any of it (`C66`), so this is read-the-logs work, not a green tick.
+2. **Rotate the credentials that were briefly committed.** `.env.bak` went into `c460f5e` and was
+   removed by the amend to `de146f6`, which also added `.env.*` to `.gitignore`. Nothing was pushed,
+   but the orphaned commit lives in this machine's reflog until it is expired and the values were
+   displayed in a terminal session. Telegram, Mapbox, AISStream, OpenSky, Cloudflare Radar, Postgres.
+3. **Run the Phase 0 fallback-rate week on qwen3.** No longer blocked and no longer costs anything:
+   `llm_backend` defaults to `ollama` (`config.py:14`). It measures qwen3:8b rather than Haiku, so it
+   answers "what is this system's fallback rate *now*", not "what produced the 86.3% archive" — a
+   reason to name the model in the result, not a reason to keep waiting for a key. The archive can be
+   re-classified locally for the same reason: no key, no spend.
 
 ### Blocked, and not fixable from the code
 
-- **Anthropic key returns `400 organization_on_hold`.** Live classification cannot run at all. Appeal
-  at `console.anthropic.com/appeal` or swap the key. Until then the Phase 0 measurement is stalled and
-  live mode produces 100% `llm_failed` rows.
+- **Anthropic key returns `400 organization_on_hold`.** Those rows tag `api_400` — `classifier.py`
+  writes `f"api_{e.status_code}"` — not `llm_failed`. This no longer blocks classification: `de146f6`
+  made a local Ollama backend the default, with no silent fallback between the two. What it still
+  blocks is measuring **Haiku**, the model that produced the archive. Appeal at
+  `console.anthropic.com/appeal` or swap the key.
 - **AISStream has no Persian Gulf coverage.** No code change fixes this; it needs a different source.
-- **CelesTrak IP-blocked this host** for excessive downloads on 2026-09-18 (self-inflicted by repeated
-  restarts — the TLE fetcher refetches on every process start, finding `C20`). It clears on its own.
+- **CelesTrak IP-blocked this host** for excessive downloads on 2026-09-18. It clears on its own. The
+  code-side cause is gone: `0de11f2` gave the fetcher an on-disk cache, a skipped fetch while that
+  cache is fresh, and an hour's backoff on a 403/429 (finding `C20`).
 
 ---
 
@@ -199,11 +216,90 @@ absence signal was structurally zero. It reported the absence of a sensor, not t
 
 Reproduce: `scratchpad/ais_probe.py` (25 min Gulf + 2 min control).
 
+### Internet connectivity — measured from 2026-09-19
+
+Four IODA sensors per country (`bgp` 300 s, `ping-slash24` 600 s, `merit-nt` 300 s, `gtr` 1800 s),
+**never averaged**: agreement between independent sensors *is* the confidence signal, and a sensor
+that returns nothing is `unavailable`, never `normal`.
+
+| Measured | Result |
+|---|---|
+| A flat percentage threshold is the wrong instrument | The reading with the largest percentage was the calmest (LB `gtr` −4.5% against a 12.4% normal swing, z −0.4); the smallest was the most unusual (RU `ping` −0.2% against 0.1%, z −2.6). Scoring is robust-z per sensor, `Z_DEPRESSED = -4` |
+| The variance floor was required, not optional | Un-floored, IL `bgp` moved −0.16% against a 0.02% swing (z −7.2) and UA `ping` −0.54% against 0.06% (z −9.2) — two quiet countries reading as sustained disruptions on a denominator of rounding error. `TYPICAL_FLOOR = 0.005` |
+| A trailing 24 h baseline cannot see a *sustained* decline | The baseline sits inside the outage. Cuba's traffic fell 64% over seven days and 24 h scoring called it **+29.7% nominal**. Short (24 h) and long (recent 24 h vs days 2–7) are now computed and reported separately, never blended |
+| The detector fires, and is independently corroborated | Cuba reads `disruption_sustained`, basis long, 2 of 3 available sensors agreeing over 7 d, `gtr` −36.5%, z −4.9 — matched by a Cloudflare Radar annotation (ONGOING since 2026-09-18, POWER_OUTAGE, NATIONWIDE). The nine theatre countries read nominal, which is what shows it does not invent drama |
+
+`bgp` staying flat while traffic collapses is what says Cuba is demand-side rather than a government
+withdrawing routes — a distinction only available because the four are never averaged. Cloudflare
+Radar is deliberately kept **out** of the IODA sensor count: two methodologies agreeing is worth more
+than one merged number.
+
+**Known limitation, measured not guessed** — carried over from `bb1c80c`, because a measured
+limitation travels with the measurement: `gtr`'s long z runs hot, since a 6-day MAD does not model
+its weekly cycle. IL fired at z −4.88 on a weekend that sits at today's level. The majority rule
+absorbs it today (IL reads nominal), but a second `gtr`-like sensor would make it a false partial.
+
+Reproduce: `GET /tracking/connectivity` against the running backend; thresholds, the 240 replayed
+country-hours and the forced-failure test are recorded in `51bdce9` and `bb1c80c`.
+
+### Local classification — qwen3:8b, 2026-09-19
+
+| Fact | Value |
+|---|---|
+| Before the cutover | 126 real BBC / Al Jazeera / War Zone rows, **all** `extraction_status = "api_400"`, all severity NULL. The pipeline was honest about it — "SEV —" and a CLASSIFY FAILED badge — and nothing was being classified |
+| After | qwen3:8b against the byte-identical `SYSTEM_PROMPT`: 0.5–0.9 s per article at zero marginal cost, and the first `extraction_status = "ok"` rows in this archive's history |
+| Reachability | Only `host.docker.internal:11434` reaches the host's Ollama from the container — neither `172.17.0.1` nor `localhost` does |
+| No silent fallback | An unreachable model tags `ollama_unreachable`; it does not quietly retry Anthropic. A backend that switches itself produces an archive nobody can interpret afterwards, and `extraction_model` is persisted so Haiku-era, `api_400` and qwen3 rows stay distinguishable |
+| Known, and now measurable | qwen3 returns `location_name = "Unknown"` noticeably more often than Haiku did. A prompt/model-fit question, separable now that the model is on the row |
+
+The "~20 s cold start" is **not** a re-measurement: after an explicit model unload it reloaded from
+page cache in 0.53 s, so 20 s stands as a worst case for a genuinely cold file cache, not an
+observation.
+
+Source: the acceptance test in `de146f6`, re-runnable against live RSS with `LLM_BACKEND=ollama`.
+
+### Stated death tolls in the archive — measured 2026-09-19
+
+`killed_reported` is **copied** out of the message text, never estimated, so "does this message state
+a toll" is a property of the string: no LLM, no key, no spend. The prior behind the field —
+"~86% of messages carry no number" — was asserted in `classifier.py`'s own comment and shipped into
+the live prompt with no artifact anywhere behind it. Measured across all 83,938 archive rows
+(0 skipped, 0 with empty `raw_text`):
+
+| Bucket | Events | Share |
+|---|---|---|
+| numeric count, English | 3,409 | 4.1% |
+| numeric count, Arabic — a number near an Arabic kill word | 165 | 0.2% |
+| one person, no numeral (`a paramedic was killed` → 1) | 97 | 0.1% |
+| stated **zero** killed → `killed_reported = 0`, not NULL | 88 | 0.1% |
+| **states no count → `killed_reported = NULL`** | **80,179** | **95.5%** |
+
+95.6% if the singular-person bucket is read as "no count" instead. A further **98** rows say no toll
+has been *announced / reported / confirmed yet* — state 3, not a zero, so they count as "no count"
+rather than joining the 88. 3,339 rows (4.0%) mention wounded, injured or missing while stating no
+death toll. 13,946 (16.6%) contain Arabic script, and the Arabic pattern only asks whether a number
+sits near a kill word, so that is where the remaining error lives. Toll rates differ by an order of
+magnitude between sources: `rss_middle_east_eye` 13.7% (931/6,789) against `telegram` 2.8%
+(1,389/49,369), and telegram is 58.8% of the archive.
+
+**This is an upper bound on the NULL rate, not a point estimate.** The patterns catch the phrasings
+written into them and miss every other wording, so the true "states no count" share is *at most*
+95.5%. One error runs the other way and that bound does not cover it: a cumulative war total quoted
+as background counts here as a stated toll, while the classifier must **not** copy it into the
+incident's `killed_reported` — `73,000` appears 32 times in the extracted-number table, which is
+exactly that phrasing. The population also differs from the prompt's claim: these are *stored*
+events, so `[NOISE]` and low-severity rows were dropped before insert and dedup merged repeats, which
+pushes the null rate across all messages *seen* higher still. Neither bias is quantified.
+
+Reproduce: `../tools/archive_killed_rate.py`, read-only on the VPS like the other `archive_*` scripts
+(`scp` it to `/tmp/`, then `ssh truthevades 'python3 /tmp/archive_killed_rate.py'`). It prints the
+extracted-number table and a sampled bucket file so the regex itself can be audited.
+
 ---
 
 ## Findings ledger
 
-54 candidate findings re-checked against the tree at `64b690a`: **37 open**, 14 fixed, 3 invalid or external. Of the open ones, 3 are critical and 20 high.
+54 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **26 open**, 25 fixed, 3 invalid or external. Of the open ones, **none is critical** and 13 are high.
 
 Claims that no longer hold are kept with status `INVALID` rather than deleted.
 
@@ -214,24 +310,15 @@ Ordered by severity, then area.
 
 | ID | Sev | Phase | Area | Finding |
 |---|---|---|---|---|
-| `C41` | critical | 0 | Frontend | Documented quick start yields a black map panel: empty Mapbox token, no error shown, zero markers |
-| `C5` | critical | 1 | Ingest | Geocoder and classifier both do unanchored substring matching; short keys win mid-word |
-| `C8` | critical | 1 | Ingest | Dedup drops the spatial predicate whenever the incoming report has no coordinates |
-| `C20` | high | 2 | Collection | TLE fetcher: no persistence, no backoff, and a failed fetch wipes the cache to zero |
+| `C74` | high | 4 | Ingest | A dedup false positive now stamps one report's death toll onto another event; unlocated rows match on text + time + type with no spatial predicate at all |
 | `C31` | high | 2 | Collection | A failed poll leaves the last fleet and a frozen as_of in place with status still "ok" |
 | `C44` | high | 3 | Frontend | Timeline playback advances speed*1000 ms per 100 ms tick, and the real rate depends on tab visibility |
 | `C45` | high | 3 | Frontend | Events, aircraft and vessels are DOM <Marker> overlays, not Source/Layer — 98 marker nodes measured live |
 | `C46` | high | 3 | Frontend | 46 markers carry transition: transform 2s linear against a 15 s aircraft / 10 s vessel poll — fabricated motio… |
-| `C47` | high | 1 | Frontend | types/event.ts omits six fields the API already returns, including today's extraction_status and is_geolocated |
 | `C51` | high | 2 | Frontend | WebSocket reconnect refetches nothing and the server sends no backlog: events during a drop are lost until rel… |
-| `C10` | high | 4 | Ingest | merge_duplicate keeps only channel, severity and coordinates; the incoming report's text and identity are drop… |
+| `C10` | high | 4 | Ingest | merge_duplicate keeps only channel and severity; the incoming report's text and identity are dropped |
 | `C11` | high | 4 | Ingest | Reliability boost keys on report_count, not on distinct channels, so one source repeating itself raises confid… |
-| `C12` | high | 0 | Ingest | Admin fix/reclassify tasks rewrite coordinates, severity and summary without updating the Phase 0 tags |
-| `C2` | high | 1 | Ingest | Six independent severity=5 literals, not four; the clamp validator is dead code |
-| `C4` | high | 1 | Ingest | (-25,80) sentinel declared in 3 modules, read by 3 query predicates, rendered as a real marker |
 | `C6` | high | 1 | Ingest | Country names resolve to national centroids via Nominatim and are marked is_geolocated=true |
-| `C7` | high | 1 | Ingest | KNOWN_LOCATIONS maps actor acronyms (idf/iaf/irgc/centcom) to headquarters coordinates |
-| `C9` | high | 1 | Ingest | Dedup candidate query is LIMIT 20 with no ORDER BY, so the true duplicate can fall outside the window |
 | `C60` | high | — | Platform | No auth on any route or the WS; CORS reflects any origin with credentials, DELETE allowed |
 | `C62` | high | — | Platform | All seven /events/admin/* endpoints, including both DELETEs, are unauthenticated |
 | `C63` | high | 1 | Platform | Alembic has no versions/; schema comes from create_all plus a hand-kept ALTER list that already crashed startu… |
@@ -239,12 +326,11 @@ Ordered by severity, then area.
 | `C69` | high | — | Platform | demo.py attributes fabricated strikes on real nuclear sites to real named OSINT outlets, on a public MIT repo |
 | `C29` | medium | 2 | Collection | Second AIS box is mislabelled "Eastern Mediterranean" and supplies 85% of the vessel feed from outside any AO |
 | `C32` | medium | 1 | Collection | altitude mixes feet (adsb.lol) and metres (OpenSky) in one field, and the UI labels it both ways |
-| `C43` | medium | 3 | Frontend | Escalation gauge publishes a 1-decimal mean of 20 severities with no provenance and no no-data state |
 | `C48` | medium | 3 | Frontend | Event type is encoded by hue alone on map, globe, terrain and timeline; only the feed carries a text label |
 | `C49` | medium | 3 | Frontend | No prefers-reduced-motion guard anywhere: 6 keyframe animations, an 8s scan line and an audio blip |
 | `C50` | medium | 3 | Frontend | LiveFeed NEW badge compares array lengths against a 200-cap, so it stops firing permanently once the cap is hi… |
 | `C52` | medium | — | Frontend | Cesium credits are routed to a detached div, suppressing Ion/Bing/Google attribution required by their terms |
-| `C53` | medium | 3 | Frontend | Three renderers duplicate mark logic; the type palette is copied into 5 files — values match, fallbacks and th… |
+| `C53` | medium | 3 | Frontend | Three renderers (Mapbox, Globe, Cesium) still duplicate mark logic. The palette half is fixed: the four stale EVENT_COLORS copies were migrated onto tokens.ts in `e03cee6` |
 | `C61` | medium | — | Platform | Postgres published on 0.0.0.0:5432; backend DATABASE_URL hardcoded so POSTGRES_PASSWORD cannot change it |
 | `C68` | medium | — | Platform | Vite HMR is blind across the Windows bind mount; the backend only reloads because watchfiles polls |
 | `C70` | medium | 0 | Platform | Demo path bypasses classifier, geocoder, dedup and track_history, so the zero-config run exercises none of the… |
@@ -254,10 +340,13 @@ Ordered by severity, then area.
 
 ### Fixed
 
-Verified fixed in the current tree.
+Verified fixed in the current tree. Each row names the commit that closed it.
 
 | ID | Sev | Phase | Area | Finding |
 |---|---|---|---|---|
+| `C41` | critical | 0 | Frontend | A keyless install now opens on the globe, which needs no token (`075ce6f`), so the documented quick start no longer renders a black rectangle. Residual: choosing 2D with no token still draws black with no in-panel notice |
+| `C5` | critical | 1 | Ingest | Word-anchored patterns, compiled once at import, in **both** places — `_KNOWN_PATTERNS`/`_DIRECTIONAL_PATTERNS` in geocoder.py and `_LOCATION_PATTERNS` in classifier.py (`075ce6f`) |
+| `C8` | critical | 1 | Ingest | check_duplicate branches explicitly on geometry: a located event requires `geometry IS NOT NULL` + ST_DWithin, an unlocated one is confined to `geometry IS NULL`. Neither pool can absorb the other (`89c6f54`) |
 | `C21` | high | 2 | Collection | adsb.lol 403 to the default httpx User-Agent - fixed by a contact-bearing UA |
 | `C24` | high | 2 | Collection | Jamming test no longer reads position_source/mlat (ground-feeder density) |
 | `C25` | high | 2 | Collection | `nac_p == 0 and nic == 0` replaced with the published gpsjam threshold |
@@ -265,11 +354,19 @@ Verified fixed in the current tree.
 | `C27` | high | 0 | Collection | "I cannot measure" is now a distinct status, not zero zones |
 | `C28` | high | 2 | Collection | AO re-centred and narrowed; aircraft coverage verified live |
 | `C42` | high | — | Frontend | tsc/vite build errors are gone: fixed today in 0bd4835 (sun/moon guards, Terrain arg, useRef initial value) |
+| `C20` | high | 2 | Collection | On-disk TLE cache written atomically via os.replace and loaded at startup, the fetch skipped while it is fresh, 1h backoff on 403/429, and the cache replaced only when the fetch returned rows (`0de11f2`) |
+| `C47` | high | 1 | Frontend | types/event.ts carries the provenance fields the API returns (`e60c44d`), extended with geo_precision (`89c6f54`) and extraction_model (`de146f6`) |
+| `C12` | high | 0 | Ingest | Both admin tasks abandon the row when re-classification is not `ok` instead of overwriting severity/summary, and write extraction_status, extraction_model, is_geolocated and the geo_* columns when it is (`de146f6`) |
+| `C2` | high | 1 | Ingest | severity is nullable end to end (models, schemas, ClassifierResult), the fallback literal is gone, and dead clamp_severity was deleted rather than repaired (`89c6f54`) |
+| `C4` | high | 1 | Ingest | Sentinel deleted. An unresolvable location persists as NULL lat/lon/geometry with is_geolocated=false, and the three predicates that read -25.0 went with it (`89c6f54`) |
+| `C7` | high | 1 | Ingest | Actor acronyms removed from KNOWN_LOCATIONS and added to `_NOT_A_PLACE`, so a bare "IDF" no longer falls through to Nominatim (which answered with a point in Armenia). A named HQ building may stay; a command or a fleet may not (`075ce6f`) |
+| `C9` | high | 1 | Ingest | Deterministic `order_by(timestamp DESC, id DESC)` before the limit (`075ce6f`); the cap later split into 20 located / 200 unlocated, sized on the densest observed window (`89c6f54`) |
 | `C22` | medium | 2 | Collection | Aircraft cache timestamp is now wall-clock, but /tracking/aircraft still exposes no timestamp at all |
 | `C23` | medium | 0 | Collection | Poll log hard-coded "adsb.lol" - now reports the source actually used |
 | `C40` | medium | 3 | Frontend | app-grid row minimum: already minmax(0,1fr), fixed earlier today in 716ffec |
-| `C1` | medium | 1 | Ingest | Fallback rows are now tagged extraction_status; the fabricated severity=5 survives |
-| `C3` | low | 0 | Ingest | parse_failed is a distinct tagged status; only non-dict JSON still mis-tags as llm_failed |
+| `C1` | medium | 1 | Ingest | Fallback rows are now tagged extraction_status; the fabricated severity=5 went with `C2` (`89c6f54`) |
+| `C43` | medium | 3 | Frontend | EscalationGauge deleted; IndicatorRail replaces it, reads no severity at all, and states each row's own coverage with DEGRADED as a first-class state (`e60c44d`) |
+| `C3` | low | 0 | Ingest | parse_failed is a distinct tagged status; the non-dict JSON hole closed too — a list, number or bare string now raises a decode error, so both backends record parse_failed (`de146f6`) |
 
 ### Fixed by the v3 rebuild
 
@@ -287,7 +384,7 @@ Real, but not a code defect.
 | ID | Sev | Phase | Area | Finding |
 |---|---|---|---|---|
 | `C30` | high | 2 | Collection | AISStream genuinely has no Persian Gulf receiver coverage - not a bounding-box bug |
-| `C72` | high | — | Platform | Anthropic key returns 400 organization_on_hold, so live classification cannot run at all |
+| `C72` | high | — | Platform | Anthropic key returns 400 organization_on_hold, so that backend cannot run. It no longer stops classification: `de146f6` made a local Ollama backend the default. It still stops any measurement *of Haiku*, the model that produced the archive |
 
 ### Invalid
 
@@ -298,50 +395,6 @@ Did not survive checking.
 | `C73` | low | — | Platform | frontend/dist is not committed and never has been — it is an untracked local build artifact |
 
 ### Detail: open critical and high findings
-
-
-#### `C41` — Documented quick start yields a black map panel: empty Mapbox token, no error shown, zero markers
-
-`critical` · phase 0 · Frontend
-
-**Where:** MapPanel.tsx:8 `const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";` and :107 `useState<"2d"|"globe"|"terrain">("2d")`. README.md:14 tells the user `echo "DEMO_MODE=true" > .env`, which leaves MAPBOX_TOKEN unset; docker-compose.yml maps `VITE_MAPBOX_TOKEN: ${MAPBOX_TOKEN:-}` → empty. Reproduced: built the frontend with no token into the scratchpad and served it on :4599. Screenshot shows header, live feed, gauge, timeline and legend rendering normally over a fully black map area. Console: `Error: An API access token is required to use Mapbox GL ... at Map.setStyle ... at Nd._initialize`. DOM probe: `hasMapboxMap: true, markerCount: 0`. The app does NOT crash — react-map-gl swallows the constructor throw.
-
-**Impact:** On the exact documented quick-start path, the default view is a black rectangle. Every conflict event, aircraft, vessel, trail and jamming zone is invisible, while the legend overlaid on the same black rectangle still asserts "AIRCRAFT (22) VESSELS (34) GPS INTERFERENCE (2)" — the UI claims contents it is not drawing, with no on-screen error.
-
-**Fix:** In MapPanel, branch on `!MAPBOX_TOKEN`: render an explicit in-panel notice ("2D basemap unavailable — VITE_MAPBOX_TOKEN not set") instead of <Map>, and default `viewMode` to "globe" (which needs no token and whose assets are all local) when the token is empty.
-
-
-#### `C5` — Geocoder and classifier both do unanchored substring matching; short keys win mid-word
-
-`critical` · phase 1 · Ingest
-
-**Where:** geocoder.py:645-657 `for known_name, coords in KNOWN_LOCATIONS.items(): if known_name in normalized and len(known_name) > best_len` — plain `in`, no \b. Same bug in classifier.py:224-228 `if loc_lower in text_lower`. Live, in the running backend: geocode('Maarakeh') -> (34.0975, 49.1947) [key 'arak', geocoder.py:124, Iran]; geocode('Kiryat Shemona') -> (32.0790, 34.7860) [key 'kirya', :227, IDF HQ Tel Aviv]; geocode('Romania') -> (22.0, 57.0) [key 'oman', :477]; partial('Najafabad') -> 'najaf' (:390); partial('Homsi') -> 'homs'; partial('Qomish') -> 'qom'. Classifier fallback: _regex_location_fallback('Analysts note the T4 designation on the airframe.') -> 'T4' (the Syrian T-4 airbase); _regex_location_fallback('Sirens in Kiryat Shemona near the northern border.') -> 'Kirya'.
-
-**Impact:** A named place is silently relocated to a different country. Maarakeh (south Lebanon) plots in Arak, Iran, ~1,100 km away. Kiryat Shemona (Israel's northern border, the town that actually takes rocket fire) plots at IDF headquarters in Tel Aviv. The event is then marked is_geolocated=true, so the row asserts a confident wrong position, and dedup's 50 km ST_DWithin clusters it with whatever is genuinely near the wrong point. The claimed rate (49 strings / 73 events) cannot be re-measured here: all 8246 rows in the demo DB have location_name='' (`select location_name, count(*) from events group by 1` returns one row, the empty string), so the mechanism is confirmed but the count is not.
-
-**Fix:** In geocoder.py:650 and :655 and classifier.py:226, replace `known_name in normalized` with a word-boundary test: `re.search(rf'(?<![\w]){re.escape(known_name)}(?![\w])', normalized)`. Then drop or lengthen the 2-3 char keys ('t4', 'qom', 'idf', 'iaf') that still produce standalone false positives.
-
-
-#### `C8` — Dedup drops the spatial predicate whenever the incoming report has no coordinates
-
-`critical` · phase 1 · Ingest
-
-**Where:** dedup.py:65-74: `if lat is not None and lon is not None:` guards the whole `ST_DWithin(cast(Event.geometry, Geography), cast(new_geom, Geography), 50000)` clause; when it is skipped the statement is only `event_type == X AND timestamp BETWEEN ts-15m AND ts+15m` (dedup.py:56-62). Proven live against the running DB: taking event 8250 (military, 25.585N 60.910E) and re-submitting its own summary and timestamp — `check_duplicate(..., lat=None, lon=None)` -> None, `check_duplicate(..., 64.0, -22.0)` -> None, `check_duplicate(..., 25.585, 60.910)` -> 8250. Today the branch is never taken because telegram.py:272 and news_feeds.py:341 substitute (-25,80) before calling, which instead puts every ungeocoded event inside one 50 km cluster in the Indian Ocean; and ST_DWithin on a NULL Event.geometry e…
-
-**Impact:** This is the trap that blocks Phase 1 exactly as claimed. The moment the sentinel is replaced by NULL, every ungeocoded report starts matching on time+type alone across the whole table, and any two unrelated military reports 15 minutes apart with jaccard>0.4 on their summaries get merged into one event with an inflated report_count and a boosted source_reliability. The failure is silent — no error, just fewer events that each claim more corroboration.
-
-**Fix:** Make the no-coordinate case explicit rather than permissive: when lat/lon are None, require `Event.geometry.is_(None)` (or `Event.is_geolocated.is_(False)`) plus a tighter time window and a higher jaccard threshold, instead of dropping the predicate. Land this in the same commit as C4's NULL-geometry change.
-
-
-#### `C20` — TLE fetcher: no persistence, no backoff, and a failed fetch wipes the cache to zero
-
-`high` · phase 2 · Collection
-
-**Where:** backend/app/services/satellites.py:21-59. The loop sleeps REFRESH_INTERVAL (6h) whatever happened: `await asyncio.sleep(REFRESH_INTERVAL)` at :59 is outside the try/except and outside any success test. Lines 53-54 `_tle_cache.clear(); _tle_cache.extend(all_tles)` run even when every group returned non-200, so one 403 replaces a good cache with []. No persistence anywhere: `_tle_cache: list[dict] = []` at :18 is the only store (grep for TLE in models.py/db.py: no hits), and satellites.py has not changed since 187b0fa - the v3 rebuild did not touch it. Live now: `docker logs conflict-monitor-backend-1 | grep -i celestrak` shows 4 process starts today, each issuing GET gp.php?GROUP=military -> 403 Forbidden -> "Total TLEs cached: 0"; re-probed from inside the container with the code's own hea…
-
-**Impact:** After any failed cycle the satellite layer is empty for a full 6 hours - there is no retry short of a restart, and because the fetch is the first thing the task does, a restart loop hammers CelesTrak and extends the IP block (that is how today's block was earned). Frontend TLE_POLL_MS is also 6h (useTracking.ts:63), so a client that loads during an empty window shows 0 SAT for up to 12h. "0 SAT" is indistinguishable from "no satellites".
-
-**Fix:** Three small changes in satellites.py: (1) only clear/extend `_tle_cache` when `all_tles` is non-empty, so a 403 keeps the last good set; (2) write the last good set to disk (e.g. backend/sessions/tle_cache.json) and load it at startup, skipping the fetch when it is <6h old - that also stops restart-storms hitting CelesTrak; (3) on a failed cycle sleep an exponential backoff (60s doubling to ~30min) instead of the full 6h. The 403 itself is an IP block and will clear on its own.
 
 
 #### `C31` — A failed poll leaves the last fleet and a frozen as_of in place with status still "ok"
@@ -388,17 +441,6 @@ Did not survive checking.
 **Fix:** Delete the `transition` from both Marker styles (and the lerp in GlobeView) so a mark moves when and only when a new observation arrives; encode position age as opacity or a staleness ring instead.
 
 
-#### `C47` — types/event.ts omits six fields the API already returns, including today's extraction_status and is_geolocated
-
-`high` · phase 1 · Frontend
-
-**Where:** frontend/src/types/event.ts:1-15 declares only id, source, channel_name, raw_text, summary, event_type, severity, lat, lon, timestamp, created_at, report_count?, reporting_channels?. `curl http://localhost:8000/events?limit=2` returns additionally: `source_reliability`, `location_name`, `telegram_message_id`, `source_url`, `extraction_status`, `is_geolocated`. The last two were added today by 9fd3fbf (backend/app/schemas.py) and `/events/stats/extraction` is live (`{"total":8245,"by_extraction_status":{"null":8245},...}`).
-
-**Impact:** The frontend type is the reason nothing on screen can say "I guessed". Phase 0 put extraction_status and is_geolocated on the wire and the UI silently drops them — the classifier-failure tag reaches the browser and dies in the JSON parse. Same for source_reliability, which the README advertises as a filterable feature.
-
-**Fix:** Add the six fields to ConflictEvent (`extraction_status: string | null; is_geolocated: boolean | null; location_name: string; source_reliability: number | null; telegram_message_id: number | null; source_url: string;`). That is the one-line prerequisite for every Phase 1 display change.
-
-
 #### `C51` — WebSocket reconnect refetches nothing and the server sends no backlog: events during a drop are lost until reload
 
 `high` · phase 2 · Frontend
@@ -408,6 +450,8 @@ Did not survive checking.
 **Impact:** Any event broadcast while the socket is down never reaches that client. The header flips back to a green pulsing LIVE (Header.tsx:138-151) the moment the socket reopens, so the UI asserts completeness it does not have; the only recovery is a manual page reload. A backend restart or a laptop sleep silently punches a hole in the feed.
 
 **Fix:** On successful `ws.onopen`, re-run the REST fetch and merge by id (dedupe on `e.id`) rather than replace — a 3-line change in `connect`. A server-side backlog (send the N newest events on accept) is the more complete fix but is not required to close the hole.
+
+**Since `e60c44d`** the header no longer flips back to a green pulsing LIVE: liveness is rendered as an age, and a nominal feed gets no mark at all. The hole is untouched — a reconnect still refetches nothing — but the UI no longer decorates it.
 
 
 #### `C10` — merge_duplicate keeps only channel, severity and coordinates; the incoming report's text and identity are dropped
@@ -419,6 +463,8 @@ Did not survive checking.
 **Impact:** After a merge the only surviving evidence is `report_count += 1` and a channel name appended to a comma-joined string. The second report's own wording, its Telegram permalink and its message id are gone, so nobody can later check whether the two reports were independent or verbatim copies — which is precisely the judgement C11's reliability boost depends on. It also means the merged message has no telegram_message_id row, so _message_already_saved (telegram.py:214-218) cannot recognise it on the next restart and it is re-ingested and re-merged.
 
 **Fix:** Replace the merge with a link: an event_reports child table holding (event_id, source, channel, raw_text, summary, source_url, telegram_message_id, ingested_at), one row per report, with report_count and reporting_channels derived from it. That is the Phase 4 'link don't merge' change; the minimum interim step is to pass and store source_url and telegram_message_id.
+
+**Since `89c6f54`** the signature is `merge_duplicate(session, existing, new_channel, new_severity)`: the coordinate parameters and the coordinate backfill were deleted, because `C8`'s geometry guard made the backfill unreachable. The merge therefore keeps strictly less than this block describes, and the finding is unchanged — the incoming report's text, URL and message id still have nowhere to go.
 
 
 #### `C11` — Reliability boost keys on report_count, not on distinct channels, so one source repeating itself raises confidence
@@ -432,39 +478,6 @@ Did not survive checking.
 **Fix:** Count distinct sources, not merges: derive the boost from the child-report table of C10 (`count(distinct channel)`), and gate it on a channel-family graph so channels known to repost each other contribute once. Until that exists, change dedup.py:135 to test the length of the de-duplicated channel set rather than new_count.
 
 
-#### `C12` — Admin fix/reclassify tasks rewrite coordinates, severity and summary without updating the Phase 0 tags
-
-`high` · phase 0 · Ingest
-
-**Where:** routes/events.py:119-129 (_fix_null_coords_task) writes db_ev.lat, .lon, .geometry, .location_name, .severity, .summary and commits — no extraction_status, no is_geolocated. Same at :203-215 (_reclassify_vague_locations_task): location_name, lat, lon, geometry, severity, summary, no tags. Both call classify_message (:100, :190) which now returns extraction_status, and both discard it (:101-103 and :191 read only location_name/severity/summary). Worse, :102-103 `new_severity = classified.get("severity", ev.severity); new_summary = classified.get("summary", ev.summary)` — if that re-classification falls back, the fabricated severity 5 and `raw_text[:200]` summary overwrite whatever was there, still untagged.
-
-**Impact:** These are the two endpoints most likely to be run over the archive, and they systematically corrupt the instrument Phase 0 just installed. A row that was correctly tagged is_geolocated=false and then successfully re-geocoded keeps is_geolocated=false while holding real coordinates; a row that was tagged 'ok' and is then re-classified by a failing API keeps 'ok' while holding a fabricated severity and a truncated raw-text summary. After one run of either task, /events/stats/extraction no longer describes the table.
-
-**Fix:** In both write blocks set `db_ev.extraction_status = classified.get("extraction_status")` and `db_ev.is_geolocated = True` alongside the coordinate write, and skip the severity/summary overwrite entirely when extraction_status != 'ok' (events.py:102-103 and :211-214).
-
-
-#### `C2` — Six independent severity=5 literals, not four; the clamp validator is dead code
-
-`high` · phase 1 · Ingest
-
-**Where:** models.py:21 `severity: Mapped[int] = mapped_column(Integer, default=5)`; schemas.py:12 `severity: int = 5`; classifier.py:179 `severity: int = Field(default=5, ge=1, le=10)`; classifier.py:334 `"severity": 5,` in _build_fallback; telegram.py:257 `severity = result.get("severity", 5)`; news_feeds.py:323 same. A seventh probe at telegram.py:251 `_is_noise(raw_text, 5)`. Live: ClassifierResult(severity=15) raises ValidationError (the ge/le constraint runs before the mode='after' clamp_severity at :190-193), so out-of-range never clamps — it becomes parse_failed and lands on the literal 5 at :334.
-
-**Impact:** There is no single place where 'we did not measure severity' can be expressed. A row with severity=5 may mean: the model said 5; the model said 15 and the row fell back; there was no API key; the DB default fired; or a POST omitted the field. All six write the same integer into the same column, and severity drives MIN_SEVERITY filtering, the merge_duplicate 'take higher severity' rule, and the map's mark size/colour.
-
-**Fix:** Make severity nullable end-to-end (models.py:21 drop default, schemas.py:12 `severity: int | None = None`, classifier.py:179 `severity: int | None = None`), delete the literal at classifier.py:334, replace `result.get("severity", 5)` at telegram.py:257 and news_feeds.py:323 with a None-propagating read, and either drop the dead clamp_severity or move the clamping into a mode='before' validator so 11 becomes 10 instead of a parse failure.
-
-
-#### `C4` — (-25,80) sentinel declared in 3 modules, read by 3 query predicates, rendered as a real marker
-
-`high` · phase 1 · Ingest
-
-**Where:** Declared: routes/events.py:23-24 `_UNKNOWN_LAT = -25.0 / _UNKNOWN_LON = 80.0`; services/news_feeds.py:69-70 `UNKNOWN_LAT/UNKNOWN_LON`; services/telegram.py:24-25 (`# Indian Ocean parking for unresolvable locations`). Written: telegram.py:272, news_feeds.py:341. Read by predicates: events.py:82 `(Event.lat == _UNKNOWN_LAT)` in _fix_null_coords_task, :295 `Event.lat != _UNKNOWN_LAT` and :300 `or_(Event.lat.is_(None), Event.lat == _UNKNOWN_LAT)` in geo_stats. Also read implicitly by dedup.py:122 `if existing.lat is None` (never true for a parked row) and NOT filtered by frontend/src/components/MapPanel.tsx:110 `events.filter((e) => e.lat != null && e.lon != null)`.
-
-**Impact:** Three copies of one magic number that must stay in sync, and the value has become load-bearing: geo_stats' definition of 'unknown' is a float equality test, so a genuine event at latitude -25.0 is miscounted as unknown; a parked event can never be repaired by merge_duplicate because its lat is not None; and MapPanel draws every ungeocoded event as an ordinary marker in the Indian Ocean, i.e. the absence of a location is displayed as a positive geographic claim. Removing the sentinel in Phase 1 silently changes the meaning of all three predicates at once.
-
-**Fix:** Write lat/lon/geometry as NULL when geocoding fails and let is_geolocated carry the fact; replace the three predicates with `Event.is_geolocated.is_(False)` / `.is_(True)`; delete all three constant pairs; add `&& e.is_geolocated !== false` to MapPanel.tsx:110. Must land together with C8/C9 or dedup breaks.
-
-
 #### `C6` — Country names resolve to national centroids via Nominatim and are marked is_geolocated=true
 
 `high` · phase 1 · Ingest
@@ -475,27 +488,7 @@ Did not survive checking.
 
 **Fix:** Have geocode() return (lat, lon, precision) where precision is one of facility/district/city/region/country, sourced from which table branch matched (geocoder.py:632-665) and from Nominatim's `type`/`class`/`addresstype`. Persist it as a column and set is_geolocated only for city-or-better; render country-precision hits as an area, not a point.
 
-
-#### `C7` — KNOWN_LOCATIONS maps actor acronyms (idf/iaf/irgc/centcom) to headquarters coordinates
-
-`high` · phase 1 · Ingest
-
-**Where:** geocoder.py:545-552: `"khomeini": (35.6892,51.3890)`, `"central command"/"centcom"/"us central command": (25.1175,51.3150)`, `"fifth fleet": (26.2200,50.5500)`, `"iaf": (31.2083,34.9390) # Israeli AF -> Nevatim`, `"idf": (32.0790,34.7860) # IDF HQ -> Kirya`, `"irgc": (35.7156,51.4063) # IRGC HQ`. classifier.py:54 also has 'Kirya' and :45 'IRGC HQ' in LOCATION_KEYWORDS. Live: geocode('IDF spokesperson confirmed the operation') -> (32.079, 34.786); geocode('IRGC statement') -> (35.7156, 51.4063); geocode('IAF jets') -> (31.2083, 34.939); geocode('CENTCOM said') -> (25.1175, 51.315). Combined with C5's unanchored matching, any message naming the actor and no place is geolocated to that actor's HQ.
-
-**Impact:** The subject of a sentence is converted into the location of the event. 'The IDF said its aircraft struck targets in Syria' resolves to Tel Aviv — the attacker's headquarters, not the target. Because these keys are short (3 chars) they only win when no longer key matches, which is exactly the ungeolocatable messages the sentinel was meant to catch: the tokens convert an honest 'no location' into a confident wrong one, and is_geolocated=true hides it.
-
-**Fix:** Delete 'idf', 'iaf', 'irgc', 'centcom', 'central command', 'us central command', 'fifth fleet', 'khomeini' from KNOWN_LOCATIONS (geocoder.py:545-552) and 'IRGC HQ'/'IDF HQ' from LOCATION_KEYWORDS (classifier.py:45,54). If HQ coordinates are genuinely wanted, keep them behind an explicit key like 'idf headquarters' that only an exact match can reach.
-
-
-#### `C9` — Dedup candidate query is LIMIT 20 with no ORDER BY, so the true duplicate can fall outside the window
-
-`high` · phase 1 · Ingest
-
-**Where:** dedup.py:76 `result = await session.execute(stmt.limit(20))` — the statement built at :56-74 has no order_by, and the compiled SQL confirms no ORDER BY clause. Proven live: for probe event 8250, the ±15min same-type window holds 26 rows; the unordered LIMIT 20 returns ids [8212,8214,8215,8216,8218,8219,8220,8221,8222,8223,8224,8225,8227,8228,8230,8232,8236,8237,8238,8241] and `8250 in candidates` is False. The jaccard loop at :84-93 then scores only those 20 and returns None.
-
-**Impact:** Dedup is not a function of its inputs. Postgres may return any 20 of the matching rows and is free to change that set between runs after a VACUUM, a plan change, or a parallel scan — so the same message ingested twice can be a duplicate one time and a new event the next, and the demonstration above shows the genuine match being truncated away while 20 non-matches are scored. It also makes any Phase 4 gold-label evaluation of dedup meaningless, and it compounds C8: widening the candidate set by dropping the spatial filter makes truncation more likely, not less.
-
-**Fix:** Add a deterministic ordering that puts the most likely duplicate first, e.g. `stmt.order_by(func.abs(func.extract('epoch', Event.timestamp - timestamp))).limit(20)`, or drop the limit and do the jaccard scoring in SQL. At minimum `order_by(Event.id.desc())` so the result is reproducible.
+**Half of that shipped in `89c6f54`** and this block's "Where" is stale on it: geocode() now returns `GeoResult(lat, lon, precision, uncertainty_m, method)`, and the tier is persisted as `geo_precision` / `geo_uncertainty_m`. The gate did not ship — telegram.py and news_feeds.py still set `is_geolocated = True` on any non-None return, so a country centroid is still stored as a confident location. The finding stays open on that clause.
 
 
 #### `C60` — No auth on any route or the WS; CORS reflects any origin with credentials, DELETE allowed
@@ -556,6 +549,26 @@ Did not survive checking.
 ### Surfaced during the audit, not yet triaged
 
 Found while verifying the list above; no phase assigned yet.
+
+Eight of these have since been closed by later commits — re-checked against `de146f6`, not counted
+from memory. They are left in place rather than deleted: `clamp_severity` as dead code and the
+sentinel-blocked coordinate backfill (both gone with `89c6f54`); the Phase 0 tags never reaching the
+display (`e60c44d` put them on the type and `LiveFeed` now renders NOT GEOLOCATED and CLASSIFY
+FAILED); the TLE fetcher's missing persistence and inverted backoff (`0de11f2`); the OpenSky
+fallback's pre-fix AO (`74f09f0` — both paths derive the box from `CENTRE_LAT` / `CENTRE_LON` /
+`RADIUS_NM`); the escalation gauge's mis-filled arc (`e60c44d` deleted `EscalationGauge.tsx`
+outright — the same deletion this document already cites for `C43`; the file does not exist at
+`de146f6`); the jamming liveness fields fetched and thrown away (`e60c44d` — `IndicatorRail.tsx`
+renders `cells_evaluated` and `aircraft_evaluable` as the row's coverage clause and carries the feed
+age, so the denominator and the currency both reach the page); and RSS articles re-merging into
+themselves after a restart (`de146f6` moved the stored-`source_url` check ahead of both
+`classify_message` and `check_duplicate`; in `0bd4835` it sat at `:363`, *after* the semantic dedup
+at `:348`, which is what let a re-seen article inflate another row's `report_count`).
+
+A ninth is narrowed but not closed: `89c6f54` rewrote `/events/admin/geo-stats` onto a single
+definition (`geometry IS NOT NULL`), so the `lat != -25.0` predicate that finding cites is gone, but
+the two endpoints have not been re-measured against the same rows. The rest have **not** been
+re-checked against `de146f6`.
 
 
 **Ingest**
@@ -618,20 +631,26 @@ Make failure visible before changing any behaviour.
 - [x] Persist `is_geolocated`, which the code already computed and discarded on a log line (`9fd3fbf`)
 - [x] `GET /events/stats/extraction` so the fallback rate is watchable without SQL (`9fd3fbf`)
 - [x] Coverage probes for ADS-B and AIS — both changed the plan (see Measured facts)
-- [ ] Run for one week and record the real fallback rate — **blocked: the Anthropic key is disabled**
-- [ ] Label the archive's sentinel rows with a single `UPDATE` ($0, no reprocessing)
+- [ ] Run for one week and record the real fallback rate — no longer blocked: `de146f6` made Ollama the default backend, so this runs with no key and no spend. It measures **qwen3:8b, not Haiku**; record which model the number describes
+- [ ] Label the archive's sentinel rows with a single `UPDATE` ($0, no reprocessing) — **the code
+  shipped, the run did not**: `89c6f54` added an idempotent startup migration (`main.py`, logging
+  "Retired Indian Ocean sentinel on %d event(s)") that NULLs lat/lon/geometry and sets
+  `is_geolocated = false` wherever `lat = -25.0 AND lon = 80.0`. It runs against whatever database
+  the backend starts on; nothing evidences it having run against the 83,938-event VPS archive, which
+  is what "the archive" means everywhere else in this document. Outstanding is the run and its
+  rowcount, not the SQL
 
 ### Phase 1 — Let the schema say "I guessed"
 
 Additive columns first, then remove the lies. Expect the map to get roughly 80% emptier; say so up
 front or it reads as a regression.
 
-- [ ] `geo_precision` (`facility` / `city` / `admin1` / `country_centroid` / `region_named` / `unresolved`), `geo_uncertainty_m`, `evidence_span`
-- [ ] Kill all four severity-5 defaults, including `Field(default=5)` where an omitted key validates clean
-- [ ] Delete the `(-25, 80)` sentinel and migrate the query predicates that *read* it
-- [ ] **Same commit**: guard dedup against NULL geometry, or unlocated rows match on time + type across the whole table
-- [ ] Word boundaries on the geocoder partial match (simulated: 49 strings change, zero regressions)
-- [ ] Add the ~15 highest-volume missing facilities (`Prince Sultan Air Base`, `Ras Laffan`, `Ben Gurion`, …)
+- [ ] `geo_precision` (`facility` / `city` / `admin1` / `country_centroid` / `region_named` / `unresolved`), `geo_uncertainty_m`, `evidence_span` — **partial**: the two geo columns shipped in `89c6f54`, derived from the matching table branch and from Nominatim's bounding box. `evidence_span` does not exist anywhere in the backend, so this stays unticked
+- [x] Kill all four severity-5 defaults, including `Field(default=5)` where an omitted key validates clean — six, in the end, and the dead clamp validator with them (`89c6f54`)
+- [x] Delete the `(-25, 80)` sentinel and migrate the query predicates that *read* it (`89c6f54`)
+- [x] **Same commit**: guard dedup against NULL geometry, or unlocated rows match on time + type across the whole table — it did land in the same commit (`89c6f54`)
+- [x] Word boundaries on the geocoder partial match (simulated: 49 strings change, zero regressions) — and the identical bug in `classifier.py`'s own fallback (`075ce6f`)
+- [ ] Add the ~15 highest-volume missing facilities (`Ras Laffan`, `Ben Gurion`, …; `Prince Sultan Air Base` is now in the table)
 
 ### Phase 2 — The denominator
 
@@ -644,13 +663,18 @@ Where "a dead feed and a quiet night look identical" actually dies.
 - [ ] Trailing robust baselines with an explicit `regime_id`; never pool across the 2023/2026 regime breaks
 - [ ] Resolve the maritime coverage gap (see Blocked)
 
+The connectivity layer (`51bdce9`, `bb1c80c`) was not on this roadmap and does not tick any line
+above, but it is where the denominator idea is furthest along: a per-sensor `unavailable` state, two
+trailing baselines reported separately, and agreement between independent sensors as the confidence
+signal. See Measured facts.
+
 ### Phase 3 — The display
 
 - [ ] Mark geometry = evidence geometry, driven by `geo_precision`; unresolved rows go to a tray, never the map
 - [ ] Replace DOM `<Marker>` loops with Source/Layer; the trails code already does this correctly
 - [ ] Promote the timeline into a feed-liveness lane so a collection gap and a quiet period are different shapes
-- [ ] Delete `EscalationGauge`; replace with an indicator rail whose row zero is feed currency
-- [ ] Render age, never a green dot
+- [x] Delete `EscalationGauge`; replace with an indicator rail whose row zero is feed currency (`e60c44d`, finding `C43`)
+- [x] Render age, never a green dot — the pulsing LIVE dot is gone; nominal gets no mark at all (`e60c44d`)
 - [ ] Shape for class, hue spent once; `prefers-reduced-motion` on every animation
 - [ ] Decide the three-renderer question (recommendation: delete `GlobeView`, keep Mapbox, demote Cesium to an explicit terrain/LOS action)
 
@@ -667,9 +691,9 @@ Where "a dead feed and a quiet night look identical" actually dies.
 
 | Item | Detail |
 |---|---|
-| **Anthropic API key disabled** | Returns `400 organization_on_hold` — "This organization has been disabled." Live classification cannot run, so the Phase 0 measurement week cannot start. Appeal at `console.anthropic.com/appeal` or swap the key. |
+| **Anthropic API key disabled** | Returns `400 organization_on_hold` — "This organization has been disabled." This no longer stops classification or the Phase 0 week: `de146f6` made a local Ollama backend the default, with no silent fallback. What stays blocked is measuring **Haiku**, the model that produced the 83,938-event archive, so any comparison against it waits on the key. Appeal at `console.anthropic.com/appeal` or swap the key. |
 | **No AIS coverage in the Gulf** | Free terrestrial AIS cannot see the Gulf. Options: IMF PortWatch (free, daily chokepoint counts, 5–12 days stale — a baseline, not a live feed); Global Fishing Watch API (free for research, satellite-derived — probe it); satellite AIS (Spire/ORBCOMM, enterprise pricing). |
-| **Secrets in `.env`** | Live Anthropic key, Telegram API hash + phone, Mapbox token, AISStream key, OpenSky password. Correctly gitignored and clean in git history, but worth rotating — they were displayed in a terminal session. |
+| **Secrets in `.env`** | Telegram API id/hash + phone, Mapbox token, AISStream key, OpenSky password, Cloudflare Radar token, Postgres password, and the (already dead) Anthropic key. **Not clean in git history after all**: `c460f5e` committed `.env.bak` with all of them. The amend to `de146f6` removed the file and `.gitignore` now excludes `.env.*`; nothing was pushed. Rotate anyway — the orphaned commit is in this machine's reflog until it expires, and the values were displayed in a terminal session. See the Corrections log. |
 | **OpenRouter key in VPS shell history** | `/root/.bash_history` on the Hetzner box contains a plaintext OpenRouter key. Rotate. |
 | **Hetzner VPS still billing** | Running with nothing on it but the 193 MB archive. |
 
@@ -693,6 +717,9 @@ document that silently edits away its own mistakes would fail its own standard.
 | Four severity-5 defaults | **Six**, plus a seventh probe — and `clamp_severity` is dead code: `Field(ge=1, le=10)` raises before the validator runs, so 11 becomes a parse failure instead of clamping to 10 | Grepping for the literal rather than recalling the list |
 | `frontend/dist` is committed | It is untracked; the amend that removed it worked | `git ls-files` |
 | The interference fix re-centred the AO | It re-centred the **primary** path only. `opensky.py:160` still requests the old `lamin 15 / lamax 45 / lomin 25 / lomax 65` box on the OpenSky fallback, so the two paths now disagree about where the AO is | The audit compared the two poll functions. **Fixed 2026-09-19 in `74f09f0`**: both paths derive the AO from `CENTRE_LAT`/`CENTRE_LON`/`RADIUS_NM`, and OpenSky results are clipped to the circle |
+| Secrets in `.env` are "correctly gitignored and clean in git history" — written in the Blocked-on-the-owner table above | `c460f5e` committed `conflict-monitor/.env.bak`, carrying live Telegram, Mapbox, AISStream, OpenSky, Cloudflare Radar and Postgres credentials plus the dead Anthropic key. `.gitignore` covered `.env`, not `.env.bak`. Amended to `de146f6`, which does not contain the file, and `.env.*` is now ignored; `origin` only ever had `main` at `0f4ad05`, so nothing was pushed. The orphan survives in the local reflog and the values still need rotating | An audit grepped the **tracked** files instead of trusting the sentence — the same mistake, made the same way, as the `frontend/dist` entry above |
+| Live classification is blocked until the Anthropic key is restored — stated in three places in this document | It was blocked only on *that* backend. `de146f6` put a local qwen3:8b behind the same byte-identical prompt and produced the first `extraction_status = "ok"` rows this archive has ever held, with no key and no spend. The Phase 0 week can start; it measures qwen3 rather than Haiku, which changes what the number means, not whether it can be taken | Trying the alternative instead of re-reading the blocker. The document had repeated "blocked" for twelve commits |
+| This register is "updated in the same commit as the change it describes" — its own rule, line 3 | It was last updated **eight commits ago**, in `3c92466`; `e60c44d`, `e03cee6`, `51bdce9`, `0de11f2`, `bb1c80c`, `075ce6f`, `89c6f54` and `de146f6` all shipped without touching it, and that run of eight is the longest this document has had. Four of the twelve commits since `7ddbe58` created it *did* edit it (`de831ed`, `74f09f0`, `fc0c989`, `3c92466`) — and `fc0c989` exists only to correct stale hashes in it. The drift is real either way: the header claimed coverage through `74f09f0`, eleven fixed findings were still listed Open, the tally still said three criticals when there were none, and two whole subsystems (the connectivity layer, the Ollama backend) had never been mentioned. A register that drifts is a register that cannot be cited | A 47-agent audit re-checked the ledger against the tree and produced file:line evidence for every claim; each claimed fix was then re-verified against `de146f6` before its row moved. **This row's own first draft said "twelve commits"** — the count since the document was *created*, not since it was *updated*, and the same diff carried the disproof. `git log --oneline 7ddbe58..de146f6 -- conflict-monitor/docs/FINDINGS.md` returns four commits, one of them titled "Correct stale commit hashes in FINDINGS.md"; `git rev-list --count 3c92466..de146f6` returns 8. A correction that is itself wrong is the one failure this table cannot afford, so the commands stay in the row. The rule needs enforcing, not restating |
 
 ---
 
@@ -707,3 +734,15 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-18 | `7ddbe58` | Add `docs/FINDINGS.md` — this register |
 | 2026-09-18 | `de831ed` | Add `tools/` (reproduction scripts) and the resume section |
 | 2026-09-19 | `74f09f0` | One AO for both aircraft poll paths; OpenSky bbox derived from the constants and clipped to the circle |
+| 2026-09-19 | `fc0c989` | Correct three stale commit hashes in this document, and rename the header row to "Covers work through" |
+| 2026-09-19 | `3c92466` | Altitude floor (FL200) on the interference denominator — the peaceful control collapses to 2.3% and Kaliningrad holds at 16.4% |
+| 2026-09-19 | `e60c44d` | Design pass: computed three-hue palette, `IndicatorRail` replacing `EscalationGauge`, liveness as age instead of dots (`C43`, `C47`) |
+| 2026-09-19 | `e03cee6` | Migrate the four stale `EVENT_COLORS` copies onto `tokens.ts`; the app had been showing two colour languages for the same events (half of `C53`) |
+| 2026-09-19 | `51bdce9` | Connectivity layer: internet disruption from IODA's four sensors, never averaged, with `unavailable` as a first-class state |
+| 2026-09-19 | `0de11f2` | Stop the TLE fetcher renewing its own CelesTrak ban: on-disk cache, fetch skip while fresh, backoff on 403 (`C20`) |
+| 2026-09-19 | `bb1c80c` | Connectivity: robust-z per sensor, separate short and long baselines, Cuba as the validation case, Cloudflare Radar as an independent corroborator |
+| 2026-09-19 | `075ce6f` | Phase 1a: word-anchored location matching in both the geocoder and the classifier, actors are no longer places, deterministic dedup ordering, keyless installs open on the globe (`C5`, `C7`, `C9`, `C41`) |
+| 2026-09-19 | `89c6f54` | Phase 1b: severity nullable, `(-25, 80)` sentinel deleted, dedup's geometry guard in the same commit, `geo_precision` / `geo_uncertainty_m` derived rather than asserted (`C2`, `C4`, `C8`) |
+| 2026-09-19 | `de146f6` | Local Ollama classifier backend (qwen3:8b) — classification with no key and no spend, no silent fallback, `extraction_model` on every row; admin re-classify tasks stop overwriting rows on a fallback (`C12`). Amend of `c460f5e`, which had committed `.env.bak` |
+| 2026-09-19 | `ab9420c` | Measure the death-toll rate instead of asserting it: `tools/archive_killed_rate.py` over all 83,938 archive events — **95.5%** state no count, replacing an invented "~86%" that had no artifact anywhere behind it |
+| 2026-09-19 | `e5ad5ae` | `killed_reported` end to end — a count copied from the message, never graded. `merge_duplicate` stops discarding it; `reject_boolean` stops `true` validating as severity 1 and silently erasing the event (opens `C74`) |
