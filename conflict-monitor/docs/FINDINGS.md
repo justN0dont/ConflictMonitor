@@ -57,7 +57,8 @@ Three gotchas that will waste your time otherwise:
 | What | Where | Why it matters |
 |---|---|---|
 | Recovered v3 source | `C:/Users/mtt_j/conflict-monitor-v3-recovered/` | 933 KB, **untracked**. Extracted from the local Docker images `conflict-monitor_v3-backend/-frontend` (built 2026-03-15). Includes 52 files reconstructed from the VPS Claude transcripts and the Aug-18 production schema. If those images are pruned this is the only copy. |
-| Production archive | `truthevades:/root/archive/conflict_monitor-20260818.sql.gz` | 193 MB / 83,938 events. The only copy of five months of real ingest. Every statistic in this document comes from it. Not backed up anywhere else. |
+| Production archive | `truthevades:/root/archive/conflict_monitor-20260818.sql.gz` | 193 MB / 83,938 events, 2026-02 to 2026-08-18. Five months of real ingest that cannot be re-collected; every statistic in this document comes from it. **No longer single-copy** — see the row below. |
+| Local copy of the archive | `C:/Users/mtt_j/conflict-monitor-archive/` | Second copy, made 2026-09-20, md5 `3da7684f9dc9fbfd210679e02710b37c`, verified byte-identical to the VPS original. Carries a `README.md` covering what the dump does *not* contain (the Phase 0/1b columns do not exist in it) and how to restore it. **Untracked and outside the repo** — 193 MB does not belong in git, so nothing in version control protects it. |
 | Local v3 database | docker volume `conflict-monitor_v3_pgdata` | Created 2026-03-16, untouched. |
 
 Query the archive without downloading it — see [`../tools/README.md`](../tools/README.md):
