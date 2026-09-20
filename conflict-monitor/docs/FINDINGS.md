@@ -8,13 +8,13 @@ than deleting it.
 |---|---|
 | Branch | `v3-rebuild` |
 | Covers work through | `e5ad5ae` |
-| Last updated | 2026-09-19 |
+| Last updated | 2026-09-20 |
 
 ---
 
 ## Picking this up again
 
-**State at the last stopping point — 2026-09-19.**
+**State at the last stopping point — 2026-09-20.**
 
 ```
 branch  v3-rebuild        HEAD e5ad5ae
@@ -35,12 +35,16 @@ DEMO_MODE=true docker compose up -d
 # frontend  http://localhost:5173      backend  http://localhost:8000
 ```
 
-Two gotchas that will waste your time otherwise:
+Three gotchas that will waste your time otherwise:
 
 - **Vite's file watcher does not fire across the Windows bind mount.** Frontend edits appear to do
   nothing until `docker compose restart frontend`. (Finding `C68`; fix is `server.watch.usePolling`.)
 - **`docker compose restart backend` kills anything you have `exec`'d into that container**, including
   a long-running probe. Run probes from the host.
+- **`docker compose logs` replays a container's whole lifetime**, so failures from before your fix
+  read as if they were happening now. Pass `--since` and `--timestamps` before concluding anything
+  from them: on 2026-09-20 a burst of `organization_on_hold` errors from the previous day's container
+  looked exactly like a broken Ollama route, and `--since 2m` showed zero Anthropic calls.
 
 ### Things that exist outside this repo
 
@@ -59,21 +63,20 @@ ssh truthevades 'python3 /tmp/archive_source_stats.py'
 
 ### Next three actions
 
-1. **Exercise `killed_reported` against a running stack.** It landed in `e5ad5ae` — compiling clean,
-   `tsc` at zero, validators run against the real `ClassifierResult` — but nothing in it has seen a
-   live session or a database. Specifically unverified: that a real duplicate fills an empty count,
-   that a disagreement logs both numbers rather than silently keeping one, and that the startup
-   migration adds the column to the existing `conflict-monitor_v3_pgdata` volume. There is no test
-   suite to catch any of it (`C66`), so this is read-the-logs work, not a green tick.
-2. **Rotate the credentials that were briefly committed.** `.env.bak` went into `c460f5e` and was
+1. **Rotate the credentials that were briefly committed.** `.env.bak` went into `c460f5e` and was
    removed by the amend to `de146f6`, which also added `.env.*` to `.gitignore`. Nothing was pushed,
    but the orphaned commit lives in this machine's reflog until it is expired and the values were
    displayed in a terminal session. Telegram, Mapbox, AISStream, OpenSky, Cloudflare Radar, Postgres.
-3. **Run the Phase 0 fallback-rate week on qwen3.** No longer blocked and no longer costs anything:
+2. **Run the Phase 0 fallback-rate week on qwen3.** No longer blocked and no longer costs anything:
    `llm_backend` defaults to `ollama` (`config.py:14`). It measures qwen3:8b rather than Haiku, so it
    answers "what is this system's fallback rate *now*", not "what produced the 86.3% archive" — a
    reason to name the model in the result, not a reason to keep waiting for a key. The archive can be
    re-classified locally for the same reason: no key, no spend.
+3. **Tighten what `C74` exposed.** `killed_reported` is verified live (see Measured facts), and the
+   verification is what raised the finding: the true merge that proved the policy fired at `sim=0.44`
+   against a `> 0.4` threshold. A casualty figure now rides on four hundredths of a summary-word
+   Jaccard, and unlocated rows carry no spatial predicate at all. Either raise the bar for a merge
+   that transfers a count, or stop transferring counts across unlocated rows.
 
 ### Blocked, and not fixable from the code
 
@@ -295,6 +298,45 @@ Reproduce: `../tools/archive_killed_rate.py`, read-only on the VPS like the othe
 (`scp` it to `/tmp/`, then `ssh truthevades 'python3 /tmp/archive_killed_rate.py'`). It prints the
 extracted-number table and a sampled bucket file so the regex itself can be audited.
 
+### `killed_reported` exercised against a running stack — 2026-09-20
+
+`e5ad5ae` shipped compiling clean with `tsc` at zero and **nothing in it had run**. It has now run:
+`docker compose up` with `DEMO_MODE=false` and qwen3:8b over Ollama, against the pre-existing
+`conflict-monitor_pgdata` volume rather than a fresh one.
+
+**The startup migration added the column to an existing database** — `killed_reported | integer |
+nullable`, beside `extraction_model` and `geo_precision`, with no manual step and no crash.
+
+**Live classification writes it, and the values are checkable in a second** — which is the whole
+argument for this field over severity. 58 rows classified by qwen3:8b, six carrying a count:
+
+| `killed_reported` | what the message said |
+|---|---|
+| 1 | "Israeli forces **kill Palestinian** near Jenin" — singular, no numeral |
+| 3 | "IDF says it **killed 3** Hamas operatives" |
+| 2 | "**Two killed**, 20 wounded" — the wounded exclusion holding live |
+| 1 | "**Father of six** shot dead" — the `6` correctly *not* copied |
+
+The last two are exactly what the prompt rules exist for: a numeral belonging to the wounded, and a
+numeral belonging to the victim's children.
+
+**The merge policy behaves as documented**, driven through the real `check_duplicate` ->
+`merge_duplicate` against the real session, then cleaned up:
+
+```
+seeded #45560          killed_reported=None
+check_duplicate     -> MATCHED (sim=0.44)
+merge(killed=17)    -> 17    INFO:    killed_reported NULL -> 17, stated by channelB
+merge(killed=40)    -> 17    WARNING: row holds 17, channelC reports 40 - keeping 17
+merge(killed=None)  -> 17    a silent report did not erase it
+```
+
+Zero `parse_failed`, zero `ollama_*` failures and zero bool rejections across the run.
+`fix-null-coords` completed 30 of 97, the other 67 keeping NULL rather than inventing a location.
+
+**That `sim=0.44` is the finding, not the pass** - see `C74`. The margin between a correct merge and
+a death toll stamped onto the wrong event is four hundredths of a summary-word Jaccard.
+
 ---
 
 ## Findings ledger
@@ -310,7 +352,7 @@ Ordered by severity, then area.
 
 | ID | Sev | Phase | Area | Finding |
 |---|---|---|---|---|
-| `C74` | high | 4 | Ingest | A dedup false positive now stamps one report's death toll onto another event; unlocated rows match on text + time + type with no spatial predicate at all |
+| `C74` | high | 4 | Ingest | A dedup false positive now stamps one report's death toll onto another event. Measured live: a *correct* merge fired at `sim=0.44` against a `> 0.4` threshold; unlocated rows match on text + time + type with no spatial predicate at all |
 | `C31` | high | 2 | Collection | A failed poll leaves the last fleet and a frozen as_of in place with status still "ok" |
 | `C44` | high | 3 | Frontend | Timeline playback advances speed*1000 ms per 100 ms tick, and the real rate depends on tab visibility |
 | `C45` | high | 3 | Frontend | Events, aircraft and vessels are DOM <Marker> overlays, not Source/Layer — 98 marker nodes measured live |
@@ -746,3 +788,4 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-19 | `de146f6` | Local Ollama classifier backend (qwen3:8b) — classification with no key and no spend, no silent fallback, `extraction_model` on every row; admin re-classify tasks stop overwriting rows on a fallback (`C12`). Amend of `c460f5e`, which had committed `.env.bak` |
 | 2026-09-19 | `ab9420c` | Measure the death-toll rate instead of asserting it: `tools/archive_killed_rate.py` over all 83,938 archive events — **95.5%** state no count, replacing an invented "~86%" that had no artifact anywhere behind it |
 | 2026-09-19 | `e5ad5ae` | `killed_reported` end to end — a count copied from the message, never graded. `merge_duplicate` stops discarding it; `reject_boolean` stops `true` validating as severity 1 and silently erasing the event (opens `C74`) |
+| 2026-09-20 | *this commit* | Record the live verification of `killed_reported` - migration, classification and the merge policy exercised against a running stack; `C74` given its measured margin |
