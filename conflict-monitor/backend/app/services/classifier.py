@@ -129,6 +129,7 @@ Flag emojis indicate countries involved:
 Extract these fields as JSON:
 - event_type: "military" | "diplomatic" | "economic" | "humanitarian" | "cyber"
 - severity: 1-10 integer (see guide below)
+- killed_reported: integer, or null (see KILLED_REPORTED below)
 - location_name: THE MOST PRECISE location (see LOCATION HIERARCHY)
 - summary: one factual, neutral sentence — no adjectives, no opinion, no framing
 
@@ -171,8 +172,21 @@ SEVERITY GUIDE
   7-8: Nuclear facility strikes, capital city attacks, carrier movements, mass casualties
   9-10: Nuclear device use, capital destroyed, war-defining escalation
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KILLED_REPORTED — the ONE number
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Put the number of people the message says were KILLED.
+  - Copy the number from the text. Never estimate one.
+  - "more than 150", "at least 60", "nearly 200" -> 150, 60, 200.
+  - One person killed, named or described -> 1.
+  - Wounded, injured, hospitalised and missing do NOT go here.
+  - If the message does not state how many were killed -> null.
+  - A number or null. NEVER true or false — this is a count, not a yes/no.
+Most messages carry no number. null is the normal answer.
+
 Respond ONLY with valid JSON. No markdown, no explanation.
-Example: {"event_type":"military","severity":7,"location_name":"Natanz","summary":"Israeli airstrikes targeted centrifuge halls at the Natanz enrichment facility."}"""
+Example: {"event_type":"military","severity":7,"killed_reported":null,"location_name":"Natanz","summary":"Israeli airstrikes targeted centrifuge halls at the Natanz enrichment facility."}
+Example: {"event_type":"military","severity":6,"killed_reported":17,"location_name":"Zrariyeh","summary":"An Israeli airstrike on Zrariyeh killed 17 people."}"""
 
 
 class ClassifierResult(BaseModel):
@@ -182,6 +196,30 @@ class ClassifierResult(BaseModel):
     # extraction_status="ok" — an invented measurement indistinguishable from
     # a real one. None means Claude did not give us a severity.
     severity: int | None = Field(default=None, ge=1, le=10)
+    # The one component of the severity bake-off that measured well on its own:
+    # people this message SAYS were killed, copied out of the text rather than
+    # graded. Optional because "the message states no count" is the normal
+    # answer: 95.5% of the 83,938 stored events in the 2026-08-18 archive state
+    # no death toll, measured by tools/archive_killed_rate.py — this comment
+    # used to assert ~86% and no measurement existed anywhere. Quote the 95.5%
+    # with the two caveats the script prints, because neither is small: the
+    # population is STORED EVENTS, not messages seen (noise and low-severity
+    # articles are dropped before insert), and the patterns catch only the
+    # phrasings written into them, so it is an UPPER bound on the null rate,
+    # not a point estimate.
+    #
+    # And it is NOT zero — 0 means the message said nobody was killed (88 rows
+    # in that archive did), None means it said nothing. An absent key is legal
+    # here, unlike severity: a reply that simply omits it has still classified
+    # the event.
+    #
+    # Two rules, from two different places. Out of range — negative, or absurd
+    # — is refused by ge/le below and stays a parse failure rather than being
+    # clamped, which is the rule severity's own ge/le has always followed. The
+    # bool rule is separate: pydantic would validate true/false as 1/0 for both
+    # fields, so reject_boolean below raises on them for killed_reported AND
+    # for severity.
+    killed_reported: int | None = Field(default=None, ge=0, le=1_000_000)
     location_name: str = "Unknown"
     summary: str = ""
     is_noise: bool = False   # set by post-init logic, not from Claude output
@@ -201,6 +239,58 @@ class ClassifierResult(BaseModel):
     # measurement out of a parse failure, which is the exact defect this pass
     # exists to remove. Out of range stays a parse failure, retried, and
     # finally recorded as a fallback with no severity at all.
+
+    @field_validator("severity", "killed_reported", mode="before")
+    @classmethod
+    def reject_boolean(cls, v, info):
+        # Both fields are numbers, and pydantic validates bool as int: true
+        # arrives as 1 and false as 0. A model that read either question as a
+        # yes/no answers true, and that answer then validates clean.
+        #
+        # killed_reported: a model that read "were people killed" instead of
+        # "how many" answers true. The row is then stamped
+        # extraction_status="ok" and the feed prints "1 KILLED": a yes/no guess
+        # wearing a measurement's clothes, which is the one thing this field
+        # exists to prevent. The local qwen3:8b makes that misreading likelier
+        # than Haiku did.
+        #
+        # severity is the worse of the two, and the reason this validator
+        # covers both fields instead of one. true coerces to 1, and 1 is the
+        # [NOISE] score: it trips the `severity <= 1` branch in
+        # _handle_response, which sets is_noise=True with
+        # extraction_status="ok", and the caller drops the event before insert.
+        # A model answering the yes/no reading of the severity question — "is
+        # this severe?" — therefore ERASES the event. That is state 3 ("I
+        # looked and couldn't tell") written into state 1 ("nothing happened"),
+        # and unlike a bad killed_reported it leaves NO ROW BEHIND to audit.
+        # Only the bool is refused: an integer severity of 1 is a real answer
+        # meaning noise, and still takes that branch exactly as before.
+        #
+        # Rejected, not coerced to None. For killed_reported, None is a claim —
+        # the message stated no count — and a model answering true is saying
+        # the opposite: that deaths were reported and it failed to give the
+        # figure. No integer and no null in this schema means "I could not
+        # tell", and the answer to that is not to elect the least wrong one. A
+        # reply that answered a different question is a parse failure, the rule
+        # both fields' out-of-range values already follow.
+        #
+        # The price is paid knowingly: the ValidationError this raises is
+        # caught around ClassifierResult(**raw) and discards the whole row,
+        # good severity and location with it. Anthropic retries twice first;
+        # Ollama does not retry, so one bool costs that event. A row saying "I
+        # could not parse this" is still true, and a row saying "the message
+        # reported no deaths" when nothing said so is not — and nothing later
+        # can tell the second kind apart from a real null. For severity the
+        # trade is not even close: the alternative is not a wrong row but no
+        # row.
+        #
+        # bool only. '17' must still coerce (LLMs emit quoted numbers
+        # constantly) and every other value keeps the behaviour it had.
+        if isinstance(v, bool):
+            raise ValueError(
+                f"{info.field_name} must be a number or null, not true/false"
+            )
+        return v
 
     @field_validator("location_name")
     @classmethod
@@ -333,10 +423,11 @@ def _handle_response(
     classified["is_noise"] = False
     classified["extraction_status"] = "ok"
     logger.info(
-        "Classified [%s]: type=%s sev=%s loc='%s'",
+        "Classified [%s]: type=%s sev=%s killed=%s loc='%s'",
         model,
         classified["event_type"],
         classified["severity"],
+        classified["killed_reported"],
         classified["location_name"],
     )
     return classified

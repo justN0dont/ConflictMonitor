@@ -14,6 +14,9 @@
  * Severity and geo precision may both be absent. An absent severity renders as
  * a dash, never as 5 and never as 0, and a coarse coordinate says how coarse it
  * is, because "country-level" and "facility" are not the same claim.
+ *
+ * killed_reported is shown beside it only when the message stated a number.
+ * An absent count is not zero, so it renders as nothing at all rather than 0.
  */
 import { MapPin, MapPinOff } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -253,17 +256,31 @@ export function LiveFeed({ events }: LiveFeedProps) {
                     {evt.channel_name}
                   </span>
                 </div>
-                <span
-                  className="shrink-0 text-[9.5px] tabular-nums text-[var(--text-muted)]"
-                  style={{ fontFamily: "var(--font-mono)" }}
-                  title={
-                    evt.severity == null
-                      ? "Severity was never measured for this event. Not 5, not 0 - absent."
-                      : "Severity (1-10). Near-constant in the archive - low information."
-                  }
-                >
-                  SEV {evt.severity ?? "\u2014"}
-                </span>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {/* A count the reader can check against the source text in
+                      one second - which severity is not. Shown only when the
+                      message actually stated one; absent is not zero. */}
+                  {evt.killed_reported != null && (
+                    <span
+                      className="shrink-0 text-[9.5px] tabular-nums text-[var(--text-secondary)]"
+                      style={{ fontFamily: "var(--font-mono)" }}
+                      title="People this message stated were killed, copied from its text. Shown only when the message gave a number."
+                    >
+                      {evt.killed_reported} KILLED
+                    </span>
+                  )}
+                  <span
+                    className="shrink-0 text-[9.5px] tabular-nums text-[var(--text-muted)]"
+                    style={{ fontFamily: "var(--font-mono)" }}
+                    title={
+                      evt.severity == null
+                        ? "Severity was never measured for this event. Not 5, not 0 - absent."
+                        : "Severity (1-10). Near-constant in the archive - low information."
+                    }
+                  >
+                    SEV {evt.severity ?? "\u2014"}
+                  </span>
+                </div>
               </div>
 
               {/* Summary */}

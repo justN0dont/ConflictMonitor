@@ -25,6 +25,9 @@ class EventRead(BaseModel):
     # null when severity was never measured — not 0, not 5. Consumers must
     # render the absence rather than substitute a number.
     severity: int | None
+    # null when the message stated no death toll — the normal case, and not 0.
+    # 0 means the message said nobody was killed.
+    killed_reported: int | None = None
     lat: float | None
     lon: float | None
     timestamp: datetime

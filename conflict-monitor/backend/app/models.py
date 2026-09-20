@@ -40,6 +40,12 @@ class Event(Base):
     location_name: Mapped[str] = mapped_column(Text, default="")
     telegram_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_url: Mapped[str] = mapped_column(Text, default="")
+    # People the classified message SAID were killed, copied from its text.
+    # NULL on every row written before this column existed AND on every message
+    # that states no count — "not stated" is the normal case and is not zero.
+    # 0 means the message said nobody was killed. Unlike severity this is a
+    # quantity a reader can check against raw_text in one second.
+    killed_reported: Mapped[int | None] = mapped_column(Integer, nullable=True)
     extraction_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Which model produced this row ("qwen3:8b", "claude-haiku-4-5-20251001").
     # NULL on rows written before this column existed and on fallbacks that

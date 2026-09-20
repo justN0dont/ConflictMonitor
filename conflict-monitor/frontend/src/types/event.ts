@@ -17,6 +17,13 @@ export interface ConflictEvent {
    * "unknown", not "middling". Render it as a dash - never as 5, never as 0.
    */
   severity: number | null;
+  /**
+   * People the source message stated were killed, copied out of its text by
+   * the classifier rather than graded. null means the message gave no count -
+   * the normal case, and NOT zero. 0 means it said nobody was killed. Render
+   * the absence by showing nothing; never print 0 for null.
+   */
+  killed_reported?: number | null;
   lat: number | null;
   lon: number | null;
   timestamp: string;

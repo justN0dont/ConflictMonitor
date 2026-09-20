@@ -87,6 +87,7 @@ async def _fix_null_coords_task():
     for ev in events:
         location_name = (getattr(ev, "location_name", "") or "").strip()
         new_severity = ev.severity
+        new_killed = ev.killed_reported
         new_summary = ev.summary
         reclassified_model = None
 
@@ -111,6 +112,13 @@ async def _fix_null_coords_task():
                     reclassified_severity = classified.get("severity")
                     if reclassified_severity is not None:
                         new_severity = reclassified_severity
+                    # Written unconditionally, including None: a successful
+                    # re-classification saying this text states no death toll
+                    # IS the finding, so it may replace an older number.
+                    # (Severity differs — None there means the reply carried
+                    # no severity at all, which is a parse failure, not a
+                    # measurement of zero.)
+                    new_killed = classified.get("killed_reported")
                     new_summary = classified.get("summary", ev.summary)
                     reclassified_model = classified.get("extraction_model")
                 except Exception as e:
@@ -137,6 +145,7 @@ async def _fix_null_coords_task():
                 db_ev.geometry = from_shape(Point(lon, lat), srid=4326)
                 db_ev.location_name = location_name
                 db_ev.severity = new_severity
+                db_ev.killed_reported = new_killed
                 db_ev.summary = new_summary
                 if reclassified_model:
                     # The row now carries this model's output, so it carries its
@@ -241,6 +250,7 @@ async def _reclassify_vague_locations_task():
                     db_ev.geo_method = geo.method
                     if classified.get("severity"):
                         db_ev.severity = classified["severity"]
+                    db_ev.killed_reported = classified.get("killed_reported")
                     if classified.get("summary"):
                         db_ev.summary = classified["summary"]
                     db_ev.extraction_status = "ok"

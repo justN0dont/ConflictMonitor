@@ -43,6 +43,7 @@ async def lifespan(app: FastAPI):
             ("location_name",       "TEXT",    "''"),
             ("telegram_message_id", "INTEGER", "NULL"),
             ("source_url",          "TEXT",    "''"),
+            ("killed_reported",     "INTEGER", "NULL"),
             ("extraction_status",   "TEXT",    "NULL"),
             ("extraction_model",    "TEXT",    "NULL"),
             ("is_geolocated",       "BOOLEAN", "NULL"),
