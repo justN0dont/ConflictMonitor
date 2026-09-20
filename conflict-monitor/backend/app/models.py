@@ -45,6 +45,8 @@ class Event(Base):
     # that states no count — "not stated" is the normal case and is not zero.
     # 0 means the message said nobody was killed. Unlike severity this is a
     # quantity a reader can check against raw_text in one second.
+    # Only ever written from THIS row's own raw_text; a duplicate report's
+    # count is logged, not merged in (see merge_duplicate).
     killed_reported: Mapped[int | None] = mapped_column(Integer, nullable=True)
     extraction_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Which model produced this row ("qwen3:8b", "claude-haiku-4-5-20251001").

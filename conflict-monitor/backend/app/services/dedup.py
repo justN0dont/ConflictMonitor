@@ -6,7 +6,8 @@ Algorithm:
      Unlocated incoming event -> candidates must also be unlocated
      (never "no spatial constraint" — see the C8 comment in check_duplicate)
   3. Compute Jaccard similarity on summary word sets
-  4. If similarity > 0.4, it's a duplicate — update existing instead of creating new
+  4. If similarity > 0.4, it's a duplicate — update existing instead of creating
+     new (report_count, channels, severity, reliability; never killed_reported)
 """
 
 import logging
@@ -174,92 +175,58 @@ async def merge_duplicate(
     ):
         existing.severity = new_severity
 
-    # killed_reported: fill an empty slot, never overwrite a stated count.
+    # killed_reported is NOT transferred here, at any similarity, on either
+    # branch. It is logged and dropped.
     #
-    # NULL in this column is not "unknown" — it is the claim "no report behind
-    # this row stated a toll". So a merge that drops an incoming count does not
-    # merely lose information, it writes a falsehood: channel A posts a strike
-    # with no toll, channel B posts "17 killed" eleven minutes later, and the
-    # surviving row positively asserts that nobody gave a number. `is not None`
-    # rather than truthiness, because a stated 0 ("nobody was killed") is a
-    # measurement and fills the slot like any other count.
+    # This is not a policy choice about which of two counts is better — the
+    # column's contract forecloses the question. models.py:43: "People the
+    # classified message SAID were killed, copied from its text ... a quantity
+    # a reader can check against raw_text in one second." The text a merged
+    # count was copied from is the OTHER report's, and this row's raw_text is
+    # not it. So a filled count lands on a row whose own text does not contain
+    # it, and the one-second check that is this column's entire justification
+    # over severity comes back NEGATIVE on a row that is not wrong. A reader
+    # running it cannot tell a merged 17 from a hallucinated 17;
+    # reporting_channels names the channels but cannot say which of them gave
+    # the number. Worse, the check is not currently reachable at all from the
+    # UI that prints the number: raw_text appears nowhere in frontend/src
+    # outside the type declaration, so LiveFeed renders "17 KILLED" under a
+    # tooltip reading "copied from its text" with the text nowhere on screen.
     #
-    # It deliberately does NOT take-the-higher the way severity does above.
-    # Severity is a 1-10 grade where "higher" is a defensible worst case; this
-    # is a number copied out of one message, and a maximum over sources is a
-    # figure no source stated — a consensus this merge is in no position to
-    # compute. Tolls climb as reports come in, but they are also revised down,
-    # and two channels simply disagreeing looks identical from here. One
-    # integer cannot say "A said 3, B said 17": whatever it holds reads as THE
-    # count. So the column keeps one statable meaning — the count given by the
-    # first contributing report to give one — and THIS merge never changes a
-    # count already on the row.
+    # All of that is true of a CORRECT merge. C74's false positive — sim=0.44
+    # against a > 0.4 bar, and no distance test of any kind on the unlocated
+    # branch — is the loud case, not the reason. A contract broken on the good
+    # path is not a threshold problem, and raising the bar would make it break
+    # less often rather than hold: the score is Jaccard over `summary`, the
+    # LLM's paraphrase, so it measures how similarly the model worded two
+    # things. That is not evidence about whose text a number was copied from,
+    # at 0.4 or at 0.8.
     #
-    # "Written at most once" is a property of this function, not of the column.
-    # Two admin tasks overwrite killed_reported outright, each writing whatever
-    # the row's own raw_text re-classifies to, None included: events.py:148 in
-    # _fix_null_coords_task, and events.py:253 in
-    # _reclassify_vague_locations_task, whose
-    # `db_ev.killed_reported = classified.get("killed_reported")` is
-    # unconditional. A number a reader already saw can therefore be replaced or
-    # cleared later — just not by a second report arriving here.
+    # The cost, named rather than hidden: channel A posts a strike stating no
+    # toll, channel B posts "17 killed" eleven minutes later, and the surviving
+    # row stays NULL. Under this column NULL is a claim about THIS row's text,
+    # so the row is not lying — but the monitor now holds a number it does not
+    # show, and a log line is not a row: it is not queryable, it rotates, and
+    # nothing in the product surfaces it. That is a real loss and it is
+    # deliberate. The count's durable home is the per-report table of C10 /
+    # Phase 4, beside the text it was copied from, where the same contract
+    # holds per report. One integer on one row cannot say "A stated nothing,
+    # B stated 17"; it cannot say "A said 3, B said 17" either, which is why
+    # the old disagreement branch is gone too — the line below carries both
+    # numbers.
     #
-    # The costs, logged rather than hidden:
-    #
-    #   - A later, larger or corrected toll never reaches the row, and in the
-    #     worst case the row keeps 0 while a second channel reported 17. Only
-    #     the log says so; nothing in the row does.
-    #
-    #   - A dedup FALSE POSITIVE now manufactures a measurement — the one
-    #     failure mode a copied-out-of-the-text number was supposed to be
-    #     immune to. Read off check_duplicate above: a match needs the same
-    #     event_type, a timestamp inside ±15 minutes, and Jaccard over summary
-    #     word sets > 0.4; a located incoming event additionally needs a 50km
-    #     ST_DWithin against a located row, while an unlocated one gets no
-    #     distance test at all (geometry IS NULL partitions the pool, it does
-    #     not place it) and matches on text + time + type alone across
-    #     _UNLOCATED_CANDIDATES = 200 rows. Two distinct strikes on the same
-    #     city a quarter-hour apart share the type, share the window and share
-    #     most of their words: that bar is cleared routinely in this domain.
-    #     Before this column existed a bad match cost report_count, severity
-    #     and source_reliability — all of them judgments about the event. Now
-    #     it also stamps one report's death toll onto a row whose own raw_text
-    #     never contained a number, and the row then states that toll as its
-    #     own. reporting_channels lists the channel it came from but cannot say
-    #     the number came from that channel rather than this row's own text.
-    #
-    #   - On a LOCATED row whose own extraction failed, the fill is permanent.
-    #     The call sites exempt killed_reported from the extraction_status
-    #     guard they apply to severity (see telegram.py / news_feeds.py), so
-    #     such a row can render "17 KILLED" beside "CLASSIFY FAILED: api_400"
-    #     in one card with nothing to reconcile them. On an unlocated row that
-    #     at least heals: _fix_null_coords_task re-classifies rows with NULL
-    #     geometry and a blank/unknown location_name and writes that row's own
-    #     text's answer, None included, back over this field. A located row is
-    #     outside it — events.py:80 selects `Event.geometry.is_(None)` only —
-    #     and the vague-location task reaches a located row solely when its
-    #     location_name is still a country or other _VAGUE_LOCATIONS term,
-    #     which a row precise enough to have geocoded usually is not. For those
-    #     rows the merged number stays, next to a status saying the row's own
-    #     extraction produced nothing.
-    #
-    # Both figures can only coexist under Phase 4's link-don't-merge, which
-    # keeps each report's text. This policy computes no number no source stated
-    # — no maximum, no sum — but, per the false-positive cost above, it can
-    # still attach a stated number to the wrong event.
-    if new_killed is not None and existing.killed_reported is None:
-        existing.killed_reported = new_killed
+    # After this, killed_reported has exactly one kind of writer: the
+    # classifier, on the row's own raw_text — at insert (telegram.py:332,
+    # news_feeds.py:405) and on re-classification (events.py:148 and :253,
+    # both writing whatever this row's own text produces, None included).
+    # `existing.killed_reported` appears nowhere on the left of an assignment
+    # in this file, and that invariant is checkable with one grep.
+    if new_killed is not None:
         logger.info(
-            "Event #%d: killed_reported NULL -> %d, stated by %s",
-            existing.id, new_killed, new_channel,
-        )
-    elif new_killed is not None and new_killed != existing.killed_reported:
-        # A disagreement between two sources is itself a finding. It cannot be
-        # stored in this column, so it goes where it can still be read.
-        logger.warning(
-            "Death toll disagreement on event #%d: row holds %d, %s reports %d — keeping %d",
-            existing.id, existing.killed_reported, new_channel, new_killed,
-            existing.killed_reported,
+            "Event #%d: %s reports %d killed — DROPPED, not stored anywhere. "
+            "Row keeps killed_reported=%s, which is a claim about this row's own "
+            "raw_text. The count's durable home is C10's per-report table.",
+            existing.id, new_channel, new_killed, existing.killed_reported,
         )
 
     # There is deliberately NO coordinate backfill here any more.

@@ -311,14 +311,9 @@ async def _process_message(
                     result.get("extraction_status"),
                 )
                 severity = None
-            # That guard is deliberately not extended to killed_reported.
-            # Severity is a grade, and a grade on a row whose own extraction
-            # failed is a judgment nothing produced. A killed count is copied
-            # out of the incoming message, and only a reply that validated as a
-            # classification carries one at all (a fallback has no such key), so
-            # it is always attributable to a report this merge is recording in
-            # reporting_channels. Dropping it would make the row assert that no
-            # contributing source stated a toll. Merge policy lives in dedup.py.
+            # killed_reported is passed but never written to the row — see
+            # merge_duplicate. The count is logged against the event, with the
+            # text that stated it, and stays with the report whose text that is.
             await merge_duplicate(
                 session, existing, channel_name, severity,
                 result.get("killed_reported"),

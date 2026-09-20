@@ -81,11 +81,21 @@ ssh truthevades 'python3 /tmp/archive_source_stats.py'
    is now `qwen3.8-27b:latest`, at 1.98 s per message against qwen3:8b's 0.61 s, behind a
    `Semaphore(1)`.
 
-Still the first row of the open ledger, and untouched by this pass: **`C74`**. The merge that proved
-`killed_reported` works fired at `sim=0.44` against a `> 0.4` threshold, so a casualty figure rides on
-four hundredths of a summary-word Jaccard, and unlocated rows carry no spatial predicate at all.
-Either raise the bar for a merge that transfers a count, or stop transferring counts across unlocated
-rows.
+Still the first row of the open ledger, and half-answered by this pass: **`C74`**. The merge that
+proved `killed_reported` works fired at `sim=0.44` against a `> 0.4` threshold, so a casualty figure
+rode on four hundredths of a summary-word Jaccard, and unlocated rows carry no spatial predicate at
+all. The remedy this document offered — "either raise the bar for a merge that transfers a count, or
+stop transferring counts across unlocated rows" — gets neither half in *this commit*, because both
+are answers to the wrong question. `merge_duplicate` no longer writes `killed_reported` on any
+branch at any similarity: a merged count cannot satisfy that column's contract even when the match
+is *right*, and the `sim=0.44` merge that prompted the finding **was** right. A contract broken on
+the good path is not a threshold problem.
+
+**The match is exactly as loose afterwards.** `report_count`, `severity`, `source_reliability` and
+`reporting_channels` still ride on the same Jaccard over two LLM paraphrases, so C74 stays open and
+narrows to them; the count is simply out of the blast radius. The named next step for the matcher —
+the one place-claim the unlocated branch already carries and does not use — is in the `C74` detail
+block below.
 
 ### Blocked, and not fixable from the code
 
@@ -354,6 +364,43 @@ Zero `parse_failed`, zero `ollama_*` failures and zero bool rejections across th
 **That `sim=0.44` is the finding, not the pass** - see `C74`. The margin between a correct merge and
 a death toll stamped onto the wrong event is four hundredths of a summary-word Jaccard.
 
+**That merge behaviour is gone as of *this commit*.** The transcript above is kept because it is a
+true record of what `e5ad5ae` did, not because the tree still does it. `merge_duplicate` no longer
+writes `killed_reported` on any branch, so the same drive — real `check_duplicate` ->
+`merge_duplicate`, real session, no classifier and no GPU — now prints this instead, against a
+Postgres started on its own with `docker compose up -d db`:
+
+```
+A) row #45585   raw_text contains no number        killed_reported=None
+B) check_duplicate                             ->  MATCHED #45585 (sim=0.44)
+C) merge(killed=17)                            ->  killed_reported=None
+                                                   report_count=2  channels='channelA, channelB'
+
+   INFO: Duplicate detected: existing #45585 (sim=0.44)
+   INFO: Event #45585: channelB reports 17 killed - DROPPED, not stored anywhere.
+         Row keeps killed_reported=None, which is a claim about this row's own
+         raw_text. The count's durable home is C10's per-report table.
+   INFO: Merged into event #45585 (now 2 reports | sources: channelA, channelB)
+cleanup: 1 row(s)
+```
+
+Driven against `HEAD` and the working tree in one process over the same seeded pool, so the
+before/after is measured rather than asserted: `HEAD merge(killed=17) -> killed_reported=17`,
+`tree merge(killed=17) -> killed_reported=None`. The seeded rows were deleted and the row count
+re-read. The old disagreement `WARNING` is gone with the fill: one integer could hold neither
+number honestly, and the surviving line prints both.
+
+`report_count`, `severity`, `source_reliability` and `reporting_channels` are untouched by this
+change and still transfer exactly as before. The old disagreement `WARNING` is gone with the fill:
+one integer could hold neither number honestly, so the surviving line prints the incoming count and
+says plainly that it is dropped.
+
+**Scope deliberately not taken.** The panel's second-place design and one judge both wanted
+`check_duplicate` to return the best-scoring candidate rather than the first over the bar. It was
+implemented, reviewed, and then reverted: it does not trace to `C74`, it silently changes *which*
+row accumulates merge statistics, and its own justification in the code was Phase 4 work that does
+not exist yet. It is `C77` instead.
+
 ### The fallback rate — two models on identical text, 2026-09-20
 
 Phase 0's last classification line read "run for one week and record the real fallback rate". A week
@@ -521,7 +568,7 @@ scripts — `scp` it to `/tmp/`, then `ssh truthevades 'python3 /tmp/archive_sen
 
 ## Findings ledger
 
-56 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **28 open**, 25 fixed, 3 invalid or external. Of the open ones, **none is critical** and 14 are high. (The tally read "54 / 26 open / 13 high" until 2026-09-20; it had not been incremented when `e5ad5ae` opened `C74`. Counted from the rows, not carried forward.)
+57 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **29 open**, 25 fixed, 3 invalid or external. Of the open ones, **none is critical** and 14 are high. (The tally read "54 / 26 open / 13 high" until 2026-09-20; it had not been incremented when `e5ad5ae` opened `C74`. *This commit* opens `C76` and closes nothing: `C74` narrows rather than moving to Fixed, because the dedup weakness it names is untouched. Counted from the rows, not carried forward.)
 
 Claims that no longer hold are kept with status `INVALID` rather than deleted.
 
@@ -532,7 +579,7 @@ Ordered by severity, then area.
 
 | ID | Sev | Phase | Area | Finding |
 |---|---|---|---|---|
-| `C74` | high | 4 | Ingest | A dedup false positive now stamps one report's death toll onto another event. Measured live: a *correct* merge fired at `sim=0.44` against a `> 0.4` threshold; unlocated rows match on text + time + type with no spatial predicate at all |
+| `C74` | high | 4 | Ingest | A dedup false positive attaches one report's `report_count`, `severity`, `source_reliability` and channel to another event. Measured live: a *correct* merge fired at `sim=0.44` against a `> 0.4` threshold; unlocated rows match on text + time + type with no spatial predicate at all. The **death toll** left that blast radius in *this commit* — `merge_duplicate` stopped writing `killed_reported` — and the match is exactly as loose as it was. See also `C76`, `C77` |
 | `C31` | high | 2 | Collection | A failed poll leaves the last fleet and a frozen as_of in place with status still "ok" |
 | `C44` | high | 3 | Frontend | Timeline playback advances speed*1000 ms per 100 ms tick, and the real rate depends on tab visibility |
 | `C45` | high | 3 | Frontend | Events, aircraft and vessels are DOM <Marker> overlays, not Source/Layer — 98 marker nodes measured live |
@@ -554,6 +601,8 @@ Ordered by severity, then area.
 | `C52` | medium | — | Frontend | Cesium credits are routed to a detached div, suppressing Ion/Bing/Google attribution required by their terms |
 | `C53` | medium | 3 | Frontend | Three renderers (Mapbox, Globe, Cesium) still duplicate mark logic. The palette half is fixed: the four stale EVENT_COLORS copies were migrated onto tokens.ts in `e03cee6` |
 | `C75` | medium | 1 | Ingest | "Could not classify" and "could not place" are the same rows, not two overlapping populations: **100%** of the archive's 38,314 `Unknown` rows sit on the sentinel, and the sentinel holds those plus 1,635 others. The two headline failure rates (45.6%, 47.6%) are one population reported twice. `89c6f54` made the stages separable on new rows — name kept, `geometry` NULL, `geo_method` persisted — but nothing reports them apart |
+| `C76` | medium | 4 | Ingest | The dedup score is Jaccard over `summary`, the LLM's *paraphrase*, so `> 0.4` measures how similarly the model worded two things rather than how similar two reports are — and `classifier.py` `_build_fallback` sets `summary = raw_text[:200]`, so a fallback row is not compared like with like at all. Containment over the reports' own `raw_text` is the instrument; picking a bar for it needs Phase 4's gold pairs |
+| `C77` | medium | 4 | Ingest | `check_duplicate` returns the **first** candidate over `0.4` in timestamp-desc order, not the best-scoring one, so a merge attaches to the most recent match rather than the most similar — and the logged `sim` is that row's score, not the pool maximum. Fixing it changes which event accumulates `report_count` / `severity` / `source_reliability`, so merge statistics either side of the change are not comparable; it is a deliberate separate decision, not a tidy-up |
 | `C61` | medium | — | Platform | Postgres published on 0.0.0.0:5432; backend DATABASE_URL hardcoded so POSTGRES_PASSWORD cannot change it |
 | `C68` | medium | — | Platform | Vite HMR is blind across the Windows bind mount; the backend only reloads because watchfiles polls |
 | `C70` | medium | 0 | Platform | Demo path bypasses classifier, geocoder, dedup and track_history, so the zero-config run exercises none of the… |
@@ -618,6 +667,82 @@ Did not survive checking.
 | `C73` | low | — | Platform | frontend/dist is not committed and never has been — it is an untracked local build artifact |
 
 ### Detail: open critical and high findings
+
+
+#### `C74` — A dedup false positive transfers corroboration it has not established
+
+`high` · phase 4 · Ingest
+
+**Where:** dedup.py `check_duplicate`. A match needs the same `event_type`, a timestamp inside ±15
+minutes, and Jaccard over `_normalize(summary)` word sets `> 0.4`. A located incoming event
+additionally needs a 50 km `ST_DWithin` against a located row; an unlocated one gets **no distance
+test of any kind** — `geometry IS NULL` partitions the pool, it does not place it — and matches on
+text + time + type alone across `_UNLOCATED_CANDIDATES = 200` rows. The only live merge ever
+observed scored **0.44** against that `> 0.4` bar, and it was a *correct* match.
+
+**Impact:** `report_count` increments, `reporting_channels` gains a name, `severity` takes the max
+and `source_reliability` climbs — on that evidence. Those are corroboration claims: the row says two
+sources confirmed this event. A false positive fabricates all four, and `C11` then walks reliability
+upward for it.
+
+**What *this commit* did, and did not do.** `merge_duplicate` no longer writes `killed_reported`.
+That is a contract fix, not a matcher fix, and the distinction is the whole of this entry:
+
+- models.py defines the column over *this row's own* text — "copied from its text … a quantity a
+  reader can check against `raw_text` in one second" — and a merged count is copied from a different
+  report's text, which this function does not store and cannot store (`C10`). So the one-second
+  check comes back **negative on a row that is not wrong**, and a reader cannot tell a merged 17
+  from a hallucinated 17. That is true of the *correct* merge above, which is why no threshold fixes
+  it.
+- The check is not currently reachable from the UI that prints the number either: `raw_text` appears
+  nowhere in `frontend/src` outside `types/event.ts:5`, so `LiveFeed` renders `17 KILLED` under a
+  tooltip reading "copied from its text" with that text nowhere on screen. That sharpens `C10`; it
+  does not soften this fix.
+- **Anyone reading `C74` as "dedup is too loose" will find it exactly as loose afterwards.** This
+  makes a false positive cheaper, not rarer.
+
+**No backfill was needed, and that is luck rather than design.** main.py adds the column with
+`ADD COLUMN … NULL`, so all 83,938 archive rows are NULL — the column postdates the archive
+entirely, and the only rows a merge ever filled are from the 2026-09-20 verification run against the
+scratch DB. Nothing distinguishes a merged fill from a classified one, so had the exposure been real
+it would only have been findable by re-classifying every row's `raw_text` and comparing, at GPU
+cost.
+
+**Fix — the named next step, which is the unlocated branch's unused place-claim.** An unlocated row
+is not placeless: it carries `location_name`, and the matcher ignores it. Requiring the two to agree
+is not a new signal, it is a signal already on the row. The catch, and the reason this is a separate
+commit rather than a line here: `classifier.py` `clean_location` folds `""`, `n/a`, `various` and
+`multiple` into the literal string `"Unknown"`, and `_build_fallback` writes it when the regex
+fallback finds nothing either — so `"Unknown"` is the classifier saying *I looked and could not
+tell*, and the matcher currently reads two of those as **agreement about location**. On the
+archive's own numbers that is 95.9% of the pool this branch will see (38,314 of the 39,949 rows the
+sentinel migration unpins). Refusing to match when the incoming report claims no place is therefore
+right on the governing idea and is a large, unmeasured product regression at the same time:
+duplicate pins, `report_count` undercounted, and the archive's 8.7% merge rate no longer comparable
+across the change. It needs its own measurement and its own commit.
+
+Two options *not* taken, recorded so they are not re-litigated:
+
+- **Raise the threshold.** The only labelled pair this project owns is a true positive at 0.44, so
+  it argues against raising the bar, not for it — moving it on one data point that the move would
+  have destroyed is inventing a number. And the score runs on the LLM's paraphrase (`C76`), so a
+  stricter bar measures wording agreement more strictly, not event identity better.
+- **`and existing.geometry is not None` on the count transfer.** Proposed as the cheap one-clause
+  gate; with the transfer deleted it has nothing left to gate. The transfers that remain are
+  corroboration judgments, and gating *those* on geometry would turn unlocated dedup off wholesale
+  rather than selectively — which is what the `location_name` predicate above does, for a measured
+  95.9% of the pool.
+
+**The instrument that would price this, free.** Nothing measures what the deletion costs: 4.5% of
+archive messages state a toll and 8.7% of events are merges, so the joint case is on the order of
+0.4% of events losing a stated number — a product, not a measurement, and probably an underestimate
+because a deadly event attracts more channels. A read-only replay of `check_duplicate`'s predicate
+over `/root/archive/conflict_monitor-20260818.sql.gz` — same `event_type`, ±15 min, the
+located/unlocated split, the 20/200 caps, timestamp-desc — would print, for every pair it would
+merge, the summary Jaccard, the raw-text containment and whether `archive_killed_rate.py`'s regex
+finds a toll in exactly one of the two texts, i.e. whether the pair is a *transfer*. Same pattern as
+`tools/archive_killed_rate.py`: both inputs are already columns in the dump, so it needs no GPU, no
+key and no running stack.
 
 
 #### `C31` — A failed poll leaves the last fleet and a frozen as_of in place with status still "ok"
@@ -942,7 +1067,10 @@ signal. See Measured facts.
 
 ### Phase 4 — Corroboration
 
-- [ ] Link, don't merge — `corroboration_link` + `cluster_id`, preserving both reports' text
+- [ ] Link, don't merge — `corroboration_link` + `cluster_id`, preserving both reports' text.
+      `killed_reported` now waits on this item specifically: since *this commit* an incoming count is
+      logged and dropped, and this table is the only place it can live beside the text that stated
+      it (`C74`, `C10`)
 - [ ] Channel family graph from `fwd_from`; collapse corroboration counts over `family_id`
 - [ ] Stop raising confidence for being copied
 - [ ] Gold labels: ~350 events + ~300 candidate pairs, stratified; start now, they outlive every pipeline rewrite
@@ -1016,3 +1144,4 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-20 | `949aca8` | Switch the classifier to **qwen3.8-27b:latest** and send `"think": False` — a thinking model puts its reasoning in a separate field and returns an empty `response`, so every row came back `parse_failed`. qwen3:8b answered anyway, which is why the defect was invisible while only the small model ran |
 | 2026-09-20 | *this commit* | Close out Phase 0: the fallback rate measured and bounded on 568 archive messages for **both** models, the sentinel migration audited before it runs, the "one week" line split into the half that is measured and the half only wall clock can reach, and two long-standing register numbers corrected to the estimator that produced them (`C75`) |
 | 2026-09-20 | *this commit* | Run the sentinel migration against a restored copy of the archive: 39,949 rows retired, exactly as predicted; geolocation 100% -> 52.4%; idempotency demonstrated. Phase 0's last un-run item closed |
+| 2026-09-20 | *this commit* | `merge_duplicate` stops writing `killed_reported`: the column becomes a pure function of this row's own `raw_text`, and an incoming count is logged as dropped rather than stored. Narrows `C74`, opens `C76` and `C77`; the match is exactly as loose as it was |
