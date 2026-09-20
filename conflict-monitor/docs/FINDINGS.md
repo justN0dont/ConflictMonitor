@@ -7,7 +7,7 @@ than deleting it.
 | | |
 |---|---|
 | Branch | `v3-rebuild` |
-| Covers work through | `e5ad5ae` |
+| Covers work through | `949aca8` |
 | Last updated | 2026-09-20 |
 
 ---
@@ -17,15 +17,21 @@ than deleting it.
 **State at the last stopping point — 2026-09-20.**
 
 ```
-branch  v3-rebuild        HEAD e5ad5ae
+branch  v3-rebuild        HEAD 949aca8
         pre-v3-rebuild-backup  716ffec   snapshot of the tree before the rebuild
         main                   0f4ad05   the OLD lineage; superseded, kept for reference
 ```
 
 `de146f6` is an amend of `c460f5e`, which had committed `.env.bak`. Nothing was pushed — `origin`
 carries only `main` at `0f4ad05` — but see the Corrections log: the credentials still need rotating.
-`ab9420c` then measured the archive's death-toll rate and `e5ad5ae` landed `killed_reported`; both are
-described below, and neither has been exercised against a running stack.
+`ab9420c` then measured the archive's death-toll rate, `e5ad5ae` landed `killed_reported`, and
+`fe5d2d4` recorded both of them running against a live stack; all three are described below.
+
+**The classifier model changed in `949aca8` and the change is load-bearing.** It is
+`qwen3.8-27b:latest` (IQ3_M, 14.0 GB, 100% GPU-resident), not `qwen3:8b`, and the Ollama payload must
+carry `"think": False` — every qwen3 model on this host reports the `thinking` capability, and with it
+on the reasoning goes to a separate field while `response` comes back **empty**, so every row is
+`parse_failed`. See the Corrections log.
 
 Restart the stack (demo mode, no keys needed):
 
@@ -67,23 +73,34 @@ ssh truthevades 'python3 /tmp/archive_source_stats.py'
    removed by the amend to `de146f6`, which also added `.env.*` to `.gitignore`. Nothing was pushed,
    but the orphaned commit lives in this machine's reflog until it is expired and the values were
    displayed in a terminal session. Telegram, Mapbox, AISStream, OpenSky, Cloudflare Radar, Postgres.
-2. **Run the Phase 0 fallback-rate week on qwen3.** No longer blocked and no longer costs anything:
-   `llm_backend` defaults to `ollama` (`config.py:14`). It measures qwen3:8b rather than Haiku, so it
-   answers "what is this system's fallback rate *now*", not "what produced the 86.3% archive" — a
-   reason to name the model in the result, not a reason to keep waiting for a key. The archive can be
-   re-classified locally for the same reason: no key, no spend.
-3. **Tighten what `C74` exposed.** `killed_reported` is verified live (see Measured facts), and the
-   verification is what raised the finding: the true merge that proved the policy fired at `sim=0.44`
-   against a `> 0.4` threshold. A casualty figure now rides on four hundredths of a summary-word
-   Jaccard, and unlocated rows carry no spatial predicate at all. Either raise the bar for a merge
-   that transfers a count, or stop transferring counts across unlocated rows.
+2. **Run the sentinel `UPDATE` and record the rowcount it logs.** It is the last un-run Phase 0 item
+   and the audit is finished: the predicate selects **39,949** rows, with zero near-misses, zero
+   half-matches and zero geometry disagreements, so a real run should log exactly that — and a
+   different number would itself be the finding. Recommended route: gunzip the dump into a *new*
+   database inside the already-running `conflict-monitor-db-1`, point a backend at it, let the startup
+   migration run, capture the line, delete the copy. Never the dump, never the VPS original.
+3. **Start the week that only wall clock can buy.** The model-failure half of the fallback rate is
+   measured and bounded (below); the time-varying half — timeouts under load, unreachable bursts, GPU
+   contention — is not, and an archive run structurally cannot see it. `GET /events/stats/extraction`
+   has existed since `9fd3fbf`, so this costs nothing but patience. Name the model in the result: it
+   is now `qwen3.8-27b:latest`, at 1.98 s per message against qwen3:8b's 0.61 s, behind a
+   `Semaphore(1)`.
+
+Still the first row of the open ledger, and untouched by this pass: **`C74`**. The merge that proved
+`killed_reported` works fired at `sim=0.44` against a `> 0.4` threshold, so a casualty figure rides on
+four hundredths of a summary-word Jaccard, and unlocated rows carry no spatial predicate at all.
+Either raise the bar for a merge that transfers a count, or stop transferring counts across unlocated
+rows.
 
 ### Blocked, and not fixable from the code
 
 - **Anthropic key returns `400 organization_on_hold`.** Those rows tag `api_400` — `classifier.py`
   writes `f"api_{e.status_code}"` — not `llm_failed`. This no longer blocks classification: `de146f6`
   made a local Ollama backend the default, with no silent fallback between the two. What it still
-  blocks is measuring **Haiku**, the model that produced the archive. Appeal at
+  blocks is measuring **Haiku**, the model that produced the archive — including the one comparison
+  this document has a ready instrument for: the 568-row sample of `archive_fallback_rate.py`, drawn
+  and already classified by two local models, is exactly what `de146f6`'s unquantified "qwen3 returns
+  Unknown more often than Haiku" claim would have to be settled over. Appeal at
   `console.anthropic.com/appeal` or swap the key.
 - **AISStream has no Persian Gulf coverage.** No code change fixes this; it needs a different source.
 - **CelesTrak IP-blocked this host** for excessive downloads on 2026-09-18. It clears on its own. The
@@ -128,9 +145,9 @@ Source: `conflict_monitor-20260818.sql.gz` (193 MB gz / 919 MB raw), from the VP
 | Sources | `telegram` 58.8%, `rss_*` 41.2% across 11+ feeds. **Zero `demo` rows** — the archive is clean |
 | Severity exactly 5 | **86.3%**; zero events ever scored 1 or 2 |
 | Severity 5 rate by source | `iranintl` 60.8%, `osint613` 64.1%, `aljazeera` 91.2%, `jpost` 94.8% — the spread proves the classifier was working, so the collapse is the rubric, not an outage |
-| `location_name = "Unknown"` | 45.6%; **96.5% of those are also severity 5** — the fallback signature |
-| Pinned to the sentinel `(-25, 80)` | 47.6% (39,981) — open ocean SW of Australia |
-| Events with a real name that still failed geocoding | 1,667 (**1.99%** — the true geocode failure rate) |
+| `location_name = "Unknown"` | 38,314 = 45.6%; **96.5% of those are also severity 5** — the fallback signature — and **100% of them sit on the sentinel** (`C75`) |
+| Pinned to the sentinel `(-25, 80)` | **39,949** = 47.6% — open ocean SW of Australia. A direct count of the migration's own predicate, `lat = -25.0 AND lon = 80.0`. This row said 39,981 until 2026-09-20; that figure came from a *different estimator*, not from this count taken badly — see below and the Corrections log |
+| Events with a real name that still failed geocoding | **1,635** = **1.95%** of all events, or **3.58%** per row that had a name to geocode (1,635/45,624) — say which denominator before quoting it. 817 of the 1,635 (50.0%) carry a name that resolves to a real point *elsewhere in this same archive*, so half of it is transient failure, not unplaceable names |
 | Dedup merges | 8.7% of events have `report_count > 1`, up to 6 |
 | `anomaly_score > 0` | 87.4% — a detector that fires on 87% of its input detects nothing |
 | Impossible timestamps | 6 events dated 2011, 2021, 2023 |
@@ -253,13 +270,18 @@ country-hours and the forced-failure test are recorded in `51bdce9` and `bb1c80c
 | After | qwen3:8b against the byte-identical `SYSTEM_PROMPT`: 0.5–0.9 s per article at zero marginal cost, and the first `extraction_status = "ok"` rows in this archive's history |
 | Reachability | Only `host.docker.internal:11434` reaches the host's Ollama from the container — neither `172.17.0.1` nor `localhost` does |
 | No silent fallback | An unreachable model tags `ollama_unreachable`; it does not quietly retry Anthropic. A backend that switches itself produces an archive nobody can interpret afterwards, and `extraction_model` is persisted so Haiku-era, `api_400` and qwen3 rows stay distinguishable |
-| Known, and now measurable | qwen3 returns `location_name = "Unknown"` noticeably more often than Haiku did. A prompt/model-fit question, separable now that the model is on the row |
+| Known, and **still not** measurable this way | `de146f6`'s commit message states that qwen3 returns `location_name = "Unknown"` noticeably more often than Haiku did. It was never quantified, and the 2026-09-20 measurement below does not settle it in either direction: the 2026-08-18 dump carries no `extraction_status` column, so the archive's 45.6% cannot be split into Haiku-classified rows and fallback rows whose location came from `_build_fallback`'s regex. Settling it needs the key over the same sample. See the Corrections log |
 
 The "~20 s cold start" is **not** a re-measurement: after an explicit model unload it reloaded from
 page cache in 0.53 s, so 20 s stands as a worst case for a genuinely cold file cache, not an
 observation.
 
 Source: the acceptance test in `de146f6`, re-runnable against live RSS with `LLM_BACKEND=ollama`.
+
+Everything in this table was measured on **qwen3:8b** on 2026-09-19 and is left naming it. The
+running model has since changed to `qwen3.8-27b:latest` (`949aca8`) — which is why the rows carry
+`extraction_model`, and why the two 2026-09-20 sections at the end of Measured facts name the model
+they describe instead of assuming one.
 
 ### Stated death tolls in the archive — measured 2026-09-19
 
@@ -337,11 +359,174 @@ Zero `parse_failed`, zero `ollama_*` failures and zero bool rejections across th
 **That `sim=0.44` is the finding, not the pass** - see `C74`. The margin between a correct merge and
 a death toll stamped onto the wrong event is four hundredths of a summary-word Jaccard.
 
+### The fallback rate — two models on identical text, 2026-09-20
+
+Phase 0's last classification line read "run for one week and record the real fallback rate". A week
+of wall clock is the wrong instrument for the *model* half of that number: the live stack produces
+~150 events a day, so a week is ~1,000 messages of whatever happened to be in the news, arriving
+seven days late. The archive holds 83,938 real messages across five months and 46 sources, and since
+`de146f6` classifying them costs nothing. A 568-row stratified sample (seed 20260818, 12 strata, a
+floor of 20 rows per stratum) was pushed through the project's own `classify_message()` — the real
+function, not a copy of the prompt, so every failure-tagging branch that runs in production is the
+branch measured — first on qwen3:8b, then, after `949aca8`, on `qwen3.8-27b:latest`. **Same rows,
+byte-identical text, verified row for row.**
+
+| Same 568 rows | qwen3:8b | qwen3.8-27b:latest |
+|---|---|---|
+| `extraction_status` | `ok` × 568 | `ok` × 568 |
+| **fallback rate** | **0/568 = 0.00%**, 95% CI 0.00–0.67% (Wilson) | **0/568 = 0.00%**, 95% CI 0.00–0.67% |
+| `[NOISE]` / would be stored | 64 / 491 | 59 / 497 |
+| `location_name = "Unknown"`, like-for-like | 86/491 = **17.5%**, CI 14.4–21.1% | 44/497 = **8.9%**, CI 6.7–11.7% |
+| …over all `ok` rows, for comparison | 91/504 = 18.1% | 48/509 = 9.4% |
+| severity 5, like-for-like | 17.5% | 13.5% |
+| seconds per message | mean 0.61, median 0.61, p95 0.79, max 1.08 | mean **1.98**, median 1.99, p95 2.65, max 3.49 |
+
+**Neither model's fallback rate is measured; both are bounded.** 0/568 yields the same 0.00–0.67%
+interval for both, so this run cannot distinguish them on the quantity it was built to measure. The
+27b's real parse-failure risk was demonstrated elsewhere and is not in this table — with thinking
+left on it returned 3/3 empty responses (`949aca8`), which is why the negative control now carries a
+`parse_failed` branch.
+
+**The one substantive difference is the `Unknown` rate**, 8.9% against 17.5% on identical text with
+non-overlapping intervals. It is evidence about two local models and **not** about Haiku: the dump
+has no `extraction_status` column, so the archive's 45.6% mixes Haiku-classified rows with rows where
+no classification happened and the regex fallback supplied the location. No winner is declared here.
+
+Read against the archive's own numbers with care:
+
+- **The archive's 86.3% severity-5 is not comparable to either column.** The dump carries no
+  `extraction_status`, and before `89c6f54` a fallback row was *given* severity 5 (`C1`, `C2`), so an
+  unknown share of that 86.3% is the old default rather than a judgement.
+- **No model could have put a 1 or a 2 in that archive.** `MIN_SEVERITY = 3` (`telegram.py:29`,
+  `news_feeds.py:66`) drops anything below it before insert (`telegram.py:176`, `news_feeds.py:347`),
+  and a pass over the dump confirms **zero** stored events at severity 1 or 2. The sample's 1s and 2s
+  are rows measured *before* that filter runs; what they show is how much of a model's output the
+  pipeline discards, not a change in behaviour.
+- **Archive comparisons here are like-for-like**, over the sampled rows that would themselves have
+  been stored — the caller gate reproduced exactly as written (`severity is not None and severity <
+  MIN_SEVERITY`, so an unmeasured severity passes, as in production). The wider denominator is
+  printed beside it, labelled, and is not the one to difference against the archive.
+
+Five things the numbers do not carry on their face:
+
+- **Coverage.** 46 archive sources; 28 have at least one row in the sample and **18 have none**. Of
+  12 strata, 7 sit exactly at the floor of 20 rows, and the pooled `other (<1%)` stratum is 35 feeds
+  in 43 rows — 17 with at least one row, 7 with exactly one, 18 with none. **A stratum interval is
+  not a per-feed interval**, and the feeds with no row carry no bound of any width.
+- **The counter was proved, not assumed.** A rate of 0 is only as good as the thing counting, so a
+  five-branch negative control runs in the container against the 27b: `ollama_model_missing`,
+  `ollama_unreachable`, `no_backend`, `bad_backend` and — via a stub daemon returning Ollama's
+  envelope with an empty `response`, the exact shape the 27b produced before `949aca8` —
+  `parse_failed`. **5/5 tagged as expected**, all five counted as fallbacks, and the healthy path
+  restored afterwards.
+- **`format: "json"` forecloses two parse-failure shapes before the model is involved, but not the
+  one that bit.** Measured against the same daemon: under `format: "json"` a request for the bare
+  number 7 came back as `{"number": 7}`, while the same request with `format` removed returned
+  `[1,2,3]`. The grammar does not foreclose an *empty* reply.
+- **Cost.** The 27b is 3.3× per message. At ~150 events/day that is minutes, not hours, but the
+  single GPU is serialised by `Semaphore(1)`, so a burst of RSS classification queues three times as
+  long.
+- **The model is set by `.env`, not by the code's default.** `config.py:19` still reads
+  `ollama_model: str = "qwen3:8b"` while `.env` sets `OLLAMA_MODEL=qwen3.8-27b:latest`. Trust
+  `extraction_model` on the row, which is why the report reads the model off the rows rather than off
+  a literal — the 27b's first run printed itself as "qwen3:8b" until that was fixed.
+
+Reproduce (`../tools/archive_fallback_rate.py`, run with no argument to print both halves):
+
+```bash
+scp tools/archive_fallback_rate.py truthevades:/tmp/
+ssh truthevades 'python3 /tmp/archive_fallback_rate.py sample'      # read-only, writes /tmp only
+docker cp sample.json conflict-monitor-backend-1:/tmp/fallback_rate_sample.json
+docker compose exec -T backend python /tmp/archive_fallback_rate.py classify
+docker compose exec -T backend python /tmp/archive_fallback_rate.py selftest   # the negative control
+```
+
+Per-row results land at `/tmp/fallback_rate_results.json` **inside the container**, which a
+`docker compose restart` wipes — `docker cp` them out before quoting anything from them.
+
+### The sentinel migration, audited before it runs — 2026-09-20
+
+`89c6f54` deleted the `(-25, 80)` sentinel from the code and shipped an idempotent startup migration
+that NULLs `lat`, `lon`, `geometry` and clears the geo columns `WHERE lat = -25.0 AND lon = 80.0`,
+logging `Retired Indian Ocean sentinel on %d event(s)`. **The SQL shipped; the run did not.** What
+follows is the read-only audit that makes the run decidable — every figure is a **prediction** of
+what the `UPDATE` would do to these rows, not a rowcount anything logged.
+
+| Measured on the dump | Value |
+|---|---|
+| Rows the `WHERE` selects | **39,949** (47.6% of 83,938) |
+| …carrying a real place name | 1,635 (4.1% of selected) |
+| …carrying `location_name = "Unknown"` | 38,314 (95.9% of selected — and **100%** of the archive's `Unknown` rows) |
+| Near-misses, every band from 1e-06 to 5.0 degrees | **0** |
+| Half-matches (`lat = -25.0` with another lon, and the reverse) | 0 / 0 |
+| Selected rows whose `geometry` disagrees with lat/lon | 0 |
+| Selected rows with NULL, or undecodable, `geometry` | 0 / 0 |
+| Undecodable geometries anywhere in the archive | 0 |
+| Geolocation rate, before → after | 100% → **52.4%** (43,989 rows keep a geometry) |
+
+Because every one of those is zero, a real run should log **exactly 39,949 — and a different number
+would itself be the finding.**
+
+**39,981 was not this count taken badly. It was a different estimator.** `archive_locations.py`
+groups by `location_name` and emits one coordinate per name — the mode — and `geocoder_vs_archive.py`
+then charges that name's *entire* event count to the sentinel whenever its modal coordinate lands
+within 0.01° of `(-25, 80)`. So 39,981 answers "how many events belong to names that *mostly* sit on
+the sentinel", not "how many rows sit on it". Replayed from the same read as the direct count, so the
+two are compared as estimators rather than one being called the other's typo:
+
+| | Rows |
+|---|---|
+| charged to the sentinel but not on it | 372 |
+| on the sentinel but never charged | 340 |
+| **misattributed in total** | **712** |
+| net effect on the headline | **+32** |
+
+The same proxy sat inside the second register row. `1,667 = 39,981 − 38,314` subtracts across two
+different populations: the proxy's sentinel total, minus the events whose `location_name`
+`geocoder.py` rejects outright. Both terms re-measured: 39,949 − 38,314 = **1,635**, 1.95% of
+83,938. The two subtrahends are the same 38,314 for *different reasons* — one is every row
+`geocoder.py` would refuse anywhere, the other is the `Unknown` rows sitting on the sentinel — and
+they coincide only because every `Unknown` row **is** on the sentinel and no other rejected name
+occurs in the archive. The whole error was in the minuend.
+
+**Half of those 1,635 rows are repairable, and that argues *for* running the migration.** 817 of them
+(50.0%, 41 distinct names) carry a name that resolves to a real coordinate elsewhere in this same
+archive: `Israel` 425 at the sentinel against 356 at a real point, `Lebanon` 213 / 235, `UAE` 44 / 58,
+`Saudi Arabia` 37 / 60, `Ben Gurion Airport` 4 / 28, `Beersheba` 3 / 25. The same geocoder succeeding
+and failing on the same string on different days is a transient failure, not an unknown place — and
+`_fix_null_coords_task` (`routes/events.py:75`) selects on `Event.geometry.is_(None)` (:80) and
+re-geocodes, so it can never reach a row parked at the sentinel. Retiring the sentinel is what makes
+those rows visible to the repair.
+
+**What remains is one thing: execute it and record the rowcount.** The recommended route is a
+throwaway restore — gunzip the dump into a *new* database inside the already-running
+`conflict-monitor-db-1` (postgis/postgis:16-3.4), point a backend at it, let
+`ADD COLUMN IF NOT EXISTS` create the four missing columns and the `UPDATE` run, capture the logged
+count, delete the copy. The dump is never opened for writing and the migration is idempotent. Tick
+the box with the exact wording "ran against a **restored copy** of the 2026-08-18 archive, rowcount
+N" — not "against the archive": the production database these rows came from was torn down and no
+longer exists to be migrated.
+
+Two limits on all of the above:
+
+- **The dump predates the Phase 0/1b columns.** `is_geolocated`, `geo_precision`, `geo_uncertainty_m`
+  and `geo_method` are absent from it, as are `extraction_status`, `extraction_model` and
+  `killed_reported` (those three come from the same `ADD COLUMN IF NOT EXISTS` step, `main.py:39-57`,
+  not from this `UPDATE`, whose `SET` clause is at `main.py:98-103`). What the migration writes into
+  them is therefore unanswerable here — not false, not unknown-but-present. The counts above are all
+  about columns the dump does have: `lat`, `lon`, `geometry`.
+- **There is one dump.** The proxy replay and the direct count read the same file. The audit shows
+  they disagree and by exactly how much; it cannot confirm either against a second source, because no
+  second copy exists.
+
+Reproduce: `../tools/archive_sentinel_audit.py`, read-only on the VPS like the other `archive_*`
+scripts — `scp` it to `/tmp/`, then `ssh truthevades 'python3 /tmp/archive_sentinel_audit.py'`.
+
 ---
 
 ## Findings ledger
 
-54 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **26 open**, 25 fixed, 3 invalid or external. Of the open ones, **none is critical** and 13 are high.
+56 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **28 open**, 25 fixed, 3 invalid or external. Of the open ones, **none is critical** and 14 are high. (The tally read "54 / 26 open / 13 high" until 2026-09-20; it had not been incremented when `e5ad5ae` opened `C74`. Counted from the rows, not carried forward.)
 
 Claims that no longer hold are kept with status `INVALID` rather than deleted.
 
@@ -373,6 +558,7 @@ Ordered by severity, then area.
 | `C50` | medium | 3 | Frontend | LiveFeed NEW badge compares array lengths against a 200-cap, so it stops firing permanently once the cap is hi… |
 | `C52` | medium | — | Frontend | Cesium credits are routed to a detached div, suppressing Ion/Bing/Google attribution required by their terms |
 | `C53` | medium | 3 | Frontend | Three renderers (Mapbox, Globe, Cesium) still duplicate mark logic. The palette half is fixed: the four stale EVENT_COLORS copies were migrated onto tokens.ts in `e03cee6` |
+| `C75` | medium | 1 | Ingest | "Could not classify" and "could not place" are the same rows, not two overlapping populations: **100%** of the archive's 38,314 `Unknown` rows sit on the sentinel, and the sentinel holds those plus 1,635 others. The two headline failure rates (45.6%, 47.6%) are one population reported twice. `89c6f54` made the stages separable on new rows — name kept, `geometry` NULL, `geo_method` persisted — but nothing reports them apart |
 | `C61` | medium | — | Platform | Postgres published on 0.0.0.0:5432; backend DATABASE_URL hardcoded so POSTGRES_PASSWORD cannot change it |
 | `C68` | medium | — | Platform | Vite HMR is blind across the Windows bind mount; the backend only reloads because watchfiles polls |
 | `C70` | medium | 0 | Platform | Demo path bypasses classifier, geocoder, dedup and track_history, so the zero-config run exercises none of the… |
@@ -657,6 +843,7 @@ re-checked against `de146f6`.
 - The frontend bind mount covers only `./frontend/src:/app/src`. vite.config.ts, index.html, package.json and public/ are baked into the image, so host edits to any of them have no effect until `docker compose build --no-cache frontend` — which is a trap for the C68 fix, since editing vite.config.ts to add `usePolling` will itself appear to…
 - There is no production serving path. frontend/Dockerfile:11 runs `npm run dev` (Vite dev server, host 0.0.0.0) and backend/Dockerfile:14 runs `uvicorn --reload`. Both are development servers; `frontend/dist` is built but nothing serves it. Fine for the current stage — worth naming so it is a decision rather than an oversight.
 - No concurrency guard on the admin sweeps. POST /events/admin/reclassify-locations (events.py:150) and /admin/fix-null-coords (events.py:140) each start an unbounded full-table pass with `await asyncio.sleep(1.2)` per row for Nominatim's rate limit. Calling either twice starts two overlapping passes that together exceed 1 req/sec and will…
+- The code's default classifier model is not the one that runs. `config.py:19` reads `ollama_model: str = "qwen3:8b"` while `.env:20` sets `OLLAMA_MODEL=qwen3.8-27b:latest`, so anyone reading the config to learn which model classifies gets the wrong answer, and a backend started outside `docker compose` (which fails fast on a missing `env_file`) classifies with a different model than every number recorded on 2026-09-20. Mitigated, not fixed, by `extraction_model` being persisted on the row. Surfaced while measuring the fallback rate; unscheduled.
 
 ---
 
@@ -665,7 +852,7 @@ re-checked against `de146f6`.
 Phases are ordered by dependency, not by appeal. Later phases are unfittable on data the earlier ones
 produce, so the order matters.
 
-### Phase 0 — Measurement · mostly done
+### Phase 0 — Measurement · one run outstanding
 
 Make failure visible before changing any behaviour.
 
@@ -673,14 +860,29 @@ Make failure visible before changing any behaviour.
 - [x] Persist `is_geolocated`, which the code already computed and discarded on a log line (`9fd3fbf`)
 - [x] `GET /events/stats/extraction` so the fallback rate is watchable without SQL (`9fd3fbf`)
 - [x] Coverage probes for ADS-B and AIS — both changed the plan (see Measured facts)
-- [ ] Run for one week and record the real fallback rate — no longer blocked: `de146f6` made Ollama the default backend, so this runs with no key and no spend. It measures **qwen3:8b, not Haiku**; record which model the number describes
+- ~~Run for one week and record the real fallback rate~~ — **this line asked one question that turned
+  out to be two, and they need different instruments. Split, not ticked:**
+- [x] **The model-failure half — measured and bounded, 2026-09-20.** 568 archive messages through the
+  real `classify_message()`: **0/568** fallbacks on qwen3:8b and **0/568** on qwen3.8-27b:latest, 95%
+  CI 0.00–0.67% each, with a five-branch negative control proving the counter still fires. It is a
+  bound, not a point estimate, and it describes **those two models — not Haiku**, which produced the
+  archive (see Measured facts)
+- [ ] **The time-varying half — not measured, and an archive run structurally cannot see it.**
+  Timeouts under load, unreachable bursts, a daemon restart mid-poll and GPU contention exist only in
+  wall clock; the archive run classifies 568 rows one at a time on a quiet machine. This is the half
+  that still needs a real week. It costs nothing but patience: `GET /events/stats/extraction` has
+  existed since `9fd3fbf`, so the number is watchable without SQL. Record the model with it
 - [ ] Label the archive's sentinel rows with a single `UPDATE` ($0, no reprocessing) — **the code
-  shipped, the run did not**: `89c6f54` added an idempotent startup migration (`main.py`, logging
-  "Retired Indian Ocean sentinel on %d event(s)") that NULLs lat/lon/geometry and sets
-  `is_geolocated = false` wherever `lat = -25.0 AND lon = 80.0`. It runs against whatever database
-  the backend starts on; nothing evidences it having run against the 83,938-event VPS archive, which
-  is what "the archive" means everywhere else in this document. Outstanding is the run and its
-  rowcount, not the SQL
+  shipped and the audit is now done; the run did not**: `89c6f54` added an idempotent startup
+  migration (`main.py`, logging "Retired Indian Ocean sentinel on %d event(s)") that NULLs
+  lat/lon/geometry and sets `is_geolocated = false` wherever `lat = -25.0 AND lon = 80.0`. It runs
+  against whatever database the backend starts on; nothing evidences it having run against the
+  83,938-event VPS archive, which is what "the archive" means everywhere else in this document.
+  Outstanding is the run and its rowcount, not the SQL. The 2026-09-20 audit predicts **39,949** rows
+  — zero near-misses out to 5°, zero half-matches, zero geometry disagreements, so it should log
+  exactly that, and a different number would itself be the finding. **39,949 stays quoted as a
+  PREDICTION until a run logs it.** Recommended route: restore the dump into a scratch database
+  inside the running `conflict-monitor-db-1` and let the startup migration run against the copy
 
 ### Phase 1 — Let the schema say "I guessed"
 
@@ -762,6 +964,9 @@ document that silently edits away its own mistakes would fail its own standard.
 | Secrets in `.env` are "correctly gitignored and clean in git history" — written in the Blocked-on-the-owner table above | `c460f5e` committed `conflict-monitor/.env.bak`, carrying live Telegram, Mapbox, AISStream, OpenSky, Cloudflare Radar and Postgres credentials plus the dead Anthropic key. `.gitignore` covered `.env`, not `.env.bak`. Amended to `de146f6`, which does not contain the file, and `.env.*` is now ignored; `origin` only ever had `main` at `0f4ad05`, so nothing was pushed. The orphan survives in the local reflog and the values still need rotating | An audit grepped the **tracked** files instead of trusting the sentence — the same mistake, made the same way, as the `frontend/dist` entry above |
 | Live classification is blocked until the Anthropic key is restored — stated in three places in this document | It was blocked only on *that* backend. `de146f6` put a local qwen3:8b behind the same byte-identical prompt and produced the first `extraction_status = "ok"` rows this archive has ever held, with no key and no spend. The Phase 0 week can start; it measures qwen3 rather than Haiku, which changes what the number means, not whether it can be taken | Trying the alternative instead of re-reading the blocker. The document had repeated "blocked" for twelve commits |
 | This register is "updated in the same commit as the change it describes" — its own rule, line 3 | It was last updated **eight commits ago**, in `3c92466`; `e60c44d`, `e03cee6`, `51bdce9`, `0de11f2`, `bb1c80c`, `075ce6f`, `89c6f54` and `de146f6` all shipped without touching it, and that run of eight is the longest this document has had. Four of the twelve commits since `7ddbe58` created it *did* edit it (`de831ed`, `74f09f0`, `fc0c989`, `3c92466`) — and `fc0c989` exists only to correct stale hashes in it. The drift is real either way: the header claimed coverage through `74f09f0`, eleven fixed findings were still listed Open, the tally still said three criticals when there were none, and two whole subsystems (the connectivity layer, the Ollama backend) had never been mentioned. A register that drifts is a register that cannot be cited | A 47-agent audit re-checked the ledger against the tree and produced file:line evidence for every claim; each claimed fix was then re-verified against `de146f6` before its row moved. **This row's own first draft said "twelve commits"** — the count since the document was *created*, not since it was *updated*, and the same diff carried the disproof. `git log --oneline 7ddbe58..de146f6 -- conflict-monitor/docs/FINDINGS.md` returns four commits, one of them titled "Correct stale commit hashes in FINDINGS.md"; `git rev-list --count 3c92466..de146f6` returns 8. A correction that is itself wrong is the one failure this table cannot afford, so the commands stay in the row. The rule needs enforcing, not restating |
+| 39,981 events are pinned to the sentinel, and 1,667 (1.99%) carry a real name that still failed geocoding — two rows of Measured facts, quoted since `7ddbe58` | **39,949** and **1,635** (1.95%). Neither was a miscount. 39,981 came from a *modal-coordinate proxy*: `archive_locations.py` emits one coordinate per `location_name` and `geocoder_vs_archive.py` charges that name's whole event count to the sentinel, which misplaces **712** rows — 372 charged though they sit elsewhere, 340 on the point and never charged — netting to +32. The second row inherited the same proxy through a subtraction across two populations (`39,981 − 38,314`). **The percentage is what shielded the count**: 39,981 and 39,949 both round to 47.6%, so the figure a reader would spot-check was right while the number under it was wrong. A near-cancelling error is the more dangerous kind — it makes a name-level guess look like a row-level census | Counting the migration's own `WHERE lat = -25.0 AND lon = 80.0` row by row, then *replaying the proxy from the same read* so the two could be compared as estimators instead of one being called the other's typo (`tools/archive_sentinel_audit.py`) |
+| The classifier path on qwen3 is sound — it had just been measured at 568/568 `ok`, zero fallbacks | Measured on **qwen3:8b**, the one model of the family that masks the defect. Every qwen3 on this host reports the `thinking` capability; with it on the reasoning goes to a separate field, `response` comes back **empty**, and `num_predict` — a budget meant for the answer — is spent on reasoning that is then discarded. `qwen3.8-27b:latest` produced 3/3 `parse_failed`, every one logging `got: ''`. `"think": False` fixes it (`949aca8`). **The measurement that would have caught this had been taken on the model that hides it**, and a second model of the same family was the cheapest test available and had never been run | Changing `OLLAMA_MODEL` and reading the log line instead of trusting the 0.00%. Phase 0 paid for itself here: the rows said `parse_failed` with severity NULL and `extraction_model` naming the model that failed, rather than carrying a fabricated severity 5 — the failure was legible the moment it happened |
+| qwen3 returns `location_name = "Unknown"` noticeably more often than Haiku did, and is "now measurable because `extraction_model` exists" — `de146f6`'s commit message, carried into Measured facts | Still unquantified, and **not measurable from the archive at all**. The 2026-08-18 dump has no `extraction_status` and no `extraction_model` column, so its 45.6% cannot be decomposed into Haiku-classified rows and rows where no classification happened and `_build_fallback`'s regex supplied the location. What *was* measured is a different pair: on 568 identical rows, qwen3.8-27b returns `Unknown` at 8.9% against qwen3:8b's 17.5%, intervals non-overlapping. That bears on model fit and **not** on Haiku, so **no winner is declared** — the claim is neither confirmed nor refuted, and settling it needs the key over that same sample. The error worth recording is not the direction of the claim but its status: an impression was written down as a known fact with the word "measurable" attached, and the measurement it named could not be taken | Trying to take it. The tool got as far as needing `extraction_status` on the archive side and found the column absent from the COPY header |
 
 ---
 
@@ -788,4 +993,7 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-19 | `de146f6` | Local Ollama classifier backend (qwen3:8b) — classification with no key and no spend, no silent fallback, `extraction_model` on every row; admin re-classify tasks stop overwriting rows on a fallback (`C12`). Amend of `c460f5e`, which had committed `.env.bak` |
 | 2026-09-19 | `ab9420c` | Measure the death-toll rate instead of asserting it: `tools/archive_killed_rate.py` over all 83,938 archive events — **95.5%** state no count, replacing an invented "~86%" that had no artifact anywhere behind it |
 | 2026-09-19 | `e5ad5ae` | `killed_reported` end to end — a count copied from the message, never graded. `merge_duplicate` stops discarding it; `reject_boolean` stops `true` validating as severity 1 and silently erasing the event (opens `C74`) |
-| 2026-09-20 | *this commit* | Record the live verification of `killed_reported` - migration, classification and the merge policy exercised against a running stack; `C74` given its measured margin |
+| 2026-09-19 | `e0732ac` | Reconcile this register with the tree it claims to describe: eleven fixed findings were still listed Open, the header was eight commits stale, and two whole subsystems had never been mentioned |
+| 2026-09-20 | `fe5d2d4` | Record the live verification of `killed_reported` - migration, classification and the merge policy exercised against a running stack; `C74` given its measured margin |
+| 2026-09-20 | `949aca8` | Switch the classifier to **qwen3.8-27b:latest** and send `"think": False` — a thinking model puts its reasoning in a separate field and returns an empty `response`, so every row came back `parse_failed`. qwen3:8b answered anyway, which is why the defect was invisible while only the small model ran |
+| 2026-09-20 | *this commit* | Close out Phase 0: the fallback rate measured and bounded on 568 archive messages for **both** models, the sentinel migration audited before it runs, the "one week" line split into the half that is measured and the half only wall clock can reach, and two long-standing register numbers corrected to the estimator that produced them (`C75`) |
