@@ -444,6 +444,16 @@ async def _classify_ollama(raw_text: str, hint: str, flag_countries: list[str]) 
         "prompt": raw_text[:2000] + hint,
         "stream": False,
         "format": "json",
+        # Thinking OFF, explicitly. Every qwen3 model on this host reports the
+        # "thinking" capability, and with it enabled the reasoning goes to a
+        # separate field while `response` comes back EMPTY. Measured: switching
+        # ollama_model to qwen3.8-27b:latest produced 3/3 parse_failed with
+        # `got: ''` until this line existed. qwen3:8b answered anyway, so the
+        # defect was invisible for as long as only the small model was used —
+        # it is a property of the family, not of the 27b.
+        # num_predict is a budget for the ANSWER; a thinking model spends it on
+        # reasoning first and then has nothing left to say.
+        "think": False,
         "options": {"temperature": 0, "num_predict": 250},
     }
 
