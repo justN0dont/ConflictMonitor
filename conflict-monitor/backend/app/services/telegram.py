@@ -4,12 +4,13 @@ from datetime import datetime, timezone, timedelta
 from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 from app.config import settings
 from app.db import async_session
-from app.models import ChannelCheckpoint, Event
+from app.models import ChannelCheckpoint, Event, EventReport
 from app.schemas import EventRead, EventWS
 from app.seed_channels import DEFAULT_CHANNELS, get_reliability
 from app.services.broadcaster import broadcaster
@@ -218,9 +219,36 @@ async def _save_checkpoint(channel_name: str, message_id: int):
         await session.commit()
 
 
-async def _message_already_saved(session, message_id: int) -> bool:
+async def _message_already_saved(session, channel_name: str, message_id: int) -> bool:
+    """Has this exact message already been through the pipeline?
+
+    Two things changed here at once, because the query had two defects and one
+    rewrite fixes both.
+
+    It reads `event_reports`, not `events`. A merged message writes no events
+    row at all, so its id was nowhere and the old query could not see it: on
+    every restart the message came round again, was re-classified on the GPU,
+    and was re-merged, incrementing report_count for a report already counted
+    (`C10`). The report table has a row for every report including merged ones,
+    so it can now answer the question it was always asking.
+
+    And the key is (channel, message id), not the id alone. Telegram message
+    ids are per-channel; the old query let message 4821 from one channel block
+    message 4821 from another, which is a genuinely new message dropped with
+    "already saved" in the log — absent written as present, the bug class this
+    project exists to remove. The archive cannot show the drops directly,
+    because by construction the dropped ones are the rows that are missing:
+    what it shows is five channel pairs whose id ranges overlap heavily and
+    hold ZERO ids in common, where treating the two id sets as independent over
+    the shared window predicts on the order of 2,200. That is ~4.5% of 49,369
+    Telegram messages, so ingest volume either side of this change is not
+    comparable — see the Corrections log.
+    """
     result = await session.execute(
-        select(Event.id).where(Event.telegram_message_id == message_id).limit(1)
+        select(EventReport.id).where(
+            EventReport.channel == channel_name,
+            EventReport.telegram_message_id == message_id,
+        ).limit(1)
     )
     return result.scalar_one_or_none() is not None
 
@@ -247,9 +275,9 @@ async def _process_message(
         )
         return
 
-    # Dedup by exact Telegram message_id
+    # Dedup by exact Telegram (channel, message_id)
     async with async_session() as session:
-        if await _message_already_saved(session, message_id):
+        if await _message_already_saved(session, channel_name, message_id):
             logger.debug("Skipping already-saved msg_id=%d from %s", message_id, channel_name)
             return
 
@@ -289,75 +317,125 @@ async def _process_message(
 
     source_url = _build_source_url(channel_name, message_id)
 
-    async with async_session() as session:
-        existing = await check_duplicate(
-            session,
-            result.get("summary", ""),
-            result.get("event_type", "military"),
-            lat, lon,
-            message_date,
-        )
-        if existing:
-            # Only a row whose own classification succeeded may take a severity
-            # from another report. Otherwise the surviving row reads
-            # "extraction_status=api_400, extraction_model=NULL" while carrying
-            # a qwen3 number — a measurement its own provenance says nothing
-            # produced. Those rows are healed by re-classifying them, not by
-            # having a number quietly appear on them.
-            if severity is not None and existing.extraction_status != "ok":
-                logger.info(
-                    "Not raising severity of #%s (extraction_status=%s) from a %s report",
-                    existing.id, existing.extraction_status,
-                    result.get("extraction_status"),
-                )
-                severity = None
-            # killed_reported is passed but never written to the row — see
-            # merge_duplicate. The count is logged against the event, with the
-            # text that stated it, and stays with the report whose text that is.
-            await merge_duplicate(
-                session, existing, channel_name, severity,
-                result.get("killed_reported"),
+    # Built before the duplicate check, because it is a fact about THIS message
+    # whichever event it turns out to belong to. It is then attached to the
+    # event that already exists, or to the one created below — "link, don't
+    # merge" falls out of the ordering instead of being engineered.
+    report = EventReport(
+        source="telegram",
+        channel=channel_name,
+        raw_text=raw_text,
+        summary=result.get("summary", raw_text[:200]),
+        source_url=source_url,
+        telegram_message_id=message_id,
+        killed_reported=result.get("killed_reported"),
+        # Beside the count, from the same result, so a NULL count on this row
+        # can be read as "the message stated none" or "the classifier never
+        # produced one" — see models.py. A fallback carries no killed_reported
+        # key at all, which is why the status has to travel with it.
+        extraction_status=result.get("extraction_status"),
+        reported_at=message_date,
+    )
+
+    # The UNIQUE index on (channel, telegram_message_id) is the database half of
+    # _message_already_saved, which is check-then-act with a wide window: the
+    # guard's session is closed again before classification and geocoding
+    # (seconds), and the live handler, the startup sweep and an admin
+    # trigger_backfill can all be inside that window at once. When two of them
+    # race, one INSERT loses and Postgres raises here.
+    #
+    # It is caught because of what it did otherwise: _backfill_entity wraps its
+    # ENTIRE async-for in a single try, so one lost race ended the sweep for
+    # that channel — every later message never ingested, nothing retrying, and
+    # a log line that reads like a transient fetch failure. "I was not looking"
+    # recorded as "nothing happened", by the backstop added to prevent exactly
+    # that. The losing transaction has already rolled back and the winner
+    # stored this message, so the work is done: log the guard firing and let
+    # the sweep continue. No checkpoint is written — the message belongs to the
+    # winner's run, and the guard skips it next time round anyway.
+    try:
+        async with async_session() as session:
+            existing = await check_duplicate(
+                session,
+                result.get("summary", ""),
+                result.get("event_type", "military"),
+                lat, lon,
+                message_date,
             )
-            ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
+            if existing:
+                # Only a row whose own classification succeeded may take a
+                # severity from another report. Otherwise the surviving row
+                # reads "extraction_status=api_400, extraction_model=NULL"
+                # while carrying a qwen3 number — a measurement its own
+                # provenance says nothing produced. Those rows are healed by
+                # re-classifying them, not by having a number quietly appear
+                # on them.
+                if severity is not None and existing.extraction_status != "ok":
+                    logger.info(
+                        "Not raising severity of #%s (extraction_status=%s) from a %s report",
+                        existing.id, existing.extraction_status,
+                        result.get("extraction_status"),
+                    )
+                    severity = None
+                # The whole report is kept: merge_duplicate stores it as a row
+                # on this event, in the same transaction as the counter it
+                # bumps. The incoming killed_reported rides on that row, beside
+                # the text that stated it; existing.killed_reported is still
+                # never written.
+                await merge_duplicate(session, existing, report, severity)
+                ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
+                await broadcaster.broadcast(ws_payload.model_dump_json())
+                return
+
+            db_event = Event(
+                source="telegram",
+                channel_name=channel_name,
+                raw_text=raw_text,
+                summary=result.get("summary", raw_text[:200]),
+                event_type=result.get("event_type", "military"),
+                severity=severity,
+                killed_reported=result.get("killed_reported"),
+                lat=lat,
+                lon=lon,
+                geometry=geometry,
+                timestamp=message_date,
+                source_reliability=get_reliability(channel_name),
+                location_name=location_name,
+                telegram_message_id=message_id,
+                source_url=source_url,
+                reporting_channels=channel_name,
+                extraction_status=result.get("extraction_status"),
+                extraction_model=result.get("extraction_model"),
+                is_geolocated=is_geolocated,
+                geo_precision=geo.precision if geo else None,
+                geo_uncertainty_m=geo.uncertainty_m if geo else None,
+                geo_method=geo.method if geo else None,
+            )
+            session.add(db_event)
+            # flush, not commit: db_event.id does not exist until the INSERT
+            # runs, and the report needs it. One commit still covers both, so
+            # an event is never on disk without its first report.
+            await session.flush()
+            report.event_id = db_event.id
+            session.add(report)
+            await session.commit()
+            await session.refresh(db_event)
+
+            ws_payload = EventWS(type="new_event", event=EventRead.model_validate(db_event))
             await broadcaster.broadcast(ws_payload.model_dump_json())
-            return
-
-        db_event = Event(
-            source="telegram",
-            channel_name=channel_name,
-            raw_text=raw_text,
-            summary=result.get("summary", raw_text[:200]),
-            event_type=result.get("event_type", "military"),
-            severity=severity,
-            killed_reported=result.get("killed_reported"),
-            lat=lat,
-            lon=lon,
-            geometry=geometry,
-            timestamp=message_date,
-            source_reliability=get_reliability(channel_name),
-            location_name=location_name,
-            telegram_message_id=message_id,
-            source_url=source_url,
-            reporting_channels=channel_name,
-            extraction_status=result.get("extraction_status"),
-            extraction_model=result.get("extraction_model"),
-            is_geolocated=is_geolocated,
-            geo_precision=geo.precision if geo else None,
-            geo_uncertainty_m=geo.uncertainty_m if geo else None,
-            geo_method=geo.method if geo else None,
-        )
-        session.add(db_event)
-        await session.commit()
-        await session.refresh(db_event)
-
-        ws_payload = EventWS(type="new_event", event=EventRead.model_validate(db_event))
-        await broadcaster.broadcast(ws_payload.model_dump_json())
+            logger.info(
+                "Event #%d saved | sev=%s | loc='%s' -> %s | geo=%s | %s",
+                db_event.id, severity, location_name,
+                f"({lat:.2f},{lon:.2f}) {geo.precision} ±{geo.uncertainty_m}m" if geo else "NULL",
+                is_geolocated, source_url,
+            )
+    except IntegrityError:
         logger.info(
-            "Event #%d saved | sev=%s | loc='%s' -> %s | geo=%s | %s",
-            db_event.id, severity, location_name,
-            f"({lat:.2f},{lon:.2f}) {geo.precision} ±{geo.uncertainty_m}m" if geo else "NULL",
-            is_geolocated, source_url,
+            "msg_id=%d from %s was stored by another worker while this one was "
+            "classifying — refused by the UNIQUE index. The guard fired; the "
+            "sweep continues", message_id, channel_name,
         )
+        return
 
     # Update checkpoint so next restart won't re-process this message
     await _save_checkpoint(channel_name, message_id)

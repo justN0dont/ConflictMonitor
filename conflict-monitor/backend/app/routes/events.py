@@ -11,7 +11,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import async_session as make_session, get_session
-from app.models import Event
+from app.models import Event, EventReport
 from app.schemas import EventRead
 from app.services.classifier import classify_message
 from app.services.geocoder import geocode
@@ -601,6 +601,22 @@ async def _import_osint_waves_task():
                 source_url=source_url,
             )
             session.add(db_event)
+            # This is a third writer of events, so it writes its report row too
+            # — not because anything here merges, but because report_count
+            # already says 1 and a row with no report under it would read as a
+            # report whose text we cannot show. (The startup backfill would
+            # pick it up on the next boot; this keeps the difference at 0 from
+            # the moment of import.)
+            await session.flush()
+            session.add(EventReport(
+                event_id=db_event.id,
+                source=_OSINT_SOURCE,
+                channel=_OSINT_CHANNEL,
+                raw_text=raw_text,
+                summary=summary,
+                source_url=source_url,
+                reported_at=ts,
+            ))
             await session.commit()
             imported += 1
             wave_name = wave.get("wave_codename_english") or f"Wave {wave_num}"

@@ -58,7 +58,14 @@ async def lifespan(app: FastAPI):
                     f"{col_type} DEFAULT {default}"
                 ))
             except Exception:
-                pass
+                # Logged, not passed silently. ADD COLUMN IF NOT EXISTS does
+                # not fail in normal operation, so a failure here is real —
+                # and in Postgres it also ABORTS this transaction, so every
+                # statement after it fails too. With `pass` the only symptom
+                # was the later statement's error, naming a statement that was
+                # fine. The failure that caused it has to be in the log or the
+                # boot is unreadable.
+                logger.exception("Migration ALTER for events.%s failed", col)
 
         # severity was created NOT NULL DEFAULT 5, which made "we did not
         # measure severity" unrepresentable and stamped the classifier's
@@ -69,7 +76,9 @@ async def lifespan(app: FastAPI):
             await conn.execute(text("ALTER TABLE events ALTER COLUMN severity DROP NOT NULL"))
             await conn.execute(text("ALTER TABLE events ALTER COLUMN severity DROP DEFAULT"))
         except Exception:
-            pass
+            # Same rule as the loop above: a swallowed failure here aborts the
+            # transaction and the next statement takes the blame.
+            logger.exception("Dropping severity NOT NULL/DEFAULT failed")
 
         # ── One-off: retire the Indian Ocean sentinel ───────────────────────
         # Unlocated events used to be written to (-25.0, 80.0), open ocean
@@ -109,14 +118,139 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Sentinel retirement migration failed")
 
-        # Index on telegram_message_id for fast dedup lookups
+        # Index on telegram_message_id for fast dedup lookups.
+        # Kept: the dedup guard reads event_reports now, but events.py and the
+        # archive tools still query this column.
+        #
+        # It lives in THIS block, with the other statements about `events`,
+        # and not beside the backfill below. A caught failure here would abort
+        # whichever transaction it is in, and in the backfill's transaction
+        # that means the INSERT is rolled back at COMMIT after "Backfilled N"
+        # has already been logged — a boot that reports work it did not keep.
         try:
             await conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS idx_events_tg_msg_id "
                 "ON events(telegram_message_id) WHERE telegram_message_id IS NOT NULL"
             ))
         except Exception:
-            pass
+            logger.exception("Index idx_events_tg_msg_id could not be created")
+
+    # ── One-off: give every existing event its first report row ─────────────
+    # In its OWN transaction, and that is the point of the split. Everything
+    # above is idempotent schema repair whose failures are caught; in Postgres
+    # a failed statement aborts the whole transaction and SQLAlchemy takes no
+    # savepoint per execute, so one caught failure up there leaves every later
+    # statement raising InFailedSQLTransactionError. The backfill below is
+    # deliberately NOT caught (see next paragraph), so it would be the
+    # statement that kills the boot — naming itself in "Application startup
+    # failed" while the statement that actually failed had been swallowed. A
+    # separate transaction lets it fail on its own merits. It does not make the
+    # loop above per-statement transactional: a failure there still rolls the
+    # whole schema block back at COMMIT, which is now at least logged.
+    async with engine.begin() as conn:
+        # event_reports is a new TABLE, so create_all above already made it —
+        # with every column this commit gives it, extraction_status included —
+        # and the hand-kept ALTER list in the block above does not need a line;
+        # it could not serve one anyway, being hardcoded to "ALTER TABLE
+        # events". C63's cost is deferred to the next column added to
+        # event_reports AFTER this commit, not paid here.
+        #
+        # The DATA is the part that is not free. On a database that already has
+        # rows — the dev DB, or a restored archive — every event predates the
+        # table, and two things break if that is left to "going forward only":
+        #
+        #   - _message_already_saved and the RSS URL guard now read
+        #     event_reports. With no rows there, all 49,369 archived Telegram
+        #     messages and every stored article URL are unknown to them, and
+        #     the next sweep re-ingests and re-classifies the lot on the GPU.
+        #     The backfill is a precondition of that guard change, not a
+        #     nicety, which is why they ship together.
+        #   - report_count would sit beside zero reports on 83,938 events that
+        #     really were reported: "the table did not exist when this was
+        #     ingested" written into the field a reader takes as "nobody
+        #     reported this".
+        #
+        # Every column below is a fact about that one report, because that
+        # report's raw_text IS the event's raw_text — one string, one
+        # classifier run over it.
+        #
+        # killed_reported and extraction_status therefore transfer TOGETHER,
+        # and only together. The count on its own would be a lie by omission at
+        # archive scale: restore the 2026-08-18 dump and this INSERT writes
+        # 83,938 rows whose killed_reported is NULL — not because those sources
+        # stated no toll, but because that dump carries no killed_reported
+        # column at all (see "The sentinel migration, audited before it runs")
+        # — into a table whose NULL a reader is invited to read as "this source
+        # stated no count". Carrying the event's own extraction_status across
+        # is what keeps those rows readable, and it is honest for the same
+        # reason every other column here is: it describes a classification of
+        # THIS report's text. Where we have nothing to say it stays NULL —
+        # every row written before events.extraction_status existed, which on
+        # that dump is all of them. NULL status beside a NULL count says "I
+        # cannot tell you why the count is missing", which is true; what it
+        # must never say is "nobody was killed".
+        #
+        # What this does NOT do is recover the reports merge destroyed —
+        # 19,027 of them on the archive, and their text is gone. report_count
+        # and reporting_channels therefore keep their stored values and are not
+        # derived from this table: they are the only surviving record of those
+        # reports, so `report_count - count(reports)` is the per-row size of
+        # the loss. Zero for everything ingested after this; 213 on the one
+        # archive row that claims 214; negative on the 480 archive rows whose
+        # report_count is 0, a value no writer in this tree can produce.
+        #
+        # Deliberately NOT caught at all, unlike the schema statements above,
+        # which are caught and logged. A skipped backfill is not a missing
+        # column, it is 49,369 classifier calls on the next sweep, so it fails
+        # the boot instead — the same preference C63 argued for. That is only
+        # safe now that it has a transaction of its own to fail in.
+        res = await conn.execute(text("""
+            INSERT INTO event_reports (event_id, source, channel, raw_text, summary,
+                                       source_url, telegram_message_id,
+                                       killed_reported, extraction_status,
+                                       reported_at, ingested_at)
+            SELECT e.id, e.source, e.channel_name, e.raw_text, e.summary,
+                   e.source_url, e.telegram_message_id,
+                   e.killed_reported, e.extraction_status, e.timestamp, e.created_at
+            FROM events e
+            WHERE NOT EXISTS (
+                SELECT 1 FROM event_reports r WHERE r.event_id = e.id
+            )
+        """))
+        if res.rowcount:
+            logger.info(
+                "  Backfilled %d event(s) with their first report row. After "
+                "the first boot this prints nothing; a non-zero number later "
+                "means a writer stopped recording its report", res.rowcount,
+            )
+
+        # The key _message_already_saved now uses. UNIQUE because that guard is
+        # check-then-act with a wide window: the check runs in a session that
+        # is closed again before classification and geocoding (seconds), and
+        # the live handler and a backfill sweep can both be inside it. This is
+        # the database half; _process_message catches the IntegrityError it
+        # raises and logs the guard firing, so expect that line during a
+        # backfill and read it as the guard working, not as a new bug. It only
+        # reads that way because it is caught: uncaught, one lost race ended
+        # the whole channel sweep, which is the opposite of a backstop.
+        # Pre-flighted before it was written: the archive has 49,369 Telegram
+        # rows, 49,369 distinct message ids and zero (channel, id) duplicates;
+        # the dev DB has no Telegram rows at all. Left to raise for the same
+        # reason as the backfill — a silently skipped unique index leaves the
+        # guard with no backstop and nothing saying so.
+        await conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_reports_tg_msg "
+            "ON event_reports(channel, telegram_message_id) "
+            "WHERE telegram_message_id IS NOT NULL"
+        ))
+        # The key the RSS guard uses. NOT unique: 49 archive URLs already sit
+        # on two or more event rows, so a unique index would fail the backfill
+        # above. events.source_url has never had an index at all.
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_event_reports_source_url "
+            "ON event_reports(source_url) WHERE source_url <> ''"
+        ))
+
     logger.info("Database tables ready")
 
     tasks: list[asyncio.Task] = []

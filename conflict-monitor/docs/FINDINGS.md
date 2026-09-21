@@ -7,7 +7,7 @@ than deleting it.
 | | |
 |---|---|
 | Branch | `v3-rebuild` |
-| Covers work through | `0051932` |
+| Covers work through | *this commit* |
 | Last updated | 2026-09-20 |
 
 ---
@@ -17,7 +17,7 @@ than deleting it.
 **State at the last stopping point — 2026-09-20.**
 
 ```
-branch  v3-rebuild        HEAD 0051932
+branch  v3-rebuild        HEAD *this commit*
         pre-v3-rebuild-backup  716ffec   snapshot of the tree before the rebuild
         main                   0f4ad05   the OLD lineage; superseded, kept for reference
 ```
@@ -32,6 +32,18 @@ carries only `main` at `0f4ad05` — but see the Corrections log: the credential
 carry `"think": False` — every qwen3 model on this host reports the `thinking` capability, and with it
 on the reasoning goes to a separate field while `response` comes back **empty**, so every row is
 `parse_failed`. See the Corrections log.
+
+**There is a second table now, and the first boot after *this commit* writes to it.** `event_reports`
+holds one row per incoming report. `create_all` makes the table, and a one-off backfill in `main.py`
+gives every existing event its first report row from its own `raw_text` — loudly, outside the
+`except: pass` the column ALTERs use, because both dedup guards read this table and a skipped
+backfill means the next sweep re-classifies the whole archive on the GPU. Expect one log line with a
+row count on the first boot and silence afterwards. It runs in its **own transaction**: in Postgres
+one failed statement aborts the whole transaction, so sharing one with the swallowed schema ALTERs
+meant the backfill died naming itself while the statement that actually failed was never logged.
+Those ALTERs now log when they fail instead of passing in silence. Each report row carries the
+stated death toll **and** the classifier status that says whether anything ever looked for one —
+`killed_reported` alone cannot tell "the source stated no toll" from "nothing classified this".
 
 Restart the stack (demo mode, no keys needed):
 
@@ -153,7 +165,10 @@ Source: `conflict_monitor-20260818.sql.gz` (193 MB gz / 919 MB raw), from the VP
 | `location_name = "Unknown"` | 38,314 = 45.6%; **96.5% of those are also severity 5** — the fallback signature — and **100% of them sit on the sentinel** (`C75`) |
 | Pinned to the sentinel `(-25, 80)` | **39,949** = 47.6% — open ocean SW of Australia. A direct count of the migration's own predicate, `lat = -25.0 AND lon = 80.0`. This row said 39,981 until 2026-09-20; that figure came from a *different estimator*, not from this count taken badly — see below and the Corrections log |
 | Events with a real name that still failed geocoding | **1,635** = **1.95%** of all events, or **3.58%** per row that had a name to geocode (1,635/45,624) — say which denominator before quoting it. 817 of the 1,635 (50.0%) carry a name that resolves to a real point *elsewhere in this same archive*, so half of it is transient failure, not unplaceable names |
-| Dedup merges | 8.7% of events have `report_count > 1`, up to 6 |
+| Dedup merges | **8.16%** of events have `report_count > 1` — 6,848 rows, up to **214**. This row read "8.7%, up to 6" until *this commit* and both halves were wrong; see the Corrections log. `tools/archive_report_counts.py` |
+| Reports the merge destroyed | **19,027** = `sum(report_count - 1)` over those 6,848 rows, of which **17,450 are RSS** and 1,577 Telegram. Their text is gone and is not recoverable — the `event_reports` table of *this commit* stops the next one, it cannot bring these back. The tail is self-merge rather than corroboration: `rc=214`, `167` and `130` are one article each, re-ingested after restarts, so on those rows `report_count` was measuring **our own restarts** |
+| Merged rows by **distinct** channel | **5,174 = 75.6%** of the 6,848 name one single channel; 1,533 name two; only **141 = 2.1%** name three or more. Three quarters of five months of recorded "corroboration" is one source repeating itself. Read off `reporting_channels`, which under-counts (`C78`), so 75.6% is a **floor** |
+| `report_count = 0` | **480 rows** — a value no writer in this tree can produce (`models.py` defaults to 1, `dedup.py` only increments). "Zero reports" on a row that exists is itself a state-1/state-2 confusion already on disk. Recorded, not repaired |
 | `anomaly_score > 0` | 87.4% — a detector that fires on 87% of its input detects nothing |
 | Impossible timestamps | 6 events dated 2011, 2021, 2023 |
 | Distinct `location_name` values | 3,665 |
@@ -568,7 +583,7 @@ scripts — `scp` it to `/tmp/`, then `ssh truthevades 'python3 /tmp/archive_sen
 
 ## Findings ledger
 
-57 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **29 open**, 25 fixed, 3 invalid or external. Of the open ones, **none is critical** and 14 are high. (The tally read "54 / 26 open / 13 high" until 2026-09-20; it had not been incremented when `e5ad5ae` opened `C74`. *This commit* opens `C76` and closes nothing: `C74` narrows rather than moving to Fixed, because the dedup weakness it names is untouched. Counted from the rows, not carried forward.)
+60 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **31 open**, 26 fixed, 3 invalid or external. Of the open ones, **none is critical** and 13 are high. (*This commit* closes `C10`, narrows `C11` and `C74`, and opens `C78` and `C79`. It also corrects the line itself: the previous text said "57 / 29 open / 14 high" while the tables held 58 rows and 30 open — the note claimed `ce5d994` opened `C76` when it opened `C76` **and** `C77`, and the tally was incremented once. The same drift, in the same sentence, two commits running. Counted from the rows with a script, not carried forward.)
 
 Claims that no longer hold are kept with status `INVALID` rather than deleted.
 
@@ -579,14 +594,13 @@ Ordered by severity, then area.
 
 | ID | Sev | Phase | Area | Finding |
 |---|---|---|---|---|
-| `C74` | high | 4 | Ingest | A dedup false positive attaches one report's `report_count`, `severity`, `source_reliability` and channel to another event. Measured live: a *correct* merge fired at `sim=0.44` against a `> 0.4` threshold; unlocated rows match on text + time + type with no spatial predicate at all. The **death toll** left that blast radius in *this commit* — `merge_duplicate` stopped writing `killed_reported` — and the match is exactly as loose as it was. See also `C76`, `C77` |
+| `C74` | high | 4 | Ingest | A dedup false positive attaches one report's `report_count`, `severity`, `source_reliability` and channel to another event. Measured live: a *correct* merge fired at `sim=0.44` against a `> 0.4` threshold; unlocated rows match on text + time + type with no spatial predicate at all. The **death toll** left that blast radius in `ce5d994` and now has a home: `event_reports.killed_reported`, beside the raw_text that stated it. **The match is exactly as loose as it was** — that is the whole of what stays open. See also `C76`, `C77` |
 | `C31` | high | 2 | Collection | A failed poll leaves the last fleet and a frozen as_of in place with status still "ok" |
 | `C44` | high | 3 | Frontend | Timeline playback advances speed*1000 ms per 100 ms tick, and the real rate depends on tab visibility |
 | `C45` | high | 3 | Frontend | Events, aircraft and vessels are DOM <Marker> overlays, not Source/Layer — 98 marker nodes measured live |
 | `C46` | high | 3 | Frontend | 46 markers carry transition: transform 2s linear against a 15 s aircraft / 10 s vessel poll — fabricated motio… |
 | `C51` | high | 2 | Frontend | WebSocket reconnect refetches nothing and the server sends no backlog: events during a drop are lost until rel… |
-| `C10` | high | 4 | Ingest | merge_duplicate keeps only channel and severity; the incoming report's text and identity are dropped |
-| `C11` | high | 4 | Ingest | Reliability boost keys on report_count, not on distinct channels, so one source repeating itself raises confid… |
+| `C11` | high | 4 | Ingest | **Narrowed in *this commit*.** The boost now gates on distinct channels among the event's report rows, not on `report_count`, so a source repeating itself no longer raises confidence. The count is a **floor** bounded by what the table holds, so a pre-cutover row with one backfilled report row stays below the gate even for new reports arriving now — 141 archive rows (2.1%) lose a boost they should keep, stated rather than discovered later. What stays open is the part that needs a new subsystem: `x_osintwarfare` and `OSINTWarfare` are one outlet on two transports and still count as two, and 15 channels reposting one text still read as 15 confirmations. Needs the `fwd_from` channel-family graph |
 | `C6` | high | 1 | Ingest | Country names resolve to national centroids via Nominatim and are marked is_geolocated=true |
 | `C60` | high | — | Platform | No auth on any route or the WS; CORS reflects any origin with credentials, DELETE allowed |
 | `C62` | high | — | Platform | All seven /events/admin/* endpoints, including both DELETEs, are unauthenticated |
@@ -603,10 +617,12 @@ Ordered by severity, then area.
 | `C75` | medium | 1 | Ingest | "Could not classify" and "could not place" are the same rows, not two overlapping populations: **100%** of the archive's 38,314 `Unknown` rows sit on the sentinel, and the sentinel holds those plus 1,635 others. The two headline failure rates (45.6%, 47.6%) are one population reported twice. `89c6f54` made the stages separable on new rows — name kept, `geometry` NULL, `geo_method` persisted — but nothing reports them apart |
 | `C76` | medium | 4 | Ingest | The dedup score is Jaccard over `summary`, the LLM's *paraphrase*, so `> 0.4` measures how similarly the model worded two things rather than how similar two reports are — and `classifier.py` `_build_fallback` sets `summary = raw_text[:200]`, so a fallback row is not compared like with like at all. Containment over the reports' own `raw_text` is the instrument; picking a bar for it needs Phase 4's gold pairs |
 | `C77` | medium | 4 | Ingest | `check_duplicate` returns the **first** candidate over `0.4` in timestamp-desc order, not the best-scoring one, so a merge attaches to the most recent match rather than the most similar — and the logged `sim` is that row's score, not the pool maximum. Fixing it changes which event accumulates `report_count` / `severity` / `source_reliability`, so merge statistics either side of the change are not comparable; it is a deliberate separate decision, not a tidy-up |
+| `C79` | medium | 4 | Ingest | **Opened by *this commit*, which created it.** `event_reports.event_id` is `ON DELETE CASCADE` — it has to be, or the two raw-SQL deletes in `events.py` fail on the FK the first time any report row exists. But `/admin/dedup` keeps `MIN(id)` per `(source, raw_text)` and deletes the twin, and the cascade now takes that twin's report rows with it — including the only stored copy of a report the survivor never had. That is `C10` reappearing in a new place. Re-pointing the reports at the survivor is the fix, and it is a decision rather than a mechanical port |
 | `C61` | medium | — | Platform | Postgres published on 0.0.0.0:5432; backend DATABASE_URL hardcoded so POSTGRES_PASSWORD cannot change it |
 | `C68` | medium | — | Platform | Vite HMR is blind across the Windows bind mount; the backend only reloads because watchfiles polls |
 | `C70` | medium | 0 | Platform | Demo path bypasses classifier, geocoder, dedup and track_history, so the zero-config run exercises none of the… |
 | `C71` | medium | 3 | Platform | Demo rows ARE tagged source='demo' in the DB and API; it is the UI that discards the distinction |
+| `C78` | low | 4 | Ingest | **Surfaced by *this commit*, not fixed by it.** `dedup.py`'s channel append tests `if new_channel not in channels` against the joined *string*, so it is a substring match, not set membership: a genuinely distinct channel whose name is a substring of one already listed is silently never appended. The archive holds exactly this pair — `osint613` inside `x_osint613` — and two more that only a case difference saves (`OSINTWarfare`/`x_osintwarfare`, `GeoConfirmed`/`x_geoconfirmed`). Display string only: `event_reports` stores rows, so the distinct-channel count `C11` now uses is right even where the string is not. Fixing the string needs either string surgery or an overwrite that destroys the archive's only record of those names |
 | `C65` | low | — | Platform | Shutdown calls task.cancel() without awaiting, so no client-close path is guaranteed to run |
 | `C67` | low | — | Platform | No .dockerignore; frontend COPY . . does overlay host node_modules, but the linux binaries survive |
 
@@ -619,6 +635,7 @@ Verified fixed in the current tree. Each row names the commit that closed it.
 | `C41` | critical | 0 | Frontend | A keyless install now opens on the globe, which needs no token (`075ce6f`), so the documented quick start no longer renders a black rectangle. Residual: choosing 2D with no token still draws black with no in-panel notice |
 | `C5` | critical | 1 | Ingest | Word-anchored patterns, compiled once at import, in **both** places — `_KNOWN_PATTERNS`/`_DIRECTIONAL_PATTERNS` in geocoder.py and `_LOCATION_PATTERNS` in classifier.py (`075ce6f`) |
 | `C8` | critical | 1 | Ingest | check_duplicate branches explicitly on geometry: a located event requires `geometry IS NOT NULL` + ST_DWithin, an unlocated one is confined to `geometry IS NULL`. Neither pool can absorb the other (`89c6f54`) |
+| `C10` | high | 4 | Ingest | An `event_reports` child table holds one row per incoming report — `raw_text`, `summary`, `source_url`, `telegram_message_id`, `killed_reported`, `extraction_status`, `reported_at` — written at both insert sites and, inside the merge's own transaction, at merge. Nothing a contributing report carried is dropped any more. The re-ingest half is closed with it: both dedup guards read the report table, so a merged message is recognised on restart instead of being re-classified and re-merged (*this commit*). Two things it does **not** do: it cannot recover the 19,027 reports already destroyed, and it is only half of Phase 4's "link, don't merge" — there is still no link *between* events. Residual debt: `C79` |
 | `C21` | high | 2 | Collection | adsb.lol 403 to the default httpx User-Agent - fixed by a contact-bearing UA |
 | `C24` | high | 2 | Collection | Jamming test no longer reads position_source/mlat (ground-feeder density) |
 | `C25` | high | 2 | Collection | `nac_p == 0 and nic == 0` replaced with the published gpsjam threshold |
@@ -666,7 +683,10 @@ Did not survive checking.
 |---|---|---|---|---|
 | `C73` | low | — | Platform | frontend/dist is not committed and never has been — it is an untracked local build artifact |
 
-### Detail: open critical and high findings
+### Detail: critical and high findings, open and just closed
+
+A block stays here for one commit after its finding moves to Fixed, so the closure can be read
+against the evidence that argued for it rather than against a one-line table row.
 
 
 #### `C74` — A dedup false positive transfers corroboration it has not established
@@ -685,7 +705,7 @@ and `source_reliability` climbs — on that evidence. Those are corroboration cl
 sources confirmed this event. A false positive fabricates all four, and `C11` then walks reliability
 upward for it.
 
-**What *this commit* did, and did not do.** `merge_duplicate` no longer writes `killed_reported`.
+**What `ce5d994` did, and did not do.** `merge_duplicate` no longer writes `killed_reported`.
 That is a contract fix, not a matcher fix, and the distinction is the whole of this entry:
 
 - models.py defines the column over *this row's own* text — "copied from its text … a quantity a
@@ -718,7 +738,7 @@ tell*, and the matcher currently reads two of those as **agreement about locatio
 archive's own numbers that is 95.9% of the pool this branch will see (38,314 of the 39,949 rows the
 sentinel migration unpins). Refusing to match when the incoming report claims no place is therefore
 right on the governing idea and is a large, unmeasured product regression at the same time:
-duplicate pins, `report_count` undercounted, and the archive's 8.7% merge rate no longer comparable
+duplicate pins, `report_count` undercounted, and the archive's 8.16% merge rate no longer comparable
 across the change. It needs its own measurement and its own commit.
 
 Two options *not* taken, recorded so they are not re-litigated:
@@ -734,7 +754,7 @@ Two options *not* taken, recorded so they are not re-litigated:
   95.9% of the pool.
 
 **The instrument that would price this, free.** Nothing measures what the deletion costs: 4.5% of
-archive messages state a toll and 8.7% of events are merges, so the joint case is on the order of
+archive messages state a toll and 8.16% of events are merges, so the joint case is on the order of
 0.4% of events losing a stated number — a product, not a measurement, and probably an underestimate
 because a deadly event attracts more channels. A read-only replay of `check_duplicate`'s predicate
 over `/root/archive/conflict_monitor-20260818.sql.gz` — same `event_type`, ±15 min, the
@@ -743,6 +763,27 @@ merge, the summary Jaccard, the raw-text containment and whether `archive_killed
 finds a toll in exactly one of the two texts, i.e. whether the pair is a *transfer*. Same pattern as
 `tools/archive_killed_rate.py`: both inputs are already columns in the dump, so it needs no GPU, no
 key and no running stack.
+
+**What *this commit* did: the count stopped being deleted, and a second dropper was found.** The
+incoming `killed_reported` is no longer logged and discarded — it is `event_reports.killed_reported`,
+on the report row inserted by the merge, in the same tuple as the `raw_text` it was copied from. The
+contract does not weaken in the move, it tightens: the one-second check stops being merely true and
+becomes *local*. One integer on one event row could not say "A stated nothing, B stated 17"; two
+report rows say exactly that, each answerable from its own text. Driven against Postgres: two
+channels report the same strike with tolls of 3 and 17, the event keeps `killed_reported = 3` from
+its own text, and both counts survive on their own rows.
+
+**The matcher is untouched and this finding is unchanged by that.** What *did* change underneath it
+is a second, unrelated way the same bug class was firing in the same file's callers:
+`_message_already_saved` keyed on `telegram_message_id` **alone**, while Telegram ids are
+per-channel, so a genuinely new message from a second channel was being dropped with "already saved"
+in the log — absent written as present. The archive cannot show a single instance, because the guard
+drops before the INSERT and the dropped rows are the ones that are missing; what it shows is five
+channel pairs whose id ranges overlap and hold **zero** ids in common where treating the two id
+sequences as unrelated predicts about **2,248** (`tools/archive_report_counts.py`). Re-keying the
+guard on `(channel, telegram_message_id)` admits those. Ingest volume either side of this commit is
+therefore **not comparable** — the same caution this document applies to `C77` — and it is in the
+Corrections log rather than left to be noticed as a step in a graph.
 
 
 #### `C31` — A failed poll leaves the last fleet and a frozen as_of in place with status still "ok"
@@ -814,6 +855,18 @@ key and no running stack.
 
 **Since `89c6f54`** the signature is `merge_duplicate(session, existing, new_channel, new_severity)`: the coordinate parameters and the coordinate backfill were deleted, because `C8`'s geometry guard made the backfill unreachable. The merge therefore keeps strictly less than this block describes, and the finding is unchanged — the incoming report's text, URL and message id still have nowhere to go.
 
+**Fixed in *this commit*.** The signature is now `merge_duplicate(session, existing, report, new_severity)`: four scalars became one `EventReport` row, which is *fewer* parameters carrying strictly more data. The report is built at both call sites **before** `check_duplicate` runs, because it is a fact about the incoming message whichever event it turns out to belong to, and is then attached to the event that already exists or to the one just inserted. "Link, don't merge" falls out of that ordering rather than being engineered.
+
+- **It is written inside the merge's own transaction**, before `merge_duplicate`'s single `commit()`. A row added at the call sites after the function returned would commit separately, and a crash in between would leave `report_count` claiming a report with no row under it — a corroboration claim with no evidence, which is the thing this change exists to stop.
+- **Every report row says whether anything classified it, because `killed_reported` alone cannot.** The column inherits all THREE of the event column's values, not two: `0` means the source said nobody was killed, NULL means it stated no count, and NULL *also* means nothing ever extracted a count from this text. On `events` that third value is a legacy corner; here it is the common case, because `classifier._build_fallback` returns a dict with **no `killed_reported` key at all**, so `.get()` is None on every failed classification — and with the Anthropic key dead that is every classification. An events row resolves it by reading its own `extraction_status`; a **merged report row cannot**, even by joining back, because the event's status describes a *different* report. Measured on the dev DB before the column existed: **98 of 159 report rows (61.6%)** were `killed_reported IS NULL` on an event whose `extraction_status` was not `ok`, and not one could say which of the three it meant. `event_reports.extraction_status` costs one column and no new plumbing — the merge call site already reads `result.get("extraction_status")` two lines earlier, to refuse a severity. Driven through the real merge path against Postgres: a report merged under a `bad_backend` fallback stores `bad_backend` on its own row while the event says `no_backend`, which is the answer joining back would have given.
+- **The startup backfill carries the count and the status across together, and only together.** The event's status describes a classification of that report's own text, so transferring it is honest; it stays NULL exactly where we have nothing to say — every row written before `events.extraction_status` existed, which on a restored 2026-08-18 archive is all 83,938 of them, since that dump has neither column. NULL status beside a NULL count says "I cannot tell you why the count is missing", which is true. What it must never say is "nobody was killed". (The comment here previously claimed `killed_reported` "transfers unchanged, because its contract is copied from THIS row's raw_text" — untrue for every pre-column row, and that is the whole population of the archive.)
+- **The re-ingest loop is closed, both halves.** `_message_already_saved` and the RSS URL guard read `event_reports`, which has a row for every report *including merged ones* — the case neither guard could see, because a merge writes no `events` row. And `_message_already_saved` is now keyed on `(channel, telegram_message_id)`: see `C74`'s note and the Corrections log for why that second change is the larger of the two.
+- **The UNIQUE index behind that guard raises, and the raise is caught where it can be read.** The guard is check-then-act with a seconds-wide window, and `trigger_backfill()` — the unauthenticated `POST /admin/backfill`, no lock — can re-run a sweep while the startup sweep and the live handler are inside it. `_backfill_entity` wraps its **entire** `async for` in one try, so an uncaught `IntegrityError` ended the sweep for that channel: every later message never ingested, nothing retrying, and a log line that reads like a transient fetch failure — "I was not looking" recorded as "nothing happened", by the backstop added to prevent exactly that. `_process_message` now catches it and logs the guard firing. Driven against Postgres with a three-message sweep whose second message collides: messages one and three are ingested, the losing transaction rolls back cleanly (`report_count` stays 1), and the sweep ends with "Backfill done for zz_sweep: 3 total messages processed".
+- **The backfill has its own transaction.** It shared one with `CREATE EXTENSION`, `create_all`, the 13 silently-swallowed migration ALTERs, the severity ALTERs and the sentinel `UPDATE`. In Postgres a failed statement aborts the transaction and SQLAlchemy takes no savepoint per execute, so any one swallowed failure poisoned everything after it — survivable while the later statements were themselves wrapped, fatal once the backfill was deliberately left unwrapped. Reproduced: a swallowed `ProgrammingError` from one ALTER, then the backfill → `InFailedSQLTransactionError`, "Application startup failed" naming the backfill while the statement that actually failed had no log line at all. Split in two, with the schema statements now **logging** their failures by name, a boot whose first ALTER is forced to fail logs all 16 of the failures that cascade from it and still reports "Backfilled 1 event(s)" honestly.
+- **Three columns beyond the prescribed list, each with a reason that traces to the request.** The Fix line above names `(event_id, source, channel, raw_text, summary, source_url, telegram_message_id, ingested_at)` and predates `killed_reported` existing at all; that column is the cost `C74` accepted in `ce5d994` and the reason this table was built when it was. `extraction_status` is argued two bullets up: without it the count's NULL is unreadable. `reported_at` is kept because a merged report's own report-time is destroyed by the merge and is recoverable from nowhere else — the event keeps the FIRST report's timestamp, and neither row carries the second one's. A table that exists to stop discarding facts about incoming reports should not discard when the report was made. Caveat inherited, not created here: `news_feeds` substitutes `datetime.now()` for a missing or unparseable `pubDate`, so an RSS `reported_at` is only as true as `events.timestamp` already is.
+- **What it does not do.** It cannot recover the 19,027 reports already destroyed; their text is gone. It is half of Phase 4 line one — N reports now link to one event, but two events still cannot be linked as reporting the same thing, which is what `cluster_id` / `corroboration_link` are for. And the one-second check it makes *possible* is still not *reached*: there is no `GET /events/{id}/reports` and no UI, so `LiveFeed` still prints `17 KILLED` with no text on screen. That clause of `C74` stays open.
+- **One disagreement it introduces, named rather than discovered later.** `_fix_null_coords_task` and `_reclassify_vague_locations_task` rewrite `events.killed_reported` and `events.summary` from the row's own `raw_text`. Report #1 holds what the classifier said about that same text *at ingest*. After a re-classification the two can differ. Neither is lying — they are two model runs over one string, and the report row is the older one — but nothing on either row says which is which.
+
 
 #### `C11` — Reliability boost keys on report_count, not on distinct channels, so one source repeating itself raises confidence
 
@@ -824,6 +877,53 @@ key and no running stack.
 **Impact:** Corroboration is measured by counting merge events, and the pipeline generates merge events by itself: the RSS poller re-merges the same article after any restart (see also_found), and a restarted Telegram backfill re-merges the tail. Three self-merges of one article raise source_reliability by one and can push it to 5, which is what the min_reliability filter on GET /events and the UI treat as best-sourced. With no model of channel copying, 15 Telegram channels reposting one another's identical text reads as 15 independent confirmations.
 
 **Fix:** Count distinct sources, not merges: derive the boost from the child-report table of C10 (`count(distinct channel)`), and gate it on a channel-family graph so channels known to repost each other contribute once. Until that exists, change dedup.py:135 to test the length of the de-duplicated channel set rather than new_count.
+
+**Narrowed in *this commit*, and repriced.** The gate is now
+`count(distinct channel) >= 3` over the event's `event_reports` rows, excluding the empty channel
+name (`telegram.py` writes `""` when a chat has neither username nor title, and two unnamed channels
+cannot be shown to be distinct from each other). Driven against Postgres: three merges from one
+channel take `report_count` to 3 — which is exactly where the old gate fired — and leave
+`source_reliability` untouched; two further merges from two new channels take the distinct count to
+3 and the boost fires.
+
+- **The base is deliberately NOT recomputed from the report rows**, although that would be less
+  code. `_channel_reliability` is `seed_channels.get_reliability`, which knows the Telegram registry
+  only and returns `None` — hence `1` — for every RSS source name. Recomputing would collapse a feed
+  that `news_feeds` scored 4 at insert down to 1 on its first merge. `max(current, incoming)` stays.
+- **Scores either side of this commit are not comparable, and history is not being recomputed.** The
+  boost is not invertible (`min(5, x+1)` cannot distinguish a boosted 4 from a native 5) and the
+  historical channel set would have to come from `reporting_channels`, which `C78` shows is
+  under-counted — so a recomputation would fabricate. `min_reliability` on `GET /events` therefore
+  mixes two rules until pre-cutover rows age out. The marker for "this score can be defended" is
+  free and already stored: `report_count - count(reports) = 0` means every report this row ever had
+  is in the table.
+- **The gate is a FLOOR, bounded by what the table holds, and that suppresses FUTURE boosts on
+  pre-cutover rows too.** This is a different claim from the one above, and both are true. A
+  backfilled historical event has exactly ONE report row however many channels reported it, so an
+  archive row whose `reporting_channels` names four counts as one channel here — and because the
+  gate needs three distinct channels among rows in *this* table, that row climbs one genuine new
+  report at a time and can only reach the gate once `report_count - count(reports)` has come down
+  to 0. The **141 archive rows (2.1%)** that genuinely name three or more channels lose a boost
+  they should keep. Re-run against Postgres on an archive-shaped row (`report_count=5`, four named
+  channels, one backfilled report row): a fifth report from a genuinely new channel gives
+  `report_count=6`, `distinct_report_channels=2`, no boost, `source_reliability` unchanged at 2 —
+  where the old `new_count >= 3` gate would have fired. Taking the higher of the two counts would
+  restore those 141 and is refused for the same reason history is not recomputed:
+  `reporting_channels` is a display string whose append is a substring test (`C78`), so deriving a
+  corroboration claim from it is fabrication with extra steps. An under-claim a reader can see
+  stated is the honest failure of the two — which is why it is stated here and at the gate in
+  `dedup.py`.
+- **How much it reprices:** the old gate was `report_count >= 3`, so the rows that ever fired it
+  are the **2,794** with `report_count >= 3` — not all 6,848 merged rows, because a row that stopped
+  at 2 never boosted. Of those 2,794 only **138 (4.9%)** name three or more distinct channels, so
+  **2,656 boosts — 95.1%** of every boost this system has awarded would not qualify under the new
+  gate. (Across all 6,848 merged rows, 5,174 (75.6%) name one channel and 141 name three or more;
+  three of those never reached `report_count` 3.) An earlier draft of this row said 97.9%, dividing
+  141 by 6,848 — the wrong denominator, since it counted rows that never fired the old gate.
+- **Why it does not close.** The `rc=214` row's channels are `x_osintwarfare, OSINTWarfare` — one
+  outlet on two transports, which distinct-channel counting scores as two independent sources. Same
+  for `x_osint613`/`osint613` and `x_geoconfirmed`/`GeoConfirmed`. Only the `fwd_from` channel-family
+  graph can see that, and it is out of scope here.
 
 
 #### `C6` — Country names resolve to national centroids via Nominatim and are marked is_geolocated=true
@@ -922,6 +1022,7 @@ re-checked against `de146f6`.
 **Ingest**
 
 - CRITICAL — cross-channel Telegram message_id collision silently drops history. telegram.py:214-218 `_message_already_saved` queries `select(Event.id).where(Event.telegram_message_id == message_id)` with no channel_name filter, while _get_checkpoint (:187) is correctly per-channel. Telegram message ids are per-chat and start near 1, so acr…
+  **Closed in *this commit*** — the guard reads `event_reports` and keys on `(channel, telegram_message_id)`, with a matching partial UNIQUE index so it is a database guarantee and not only a check-then-act. It was right about the mechanism and this audit could not price it: see the `C74` detail block and the Corrections log for the ~2,248-message expectation and for why ingest volume is not comparable across the change.
 - HIGH — RSS articles re-merge into themselves after every restart, inflating corroboration. news_feeds.py:424 gates on `_already_seen(art_url)`, which is backed by the in-memory `_seen_hashes: set[str]` at :237 and is empty on every process start. In _process_article the semantic dedup runs first (:348 check_duplicate, :356 merge_duplicate…
 - MEDIUM — ClassifierResult.clamp_severity (classifier.py:190-193) is dead code. `Field(default=5, ge=1, le=10)` at :179 enforces the range in Pydantic v2 before the mode='after' validator runs. Verified live in the container: ClassifierResult(severity=15), (severity=0) and (severity=-3) all raise ValidationError; only in-range values reach…
 - MEDIUM — the sentinel makes merge_duplicate's coordinate backfill unreachable. dedup.py:122 `if existing.lat is None and new_lat is not None:` is the only path that repairs an event's position, but telegram.py:272 and news_feeds.py:341 guarantee that an ungeocoded event has lat = -25.0, never None. So an event parked in the Indian Ocean c…
@@ -1067,12 +1168,17 @@ signal. See Measured facts.
 
 ### Phase 4 — Corroboration
 
-- [ ] Link, don't merge — `corroboration_link` + `cluster_id`, preserving both reports' text.
-      `killed_reported` now waits on this item specifically: since *this commit* an incoming count is
-      logged and dropped, and this table is the only place it can live beside the text that stated
-      it (`C74`, `C10`)
-- [ ] Channel family graph from `fwd_from`; collapse corroboration counts over `family_id`
-- [ ] Stop raising confidence for being copied
+- [ ] Link, don't merge — **half shipped in *this commit*, and the box stays unticked for the other
+      half.** `event_reports` preserves both reports' text, and `killed_reported` no longer waits on
+      anything: the count lives on the report row beside the text that stated it (`C10` closed,
+      `C74` narrowed). What is not built is the link *between events* — `cluster_id` and
+      `corroboration_link`. This table is parent-to-child only: N reports on one event, never two
+      events linked as reporting the same thing
+- [ ] Channel family graph from `fwd_from`; collapse corroboration counts over `family_id` —
+      **the reason `C11` stays open.** `x_osintwarfare` and `OSINTWarfare` are one outlet on two
+      transports and the distinct-channel count of *this commit* scores them as two
+- [ ] Stop raising confidence for being copied — the self-merge half shipped in *this commit* (the
+      boost gates on distinct channels, not on `report_count`); the reposting half needs the row above
 - [ ] Gold labels: ~350 events + ~300 candidate pairs, stratified; start now, they outlive every pipeline rewrite
 
 ---
@@ -1112,6 +1218,8 @@ document that silently edits away its own mistakes would fail its own standard.
 | This register is "updated in the same commit as the change it describes" — its own rule, line 3 | It was last updated **eight commits ago**, in `3c92466`; `e60c44d`, `e03cee6`, `51bdce9`, `0de11f2`, `bb1c80c`, `075ce6f`, `89c6f54` and `de146f6` all shipped without touching it, and that run of eight is the longest this document has had. Four of the twelve commits since `7ddbe58` created it *did* edit it (`de831ed`, `74f09f0`, `fc0c989`, `3c92466`) — and `fc0c989` exists only to correct stale hashes in it. The drift is real either way: the header claimed coverage through `74f09f0`, eleven fixed findings were still listed Open, the tally still said three criticals when there were none, and two whole subsystems (the connectivity layer, the Ollama backend) had never been mentioned. A register that drifts is a register that cannot be cited | A 47-agent audit re-checked the ledger against the tree and produced file:line evidence for every claim; each claimed fix was then re-verified against `de146f6` before its row moved. **This row's own first draft said "twelve commits"** — the count since the document was *created*, not since it was *updated*, and the same diff carried the disproof. `git log --oneline 7ddbe58..de146f6 -- conflict-monitor/docs/FINDINGS.md` returns four commits, one of them titled "Correct stale commit hashes in FINDINGS.md"; `git rev-list --count 3c92466..de146f6` returns 8. A correction that is itself wrong is the one failure this table cannot afford, so the commands stay in the row. The rule needs enforcing, not restating |
 | 39,981 events are pinned to the sentinel, and 1,667 (1.99%) carry a real name that still failed geocoding — two rows of Measured facts, quoted since `7ddbe58` | **39,949** and **1,635** (1.95%). Neither was a miscount. 39,981 came from a *modal-coordinate proxy*: `archive_locations.py` emits one coordinate per `location_name` and `geocoder_vs_archive.py` charges that name's whole event count to the sentinel, which misplaces **712** rows — 372 charged though they sit elsewhere, 340 on the point and never charged — netting to +32. The second row inherited the same proxy through a subtraction across two populations (`39,981 − 38,314`). **The percentage is what shielded the count**: 39,981 and 39,949 both round to 47.6%, so the figure a reader would spot-check was right while the number under it was wrong. A near-cancelling error is the more dangerous kind — it makes a name-level guess look like a row-level census | Counting the migration's own `WHERE lat = -25.0 AND lon = 80.0` row by row, then *replaying the proxy from the same read* so the two could be compared as estimators instead of one being called the other's typo (`tools/archive_sentinel_audit.py`) |
 | The classifier path on qwen3 is sound — it had just been measured at 568/568 `ok`, zero fallbacks | Measured on **qwen3:8b**, the one model of the family that masks the defect. Every qwen3 on this host reports the `thinking` capability; with it on the reasoning goes to a separate field, `response` comes back **empty**, and `num_predict` — a budget meant for the answer — is spent on reasoning that is then discarded. `qwen3.8-27b:latest` produced 3/3 `parse_failed`, every one logging `got: ''`. `"think": False` fixes it (`949aca8`). **The measurement that would have caught this had been taken on the model that hides it**, and a second model of the same family was the cheapest test available and had never been run | Changing `OLLAMA_MODEL` and reading the log line instead of trusting the 0.00%. Phase 0 paid for itself here: the rows said `parse_failed` with severity NULL and `extraction_model` naming the model that failed, rather than carrying a fabricated severity 5 — the failure was legible the moment it happened |
+| 8.7% of the archive has `report_count > 1`, "up to 6" — a Measured facts row quoted since `7ddbe58` | **8.16%** (6,848 rows), and up to **214**. Neither half survived a direct count of the column. The ceiling was not close: 68 distinct values above 6, and the top row is one `x_osintwarfare` article claiming 214 reports. The rate is the more interesting error — `(6,848 + 480)/83,938 = 8.73%`, and 480 is exactly the number of rows whose `report_count` is **0**, a value no writer in this tree can produce (`models.py` defaults to 1, `dedup.py` only increments). So the published figure almost certainly counted rows that claim *zero* reports as rows with *more than one*, and the two errors pointed the same way. The 480 are themselves a state-1/state-2 confusion already on disk and are recorded rather than repaired, on the precedent `main.py` already set for the severity-5 rows: "that one needs a decision, not a startup migration" | Printing the whole distribution instead of a predicate. `tools/archive_report_counts.py` §1 — the two numbers sit four lines apart in its output, which is why the first run of it caught this |
+| Ingest volume and reliability scores are comparable across commits unless something says otherwise — never stated, which is how an assumption survives | **Neither is comparable across *this commit*, in opposite directions.** (1) `_message_already_saved` was keyed on `telegram_message_id` alone while Telegram ids are per-channel, so it has been dropping genuinely-new messages from a second channel — on the order of **2,248 of 49,369, ~4.5%**, by an expectation the archive cannot verify directly because the dropped messages are the rows that are missing. Re-keyed on `(channel, message_id)`, the monitor now ingests them, so a step upward in message volume is this change and not the world. (2) The reliability boost now gates on distinct channels rather than `report_count`: **95.1%** of the 2,794 boosts in the archive (2,656 of them) would not have qualified, so pre- and post-cutover `source_reliability` are two different rules sharing one column, and `min_reliability` on `GET /events` mixes them until old rows age out. History is deliberately **not** recomputed — the boost is not invertible and the historical channel set comes from a string `C78` shows is under-counted, so recomputing would fabricate. And it is not only old scores: the new gate counts what the table holds, so a pre-cutover row's FUTURE boosts are suppressed too: it starts with one report row however many channels reported it, so it needs two further reports from genuinely new channels before it can boost. It does **not** wait for `report_count - count(reports)` to reach 0 — that difference is invariant after cutover, since every later merge increments both sides. It is a fixed marker of how many reports' text was destroyed before this table existed, not a countdown — a separate claim from this one, priced in `C11`. The free marker for "this score can be defended from rows you can read" is `report_count - count(reports) = 0` | Writing the consequence down before shipping it, because the previous two rows of this table are both cases of a number changing quietly. On the dev database the marker already reads what it should: 59 of 159 rows at 0, and 100 rows at 1–4 — RSS articles merged before the table existed, whose text is gone |
 | qwen3 returns `location_name = "Unknown"` noticeably more often than Haiku did, and is "now measurable because `extraction_model` exists" — `de146f6`'s commit message, carried into Measured facts | Still unquantified, and **not measurable from the archive at all**. The 2026-08-18 dump has no `extraction_status` and no `extraction_model` column, so its 45.6% cannot be decomposed into Haiku-classified rows and rows where no classification happened and `_build_fallback`'s regex supplied the location. What *was* measured is a different pair: on 568 identical rows, qwen3.8-27b returns `Unknown` at 8.9% against qwen3:8b's 17.5%, intervals non-overlapping. That bears on model fit and **not** on Haiku, so **no winner is declared** — the claim is neither confirmed nor refuted, and settling it needs the key over that same sample. The error worth recording is not the direction of the claim but its status: an impression was written down as a known fact with the word "measurable" attached, and the measurement it named could not be taken | Trying to take it. The tool got as far as needing `extraction_status` on the archive side and found the column absent from the COPY header |
 
 ---
@@ -1142,6 +1250,7 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-19 | `e0732ac` | Reconcile this register with the tree it claims to describe: eleven fixed findings were still listed Open, the header was eight commits stale, and two whole subsystems had never been mentioned |
 | 2026-09-20 | `fe5d2d4` | Record the live verification of `killed_reported` - migration, classification and the merge policy exercised against a running stack; `C74` given its measured margin |
 | 2026-09-20 | `949aca8` | Switch the classifier to **qwen3.8-27b:latest** and send `"think": False` — a thinking model puts its reasoning in a separate field and returns an empty `response`, so every row came back `parse_failed`. qwen3:8b answered anyway, which is why the defect was invisible while only the small model ran |
-| 2026-09-20 | *this commit* | Close out Phase 0: the fallback rate measured and bounded on 568 archive messages for **both** models, the sentinel migration audited before it runs, the "one week" line split into the half that is measured and the half only wall clock can reach, and two long-standing register numbers corrected to the estimator that produced them (`C75`) |
-| 2026-09-20 | *this commit* | Run the sentinel migration against a restored copy of the archive: 39,949 rows retired, exactly as predicted; geolocation 100% -> 52.4%; idempotency demonstrated. Phase 0's last un-run item closed |
-| 2026-09-20 | *this commit* | `merge_duplicate` stops writing `killed_reported`: the column becomes a pure function of this row's own `raw_text`, and an incoming count is logged as dropped rather than stored. Narrows `C74`, opens `C76` and `C77`; the match is exactly as loose as it was |
+| 2026-09-20 | `0051932` | Close out Phase 0: the fallback rate measured and bounded on 568 archive messages for **both** models, the sentinel migration audited before it runs, the "one week" line split into the half that is measured and the half only wall clock can reach, and two long-standing register numbers corrected to the estimator that produced them (`C75`) |
+| 2026-09-20 | `9539eb2` | Run the sentinel migration against a restored copy of the archive: 39,949 rows retired, exactly as predicted; geolocation 100% -> 52.4%; idempotency demonstrated. Phase 0's last un-run item closed |
+| 2026-09-20 | `ce5d994` | `merge_duplicate` stops writing `killed_reported`: the column becomes a pure function of this row's own `raw_text`, and an incoming count is logged as dropped rather than stored. Narrows `C74`, opens `C76` and `C77`; the match is exactly as loose as it was |
+| 2026-09-20 | *this commit* | `event_reports`: one row per incoming report, written at both insert sites and inside the merge's own transaction, so no contributing report loses its text, its URL, its message id, its stated death toll or the classifier status that says whether anything ever looked for one — `killed_reported` NULL is three-valued and `extraction_status` on the same row is what tells the three apart. Both dedup guards move onto it — and `_message_already_saved` is re-keyed on `(channel, message_id)`, which it never was. The `IntegrityError` its UNIQUE index raises is caught in `_process_message`, because uncaught it ended the whole channel sweep; the backfill gets its own transaction, and the 16 schema statements around it log their failures instead of passing in silence. The reliability boost gates on distinct channels instead of `report_count`, a count that is a floor bounded by what the table holds. Closes `C10`, narrows `C11` and `C74`, opens `C78` and `C79`. Four Measured-facts numbers corrected or added, with `tools/archive_report_counts.py` behind them |

@@ -51,7 +51,7 @@ from shapely.geometry import Point
 from sqlalchemy import select
 
 from app.db import async_session
-from app.models import Event
+from app.models import Event, EventReport
 from app.services.broadcaster import broadcaster
 from app.schemas import EventRead, EventWS
 from app.services.classifier import classify_message
@@ -318,17 +318,25 @@ async def _process_article(
     if len(full_text) < 20:
         return
 
-    # Already stored under this URL? Then this article has been all the way
-    # through the pipeline before — a restart empties _seen_hashes, so every
-    # stored URL comes round again. Checked BEFORE classifying, because the old
-    # order classified first and threw the result away further down: one GPU
+    # Already seen this URL? Then this article has been all the way through the
+    # pipeline before — a restart empties _seen_hashes, so every stored URL
+    # comes round again. Checked BEFORE classifying, because the old order
+    # classified first and threw the result away further down: one GPU
     # inference per stored article per restart (~105 measured), and worse, the
     # re-seen article reached the semantic-duplicate check first and could merge
     # into some other row, inflating its report_count for an article already in
     # the table.
+    #
+    # That last sentence was a prediction when it was written, and the archive
+    # confirms it: 17,450 of the 19,027 reports merge destroyed are RSS, and
+    # the tail is 214 / 167 / 130 report_counts on single articles. It survived
+    # the first fix because the guard read `events.source_url`, and a MERGED
+    # article writes no events row — so exactly the case the comment describes
+    # was the one case the query could not see. Reading event_reports closes it:
+    # there is a row per report now, merged ones included.
     async with async_session() as session:
         stored = await session.execute(
-            select(Event.id).where(Event.source_url == url).limit(1)
+            select(EventReport.id).where(EventReport.source_url == url).limit(1)
         )
         if stored.scalar_one_or_none() is not None:
             return
@@ -360,6 +368,23 @@ async def _process_article(
         lat = lon = geometry = None
         is_geolocated = False
 
+    # Built before the duplicate check, because it is a fact about THIS article
+    # whichever event it turns out to belong to.
+    report = EventReport(
+        source=f"rss_{source_name}",
+        channel=source_name,
+        raw_text=full_text,
+        summary=result.get("summary", full_text[:200]),
+        source_url=url,
+        telegram_message_id=None,
+        killed_reported=result.get("killed_reported"),
+        # Beside the count, from the same result, so a NULL count on this row
+        # can be read as "the article stated none" or "the classifier never
+        # produced one" — see models.py.
+        extraction_status=result.get("extraction_status"),
+        reported_at=published,
+    )
+
     async with async_session() as session:
         # Check for semantic duplicates
         existing = await check_duplicate(
@@ -383,14 +408,12 @@ async def _process_article(
                     result.get("extraction_status"),
                 )
                 severity = None
-            # killed_reported is passed but never written to the row — see
-            # merge_duplicate. The count is logged against the event, with the
-            # article text that stated it, and stays with the report whose text
-            # that is.
-            await merge_duplicate(
-                session, existing, source_name, severity,
-                result.get("killed_reported"),
-            )
+            # The whole article is kept: merge_duplicate stores it as a report
+            # row on this event, in the same transaction as the counter it
+            # bumps. The incoming killed_reported rides on that row, beside the
+            # article text that stated it; existing.killed_reported is still
+            # never written.
+            await merge_duplicate(session, existing, report, severity)
             ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
             await broadcaster.broadcast(ws_payload.model_dump_json())
             return
@@ -420,6 +443,12 @@ async def _process_article(
             geo_method=geo.method if geo else None,
         )
         session.add(db_event)
+        # flush, not commit: db_event.id does not exist until the INSERT runs,
+        # and the report needs it. One commit still covers both, so an event is
+        # never on disk without its first report.
+        await session.flush()
+        report.event_id = db_event.id
+        session.add(report)
         await session.commit()
         await session.refresh(db_event)
 
