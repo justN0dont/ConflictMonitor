@@ -5,7 +5,17 @@ const MAX_EVENTS = 200;
 const RECONNECT_DELAY = 3000;
 const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
 const WS_URL = API_BASE.replace(/^http/, "ws") + "/ws/events";
-const REST_URL = `${API_BASE}/events?limit=50`;
+// Fetch what this client is willing to hold. MAX_EVENTS has been 200 since
+// this hook was written, but the initial fetch asked for 50, so the store was
+// capped at a quarter of its own limit by a number nobody reconciled.
+//
+// It reads as the project's own bug class on the widest element on screen:
+// TimelineScrubber draws its axis from /events/time-range, which spans the
+// WHOLE table, and its ticks from this array. Fetching 50 of 200 therefore
+// rendered most of that axis as empty space -- "nothing happened" standing in
+// for "this client asked for 50". The route accepts up to 500
+// (routes/events.py:31); 200 is MAX_EVENTS, so the two now agree.
+const REST_URL = `${API_BASE}/events?limit=${MAX_EVENTS}`;
 
 export function useEventStream() {
   const [events, setEvents] = useState<ConflictEvent[]>([]);
