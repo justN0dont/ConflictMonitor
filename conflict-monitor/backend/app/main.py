@@ -29,8 +29,15 @@ def _log_task_exception(task: asyncio.Task) -> None:
         logger.error("Background task died: %r", exc, exc_info=exc)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+async def run_startup_migrations(engine):
+    """Schema repair and the two one-off data migrations, run once at boot.
+
+    A pure move out of `lifespan`, which is still its only production caller.
+    It is a separate function so it can be driven against a throwaway database
+    on its own: entering `lifespan` also starts five network pollers, so a test
+    for the sentinel retirement or the backfill could otherwise only be written
+    against a COPY of these statements — which would verify the copy.
+    """
     # Create tables (replaced by Alembic in production)
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
@@ -252,6 +259,11 @@ async def lifespan(app: FastAPI):
         ))
 
     logger.info("Database tables ready")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await run_startup_migrations(engine)
 
     tasks: list[asyncio.Task] = []
 

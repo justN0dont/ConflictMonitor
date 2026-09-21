@@ -100,6 +100,20 @@ cp .env.example .env
 docker-compose up
 ```
 
+## Tests
+
+```bash
+docker compose up -d db
+docker compose run --rm -T --no-deps -e LLM_BACKEND=none backend pytest
+```
+
+Runs in the backend container against a throwaway `conflict_monitor_test`
+database, created and dropped by the suite; the dev database is never opened.
+`-e LLM_BACKEND=none` and the network ban in `backend/tests/conftest.py` mean
+no test can reach Ollama, Anthropic or Nominatim — an attempt is a failure with
+a stack trace, not a skip. Seconds, not minutes. There is no CI: this runs when
+someone types it.
+
 ## Environment Variables
 
 | Variable | Required | Description |

@@ -13,3 +13,4 @@ frontend/dist/
 *.tsbuildinfo
 .cache/
 backend/.cache/
+.pytest_cache/
