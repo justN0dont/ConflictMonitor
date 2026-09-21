@@ -4,6 +4,7 @@ import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingStatus, JammingZone, TLERecord, TrackHistory, Vessel } from "../hooks/useTracking";
 import { GlobeView } from "./GlobeView";
 import { CesiumView } from "./CesiumView";
+import { isLocated } from "../lib/located";
 import { EVENT_TYPES, eventVisual, formatUncertainty, geoPrecision } from "../lib/tokens";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
@@ -169,22 +170,10 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
     MAPBOX_TOKEN ? "2d" : "globe",
   );
 
-  // One definition of "located", shared with the feed (LiveFeed.geoMissing).
-  //
-  // A null coordinate is not the only way a row can be unlocated. Every event
-  // written before the sentinel was retired carries (-25.0, 80.0) - open
-  // ocean south-west of Australia - with is_geolocated false. Filtering on
-  // lat/lon alone drew each of those in the Indian Ocean while the feed
-  // labelled the same row NOT GEOLOCATED and the counter below reported zero:
-  // three surfaces, two definitions. is_geolocated is the row's own statement
-  // about whether it was ever placed, so it decides here too.
-  const geoEvents = useMemo(
-    () =>
-      events.filter(
-        (e) => e.lat != null && e.lon != null && e.is_geolocated !== false,
-      ),
-    [events],
-  );
+  // One definition of "located", now held in lib/located.ts so the globe reads
+  // the same one rather than its own. The feed states it as its negation
+  // (LiveFeed.geoMissing).
+  const geoEvents = useMemo(() => events.filter(isLocated), [events]);
 
   // Events in the current window that have no resolved coordinates. They are
   // deliberately absent from the map - there is no placeholder position - but

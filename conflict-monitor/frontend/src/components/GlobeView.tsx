@@ -13,7 +13,8 @@ import {
 import type { EciVec3, SatRec } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
-import { eventVisual } from "../lib/tokens";
+import { isLocated } from "../lib/located";
+import { eventVisual, geoPrecision } from "../lib/tokens";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -21,9 +22,63 @@ import { eventVisual } from "../lib/tokens";
 
 const EARTH_RADIUS = 1;
 
+/**
+ * Precision halo size: radians of arc on the globe per unit of the shared
+ * GEO_PRECISION `spread`. The tiers and their order come from that one table in
+ * lib/tokens.ts; this constant only says how much globe a unit of it is worth.
+ *
+ * IT ENCODES THE TIER, NOT THE METRES. It is categorical. Every country_centroid
+ * draws the same cap whether its row says +/-121 km or +/-1,759 km. Do not read
+ * a distance off it and do not let a later change quietly turn it into a scale.
+ *
+ * Denominating the cap in the row's real geo_uncertainty_m was the first choice
+ * and the held data ruled it out: one country_centroid row carries
+ * +/-20,320,227 m, which is further than the 20,015 km that is the greatest
+ * distance any two points on Earth can be apart. Drawn true to size that row is
+ * a translucent shell over the whole planet, and it would bury the other 95
+ * marks. A real-distance mark needs an out-of-range treatment designed first,
+ * which is a bigger job than this step carries - so the mark stays categorical
+ * and says so here.
+ *
+ * What it does not do is repeat MapPanel's defect. MapPanel's disc is measured
+ * in screen pixels, so its country-level disc covers about 160 km at the opening
+ * view and about 220 m zoomed in while the row's uncertainty never moves. A cap
+ * in radians is fixed to the sphere: it covers the same ground at every zoom.
+ *
+ * Chosen so the coarsest tier (spread 46) draws about 0.1 rad, roughly 640 km of
+ * arc - inside the country_centroid range rather than flattering it.
+ */
+const PRECISION_ARC_PER_SPREAD = 0.0022;
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/**
+ * prefers-reduced-motion, read from JS.
+ *
+ * C49: this scene's motion is frame loops - autoRotate, the severity pulse, the
+ * position lerps - and a CSS media query cannot reach a frame loop, so the rule
+ * the rest of the app obeys in CSS never applied here at all. matchMedia reads
+ * the same query from where the loops live. It is subscribed to rather than
+ * sampled once at mount, because the setting can change while the page is open
+ * and an answer that is only right at mount is the same kind of stale claim
+ * this view is being cleaned of.
+ */
+function usePrefersReducedMotion(): boolean {
+  const query = "(prefers-reduced-motion: reduce)";
+  const [reduced, setReduced] = useState(() => window.matchMedia(query).matches);
+
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setReduced(mq.matches);
+    setReduced(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  return reduced;
+}
 
 function latLonToVec3(
   lat: number,
@@ -198,13 +253,50 @@ function GeoLines({
 // Event markers (pulsing for high severity)
 // ---------------------------------------------------------------------------
 
-function EventMarker({ evt }: { evt: ConflictEvent }) {
+function EventMarker({
+  evt,
+  reducedMotion,
+}: {
+  evt: ConflictEvent;
+  reducedMotion: boolean;
+}) {
   const meshRef = useRef<THREE.Mesh>(null);
   const pos = useMemo(
     () => latLonToVec3(evt.lat!, evt.lon!, EARTH_RADIUS * 1.005),
     [evt.lat, evt.lon],
   );
   const color = eventVisual(evt.event_type).color;
+
+  // How big the coordinate's claim is, from the same GEO_PRECISION table the 2D
+  // map reads. A facility fix and a country centroid used to draw the identical
+  // dot here: severity was the only channel this view had, so the globe said
+  // "here" about a point it only knew to a country. Every tier with a non-zero
+  // `spread` now carries a cap of globe under it; only facility (spread 0)
+  // draws none. That is keyed off `spread` rather than the table's `coarse`
+  // flag, so `city` gets a small cap too even though the table calls it not
+  // coarse - said plainly here because the two are easy to confuse.
+  //
+  // A null tier means the precision was NEVER MEASURED, and that is not the
+  // same claim as facility. Drawing no cap is right - there is no extent to
+  // state - but drawing the same solid point as a +/-500 m facility fix would
+  // say the globe knows the position exactly, which is the state-2-as-state-1
+  // error this whole change exists to remove, reintroduced in a new channel.
+  //
+  // MapPanel draws these HOLLOW (MapPanel.tsx:136-154: transparent background,
+  // 1px border, no glow - "the position is shown, the extent is left
+  // unstated"). The globe says the same thing in its own medium: a wireframe
+  // sphere. Position shown, extent unstated, and visibly not a facility.
+  const spec = geoPrecision(evt.geo_precision);
+  const capArc = (spec?.spread ?? 0) * PRECISION_ARC_PER_SPREAD;
+  // SphereGeometry's cap opens around +Y, so turn +Y to face the event.
+  const capQuat = useMemo(
+    () =>
+      new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(...pos).normalize(),
+      ),
+    [pos],
+  );
   // severity is null when it was never measured. JS coerces null to 0, so
   // `evt.severity * 0.0008` silently drew an unmeasured event at the smallest,
   // least alarming size on the scale - a measurement it never made. A size
@@ -214,29 +306,60 @@ function EventMarker({ evt }: { evt: ConflictEvent }) {
   const size = 0.003 + (evt.severity ?? 0) * 0.0008;
 
   useFrame(({ clock }) => {
-    if (meshRef.current && evt.severity != null && evt.severity >= 7) {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    if (reducedMotion) {
+      // Also undoes a pulse caught mid-stride when the setting changes.
+      mesh.scale.setScalar(1);
+      return;
+    }
+    if (evt.severity != null && evt.severity >= 7) {
       const s = 1 + Math.sin(clock.elapsedTime * 3) * 0.25;
-      meshRef.current.scale.setScalar(s);
+      mesh.scale.setScalar(s);
     }
   });
 
   return (
-    <mesh ref={meshRef} position={pos}>
-      <sphereGeometry args={[size, 10, 10]} />
-      <meshBasicMaterial color={color} transparent opacity={unmeasured ? 0.45 : 0.95} />
-    </mesh>
+    <group>
+      {capArc > 0 && (
+        <mesh quaternion={capQuat}>
+          <sphereGeometry
+            args={[EARTH_RADIUS * 1.004, 24, 12, 0, Math.PI * 2, 0, capArc]}
+          />
+          <meshBasicMaterial
+            color={color}
+            transparent
+            opacity={0.13}
+            side={THREE.DoubleSide}
+            depthWrite={false}
+          />
+        </mesh>
+      )}
+      <mesh ref={meshRef} position={pos}>
+        <sphereGeometry args={[size, 10, 10]} />
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={unmeasured ? 0.45 : 0.95}
+          wireframe={spec == null}
+        />
+      </mesh>
+    </group>
   );
 }
 
-function EventMarkers({ events }: { events: ConflictEvent[] }) {
-  const geoEvents = useMemo(
-    () => events.filter((e) => e.lat != null && e.lon != null),
-    [events],
-  );
+/** `located` is already filtered by lib/located.ts - this draws what it is given. */
+function EventMarkers({
+  located,
+  reducedMotion,
+}: {
+  located: ConflictEvent[];
+  reducedMotion: boolean;
+}) {
   return (
     <group>
-      {geoEvents.map((evt) => (
-        <EventMarker key={evt.id} evt={evt} />
+      {located.map((evt) => (
+        <EventMarker key={evt.id} evt={evt} reducedMotion={reducedMotion} />
       ))}
     </group>
   );
@@ -251,7 +374,13 @@ interface AircraftDot {
   target: THREE.Vector3;
 }
 
-function AircraftLayer({ aircraft }: { aircraft: Aircraft[] }) {
+function AircraftLayer({
+  aircraft,
+  reducedMotion,
+}: {
+  aircraft: Aircraft[];
+  reducedMotion: boolean;
+}) {
   const dotsRef = useRef<Map<string, AircraftDot>>(new Map());
   const meshRefs = useRef<Map<string, THREE.Mesh>>(new Map());
 
@@ -279,10 +408,12 @@ function AircraftLayer({ aircraft }: { aircraft: Aircraft[] }) {
     }
   }, [airborne]);
 
-  // Interpolate each frame
+  // Interpolate each frame. Under reduced motion the factor is 1, which lands on
+  // the new position immediately: the aircraft still moves when the data moves,
+  // it just does not glide there.
   useFrame(() => {
     dotsRef.current.forEach((dot, key) => {
-      dot.current.lerp(dot.target, 0.06);
+      dot.current.lerp(dot.target, reducedMotion ? 1 : 0.06);
       const mesh = meshRefs.current.get(key);
       if (mesh) mesh.position.copy(dot.current);
     });
@@ -451,7 +582,13 @@ function SatelliteLayer({ tleData }: { tleData: TLERecord[] }) {
 // Maritime vessel layer
 // ---------------------------------------------------------------------------
 
-function VesselLayer({ vessels }: { vessels: Vessel[] }) {
+function VesselLayer({
+  vessels,
+  reducedMotion,
+}: {
+  vessels: Vessel[];
+  reducedMotion: boolean;
+}) {
   const dotsRef = useRef<Map<string, { current: THREE.Vector3; target: THREE.Vector3 }>>(new Map());
   const meshRefs = useRef<Map<string, THREE.Mesh>>(new Map());
 
@@ -475,7 +612,7 @@ function VesselLayer({ vessels }: { vessels: Vessel[] }) {
 
   useFrame(() => {
     dotsRef.current.forEach((dot, key) => {
-      dot.current.lerp(dot.target, 0.06);
+      dot.current.lerp(dot.target, reducedMotion ? 1 : 0.06);
       const mesh = meshRefs.current.get(key);
       if (mesh) mesh.position.copy(dot.current);
     });
@@ -578,14 +715,23 @@ function JammingLayer({ zones }: { zones: JammingZone[] }) {
 // ---------------------------------------------------------------------------
 
 interface SceneProps {
-  events: ConflictEvent[];
+  /** Already filtered by lib/located.ts. */
+  located: ConflictEvent[];
   aircraft: Aircraft[];
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingZones: JammingZone[];
+  reducedMotion: boolean;
 }
 
-function Scene({ events, aircraft, vessels, tleData, jammingZones }: SceneProps) {
+function Scene({
+  located,
+  aircraft,
+  vessels,
+  tleData,
+  jammingZones,
+  reducedMotion,
+}: SceneProps) {
   return (
     <>
       <ambientLight intensity={0.3} />
@@ -594,7 +740,7 @@ function Scene({ events, aircraft, vessels, tleData, jammingZones }: SceneProps)
       <OrbitControls
         makeDefault
         target={[0, 0, 0]}
-        autoRotate
+        autoRotate={!reducedMotion}
         autoRotateSpeed={0.08}
         enablePan={false}
         enableDamping
@@ -616,9 +762,9 @@ function Scene({ events, aircraft, vessels, tleData, jammingZones }: SceneProps)
       <GeoLines url="/textures/countries.json" color="#1e4060" lineWidth={0.6} opacity={0.3} />
 
       {/* Data layers */}
-      <EventMarkers events={events} />
-      <AircraftLayer aircraft={aircraft} />
-      <VesselLayer vessels={vessels} />
+      <EventMarkers located={located} reducedMotion={reducedMotion} />
+      <AircraftLayer aircraft={aircraft} reducedMotion={reducedMotion} />
+      <VesselLayer vessels={vessels} reducedMotion={reducedMotion} />
       <SatelliteLayer tleData={tleData} />
       <JammingLayer zones={jammingZones} />
     </>
@@ -638,6 +784,13 @@ interface GlobeViewProps {
 }
 
 export function GlobeView({ events, aircraft, vessels, tleData, jammingZones }: GlobeViewProps) {
+  const reducedMotion = usePrefersReducedMotion();
+
+  // The same predicate the 2D map uses, from the same module, so the two views
+  // can no longer disagree about which events exist.
+  const located = useMemo(() => events.filter(isLocated), [events]);
+  const unlocatedCount = events.length - located.length;
+
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
       <Canvas
@@ -651,13 +804,59 @@ export function GlobeView({ events, aircraft, vessels, tleData, jammingZones }: 
         gl={{ antialias: true, alpha: false }}
       >
         <Scene
-          events={events}
+          located={located}
           aircraft={aircraft}
           vessels={vessels}
           tleData={tleData}
           jammingZones={jammingZones}
+          reducedMotion={reducedMotion}
         />
       </Canvas>
+
+      {/*
+        What the globe is not drawing.
+
+        Switching to GLOBE used to drop more than half the window - 104 of 200
+        events at the time of writing - with nothing on screen to say so, which
+        reads as "nothing happened there" when the truth is "these were never
+        placed". The 2D legend has carried this count for a while; the globe is
+        not a place the disclosure gets to lapse.
+
+        It is not the 2D legend pasted over the scene: no panel, no border, no
+        swatch - unboxed mono text over the starfield, opposite the legend so
+        neither crowds the other. And it states the disclaimer on screen rather
+        than hiding it in a hover title, because there is no cursor affordance
+        over a rotating canvas to suggest hovering. pointerEvents is off so it
+        never swallows a drag meant for the globe.
+      */}
+      {unlocatedCount > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 16,
+            right: 16,
+            zIndex: 10,
+            textAlign: "right",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            letterSpacing: 0.5,
+            lineHeight: 1.6,
+            textTransform: "uppercase",
+            color: "var(--text-muted)",
+            textShadow: "0 0 6px rgba(3, 5, 8, 0.95)",
+            pointerEvents: "none",
+          }}
+        >
+          {/* Name the noun. The globe is simultaneously drawing aircraft and
+              vessels in the hundreds or thousands, so a bare "104 of 200"
+              beside those counts invites the reader to attach it to the wrong
+              feed. It counts EVENTS. */}
+          <div style={{ color: "var(--text-secondary)" }}>
+            {unlocatedCount} of {events.length} events not drawn
+          </div>
+          <div>never placed — no position invented</div>
+        </div>
+      )}
     </div>
   );
 }
