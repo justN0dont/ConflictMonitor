@@ -46,6 +46,12 @@ class EventRead(BaseModel):
     geo_precision: str | None = None
     geo_uncertainty_m: int | None = None
     geo_method: str | None = None
+    # The words in raw_text that spell location_name. "" means something looked
+    # and found none — the place is not quotable from this text, which is not
+    # the same as the place being invented. null means nothing has looked yet.
+    # Consumers must not render "" as a quote, and must not read it as a
+    # warning about the location either; models.py carries the full contract.
+    evidence_span: str | None = None
 
     model_config = {"from_attributes": True}
 

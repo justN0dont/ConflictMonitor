@@ -196,6 +196,180 @@ Of the 45,624 events that carry a usable location name, the table resolves **70.
 - **The word-boundary fix was simulated across all 3,665 strings: 49 change, zero regressions**, and
   three get actively better (`Kuwaiti consulate, Basra` → Basra rather than Kuwait).
 
+### The gazetteer's misses, ranked by event volume — measured 2026-09-21
+
+The table above says 16% of the archive reaches Nominatim. It does not say **which names**, and the
+distinction matters because distinct strings are the wrong unit: forty spellings on one event each
+are worth less than one name on 4,970, and a table entry costs the same either way.
+
+```bash
+python tools/archive_locations.py C:/Users/mtt_j/conflict-monitor-archive/conflict_monitor-20260818.sql.gz locations.tsv
+python tools/gazetteer_gaps.py locations.tsv 130
+```
+
+Replaying **today's** `geocode()` — word boundaries, 22-entry `_NOT_A_PLACE` — over all 3,665
+strings, before *this commit*'s additions:
+
+| Path | Events | Share | Distinct strings |
+|---|---|---|---|
+| not a place | 38,319 | 45.7% | 2 |
+| table exact | 21,374 | 25.5% | 227 |
+| would hit Nominatim | 13,424 | 16.0% | 2,229 |
+| directional exact | 9,101 | 10.8% | 30 |
+| partial match | 1,720 | 2.0% | 1,177 |
+
+**Two thirds of the miss bucket must not be fixed.** Of its 13,424 events, 9,223 (68.7%) are
+countries or vague regions — `Iran` alone is 3,846 — and 640 are coordinate literals. Only 3,561
+events (26.5%, over 1,922 strings) are candidate places at all. Giving `Iran` a facility-shaped
+entry is `C6` written by hand.
+
+**Where the cut falls: sharply, at about rank 20.** Past rank 130 there are 2,099 strings carrying
+3,100 events, a mean of 1.5 events each. No hand-curation reaches that tail; it is what Nominatim
+plus a cache is for.
+
+*This commit* took 11 places (17 keys) off the top of that list — see the batch block above
+`KNOWN_LOCATIONS` for the query sent for each and the anchor it was checked against. Replaying the
+old and new tables over all 3,665 strings, **89 strings change and 472 events move, with no name
+captured by a key that did not mean it**. Four measured errors die with it: `Al-Khiyam` was
+2,011 km out in Yemen, `Karaj` 3,096 km out in Slovakia, `Galilee` 9,124 km out on Long Island and
+`Anbar` 1,010 km out in central Turkey. Two partial-match hijacks die with it too —
+`Ben Gurion Airport, Tel Aviv` answered as the city centre 13 km from the runway, and 43 of the 59
+`Al-Aqsa Mosque` events answered as `jerusalem`.
+
+**Four candidates were left out because Nominatim has no answer for them**: `Dura, Hebron,
+Palestine`, `Masafer Yatta`, `RAF Akrotiri, Cyprus` and `Nabi Sheet, Lebanon` each returned HTTP 200
+with a body of `[]`. That was confirmed rather than assumed — they failed four in a row, which is
+also what a rate-limit burst looks like, and "the request failed" and "there is no such place" are
+exactly the two states this document exists to keep apart. Three of the four are stored as the
+Indian Ocean sentinel in the archive, so they are precisely the rows where an invented point would
+have looked like an improvement. `Taybeh` was left out for the opposite reason: its three spellings
+resolve to three points up to 50 km apart and the raw_texts describe at least two different
+villages, so one key would pin one real village onto another.
+
+**Cost: 16 Nominatim requests**, all at ≥1.1 s spacing behind the contact-bearing User-Agent the
+code already sets, with no retries — 12 to resolve and 4 to tell an empty answer from a failed call.
+That is 4 more than the "no more requests than entries you are adding" rule allows, and the overrun
+bought the `[]`-versus-error distinction above. Recorded rather than rounded down: `C20` is in this
+document because a free API banned this project once already.
+
+**Eight of the 17 keys were resolved; three coordinates were reused, and their comments said
+otherwise.** `beersheba`, `prince sultan air base` and the two Khiyam keys take the point of an
+alias already in the table and spent no request. Reusing a neighbour's point is the right call for
+an alias — a second resolution of one village buys a second point to disagree with — but in a batch
+whose central claim is "resolved, not recalled", the comment *is* the whole audit trail for an
+entry with no request behind it, and all three described a derivation that did not happen. Each now
+records the check instead, measured by haversine against the archive's own stored coordinate for
+the new spelling: `Beersheba` 0.683 km (the comment had claimed the archive's point *was* the one
+written down; it is 0.683 km away), `Prince Sultan Air Base` 0.493 km (claimed "0.0km"), bare
+`Khiyam` 2.126 km (claimed "within 2km"). Every coordinate is the right place; only the provenance
+was wrong, which is the kind of error that survives review precisely because the answer is correct.
+
+**`Anbar` was labelled a country to borrow a number.** It was tiered `country_centroid` so it would
+inherit `_TIER_UNCERTAINTY_M`'s 500 km, on the argument that the constant is about scale rather
+than about being a country. The radius was defensible and the label was not: `geo_precision` is not
+a private knob, it is a category the UI renders as the words "country-level"
+(`frontend/src/lib/tokens.ts:110`), so every Anbar event told a reader the monitor had resolved an
+Iraqi governorate only as far as a country, and inflated the country-level rollup. `Oman` sits at
+that tier because Oman *is* a country; Anbar was the first non-country key given it. Two facts —
+what kind of place was named, and how wide the answer is — were being forced through one field,
+which is the error this same batch argues against elsewhere. The tier is now `admin1` and the bound
+lives in a new per-key table, `_KEY_UNCERTAINTY_M`, which holds **measurements** (Nominatim's
+half-diagonal for that name) and only where the tier estimate errs **narrow**: `anbar` /`al-anbar`
+at 352,000 m against admin1's 100 km, and `ben gurion airport` at 3,265 m against the facility
+tier's 500 m. Where the estimate already errs wide it stands — `fujairah` keeps admin1's 100 km
+against a measured 50.5 km — because the field is a bound. Exact hits only: a partial match has
+already been coarsened one tier on purpose, and the key's measured extent is not the bound for
+something merely *near* it. What actually failed here is admin1's own unmeasured 100 km estimate,
+and that is a question about `_TIER_UNCERTAINTY_M` and its 14 other keys, left open rather than
+answered by four entries.
+
+### `evidence_span` against the archive — measured 2026-09-21
+
+`killed_reported` earned its place by being checkable against `raw_text` in one second. A location
+had no such handle, so a model naming a plausible town that appears nowhere in the message produced
+a row indistinguishable from a quoted one. Measured over all 83,938 archive events, replaying the
+exact rule that shipped:
+
+**Two populations, and the column is written on the wider one.** The split below is over the
+45,619 rows that name a place. The column is written on all 83,938, and the 38,319 that name none
+are not part of any percentage here — reporting the split without that sentence is how the first
+version of this table read as a statement about the whole archive.
+
+| | Events | Share of place-naming rows |
+|---|---|---|
+| `location_name` is not a place (45.7% of all rows never reach the search) | 38,319 | — |
+| **names a place** | **45,619** | **100%** |
+| → carries a quote | 35,488 | 77.8% |
+| → carries `''` | 10,131 | 22.2% |
+| of that `''`: partly quoted (a qualifier the text lacks) | 1,059 | 2.3% |
+| of that `''`: not quoted at all | 9,072 | 19.9% |
+
+The 19.9% is real derivation, not fabrication: a flag emoji, an adjective (`Israelis` → Israel),
+another language (`صفد` → Safed), or an inference (`Beirut's southern suburb` → Dahieh). **`''` says
+the location is not quotable from this text, and nothing more than that.**
+
+**A value that is not a place has nothing to quote — and 60 rows quoted one anyway.** The first
+implementation had no notion of `_NOT_A_PLACE`, so a row whose `location_name` is the classifier's
+own "I could not tell" got a non-empty span whenever that word appeared in its text:
+`evidence_span("Casualty figures remain unknown after the blast.", "Unknown")` returned `"unknown"`.
+That is this project's whole bug class committed inside the new column — state 3 ("I looked and
+could not tell") rendered in the field a reader reads as state 1 evidence — and it was reachable:
+`telegram.py` and `news_feeds.py` both store `location_name = "Unknown"`, 38,314 archive rows carry
+exactly that, and 104 of the live database's 201 do. Measured over the archive, 60 rows found their
+own sentinel in their own text (55 on `unknown`, 5 on `NATO`). `evidence_span()` now applies the
+same `_NOT_A_PLACE` test `geocode()` applies at its front door — the imported list, not a second
+copy — and the replay of the shipped function returns **0**.
+
+`''` therefore answers two questions, and `location_name` is the column that says which: no place
+was named at all (38,319 archive rows), or a place was named and this text does not spell it
+(10,131). They are separable in one query, which is why the second case did not get a fourth value:
+every other value of this column is text lifted out of `raw_text`, so any sentinel string here is
+one a message could also produce.
+
+**The earlier numbers in this table were 35,354 / 77.5%, and they were measured wrong.** That
+replay matched against the dump's COPY escape form instead of the text the column holds, where the
+`\n` between two lines is a backslash and the *letter* n — a word character, so a location at the
+start of a line has no `\b` before it. 134 events, all in one direction, all of the shape
+`...deal with Saudi Arabia\n\nKyiv, which has built...`. The figures above come from importing
+`classifier.evidence_span` itself and unescaping the dump first.
+
+**A third matcher variant, measured and not fixed.** `\b` cannot match a `location_name` whose
+first or last character is non-word — `"Zrariyeh"`, `Jaba'`, `USS Gerald R. Ford (CVN-78)` — even
+when the name is verbatim in the text, because there is no boundary to find beside a quote mark or
+a bracket. 7 events across 6 strings, against the 33 that the markdown-boundary and apostrophe-
+folding rules bought and were rejected for. Recorded on the same arithmetic that rejected those.
+
+Three things this measurement settled, each of which had been about to be built the other way:
+
+- **The clever matcher was not worth it.** Treating markdown `_` as a word boundary bought 10 events
+  out of 45,619; folding curly apostrophes bought 23 more. 0.07% for a cryptic lookaround, so the
+  rule stayed the plain `\b` the rest of the file already uses. The non-word-edge variant above is
+  smaller still, and is left alone for the same reason.
+- **Lowering the text is a real bug, not a hypothetical one.** `'İ'.lower()` is two characters, so a
+  lowered copy of one archive message is a character longer than the original and every offset past
+  it is shifted. An implementation that searched the copy and sliced the original would store
+  `'rariyeh '` — a genuine substring of `raw_text` that is not the place. The match runs on the
+  original text under `re.IGNORECASE`, which makes the slice exact by construction.
+- **The span does not certify that the model read it.** 969 archive quotes sit beyond offset 2000,
+  past the window `classify_message` sends. The claim is about the text, not about the classifier.
+
+Run against the **live dev database** on 2026-09-21, the repair pass gave all 200 rows a span in one
+pass and printed nothing on the six reloads that followed. Re-read at 201 rows after the sentinel
+fix: 97 name a place, of which 87 quote it and 10 do not; the other 104 name no place and carry
+`''` — not because `''` is the catch-all, but because none of their texts happens to contain its own
+sentinel. Under the first implementation that was luck; it is now the rule.
+
+**The repair pass could spin, and its own comment rested on it not doing so.** It re-selected the
+head of `WHERE evidence_span IS NULL` every iteration with no offset and no cap, so the guard was
+the only exit — and the guard is only ever reached because `evidence_span()` happens never to
+return `None`. Removing that property (a stub returning `None`) did not fail the suite, it **hung**
+it, inside `engine.begin()` during `lifespan`: a held transaction and an app that never serves. The
+loop now walks a cursor, `AND id > :last`, so it ends after at most `ceil(rows/5000)` iterations
+whatever the function returns, and a row it could not fill stays NULL — the honest value, repaired
+at the next boot. Both directions are now tested: with the cursor removed the new test reports a
+`TimeoutError` in 61 s instead of hanging, and with the `IS NULL` guard removed the suite fails in
+2.5 s on the *overwrite* assertion, which is the guard's actual job.
+
 ### GPS interference — measured 2026-09-19
 
 Degraded share (`nic < 7 or nac_p < 8`) over a 250 nm radius, airborne vs at/above FL200:
@@ -612,8 +786,7 @@ Ordered by severity, then area.
 | `C48` | medium | 3 | Frontend | Event type is encoded by hue alone on map, globe, terrain and timeline; only the feed carries a text label |
 | `C49` | medium | 3 | Frontend | No prefers-reduced-motion guard anywhere: 6 keyframe animations, an 8s scan line and an audio blip |
 | `C50` | medium | 3 | Frontend | LiveFeed NEW badge compares array lengths against a 200-cap, so it stops firing permanently once the cap is hi… |
-| `C52` | medium | — | Frontend | Cesium credits are routed to a detached div, suppressing Ion/Bing/Google attribution required by their terms |
-| `C53` | medium | 3 | Frontend | Three renderers (Mapbox, Globe, Cesium) still duplicate mark logic. The palette half is fixed: the four stale EVENT_COLORS copies were migrated onto tokens.ts in `e03cee6` |
+| `C53` | medium | 3 | Frontend | Three renderers (Mapbox, Globe, Cesium) still duplicate mark logic. The palette half is fixed: the four stale EVENT_COLORS copies were migrated onto tokens.ts in `e03cee6`. Deleting `GlobeView` was built and then **reverted** — the globe is visually distinct and the owner wants it kept, so the rules move to one shared module while the drawing stays two |
 | `C75` | medium | 1 | Ingest | "Could not classify" and "could not place" are the same rows, not two overlapping populations: **100%** of the archive's 38,314 `Unknown` rows sit on the sentinel, and the sentinel holds those plus 1,635 others. The two headline failure rates (45.6%, 47.6%) are one population reported twice. `89c6f54` made the stages separable on new rows — name kept, `geometry` NULL, `geo_method` persisted — but nothing reports them apart |
 | `C76` | medium | 4 | Ingest | The dedup score is Jaccard over `summary`, the LLM's *paraphrase*, so `> 0.4` measures how similarly the model worded two things rather than how similar two reports are — and `classifier.py` `_build_fallback` sets `summary = raw_text[:200]`, so a fallback row is not compared like with like at all. Containment over the reports' own `raw_text` is the instrument; picking a bar for it needs Phase 4's gold pairs |
 | `C77` | medium | 4 | Ingest | `check_duplicate` returns the **first** candidate over `0.4` in timestamp-desc order, not the best-scoring one, so a merge attaches to the most recent match rather than the most similar — and the logged `sim` is that row's score, not the pool maximum. Fixing it changes which event accumulates `report_count` / `severity` / `source_reliability`, so merge statistics either side of the change are not comparable; it is a deliberate separate decision, not a tidy-up |
@@ -655,6 +828,7 @@ Verified fixed in the current tree. Each row names the commit that closed it.
 | `C40` | medium | 3 | Frontend | app-grid row minimum: already minmax(0,1fr), fixed earlier today in 716ffec |
 | `C1` | medium | 1 | Ingest | Fallback rows are now tagged extraction_status; the fabricated severity=5 went with `C2` (`89c6f54`) |
 | `C43` | medium | 3 | Frontend | EscalationGauge deleted; IndicatorRail replaces it, reads no severity at all, and states each row's own coverage with DEGRADED as a first-class state (`e60c44d`) |
+| `C52` | medium | — | Frontend | The Cesium credit container is a real, visible node in the panel instead of a detached div, so Ion/Bing/Google attribution renders where their terms require it (*this commit*). Stated, not observed: the same work gates the terrain control off when `VITE_CESIUM_ION_TOKEN` is unset, and this install has none, so Cesium does not mount here and the rendered credits have not been seen |
 | `C3` | low | 0 | Ingest | parse_failed is a distinct tagged status; the non-dict JSON hole closed too — a list, number or bare string now raises a decode error, so both backends record parse_failed (`de146f6`) |
 
 ### Fixed by the v3 rebuild
@@ -1051,6 +1225,10 @@ re-checked against `de146f6`.
 - LOW — the retry loop backs off only for RateLimitError. classifier.py:303-306 sleeps 2**(attempt+1); the parse_failed (:308), APIStatusError (:313) and generic (:318) branches loop immediately with no delay, so a 529 'overloaded' reply produces three back-to-back calls in milliseconds before falling back. Unscheduled.
 - NOTE — the 9fd3fbf commit message is stale on one point. Under 'Known gaps' it states 'No distinguishable parse_failed path exists; JSON/validation errors retry and fall through to the same llm_failed fallback', but the same commit's diff of classifier.py splits `except (json.JSONDecodeError, Exception)` into four branches including `stat…
 
+- MEDIUM, and **measured 2026-09-21 rather than inferred** — the FIRMS ingester throws away a satellite fix and then geocodes the string it printed. 640 archive events (230 distinct strings) carry a `location_name` that is a literal coordinate, e.g. `(35.683°N, 43.879°E)`, on rows whose `raw_text` already reads `lat=35.6830, lon=43.8791`. The pipeline hands that string to the geocoder instead of using the numbers it was given. Median displacement is only 0.1 km, so it mostly survives — but 39 strings land 10-60 km from a coordinate that was already in hand, worst case 60.1 km. This is an ingester bug, not a gazetteer gap: no table entry can ever touch it, which is why it is recorded here and was not added to the 2026-09-21 batch. I measured the whole population rather than reporting the first 13 km sample I saw, which was not typical.
+- LOW — `tools/geocoder_vs_archive.py` now describes a geocoder that no longer runs. Its `resolve()` defaults to SUBSTRING matching and a five-item `REJECT` tuple; word boundaries shipped in `075ce6f` (`_KNOWN_PATTERNS`) and `REJECT` was replaced by the 22-entry `_NOT_A_PLACE`. Its default output is therefore the pre-fix geocoder and its "EFFECT OF WORD BOUNDARIES" section is a historical record, not a proposal — which is why `tools/gazetteer_gaps.py` was written beside it rather than its numbers being read. The delta is small (38,314 vs 38,319 rejected, 13,367 vs 13,424 to Nominatim) but the file should either flip its `anchored` default or say in its docstring what it is. Flagged, not touched.
+- LOW — two stale facts in `geocoder.py` that *this commit* did not create and did not fix. `KNOWN_LOCATIONS` has 395 key lines and 392 unique keys: `"tehran"`, `"isfahan"` and `"suez canal"` are each defined **twice** (the earlier note here said tehran alone, which was an incomplete measurement, not a wrong one). All three pairs are coordinate-identical, so the duplicates are dead rather than wrong — a later key silently wins in a dict literal, and here it wins with the same value. And `_build_coord_precision`'s docstring says "385 entries" where `_AREA_KEYS`' says 392; they disagreed before this commit too. The third item on this list — the `airport` branch of `_FACILITY_RE` claiming ±500 m for keys Nominatim measures far wider (Ben Gurion's half-diagonal is 3,265 m, 6.5x) — was fixed for that key in *this commit* via `_KEY_UNCERTAINTY_M`, because the same diff argues two screens earlier that where a table hit replaces a measured bound the estimate must err wide. The tier itself is unchanged: widening `facility` would move ~8 other airport keys, and every other facility key in the table, on one measurement.
+
 **Collection**
 
 - velocity has the identical units defect and is not on the list: adsb.lol `gs` is knots (opensky.py:143), OpenSky s[9] is m/s (opensky.py:177), and demo.py:512 converts explicitly to m/s (`round(self.speed_kts * 0.5144)`) - three conventions in one field. The UI labels it "kts" at MapPanel.tsx:508 and "m/s" at CesiumView.tsx:475. Same fix…
@@ -1153,12 +1331,12 @@ Make failure visible before changing any behaviour.
 Additive columns first, then remove the lies. Expect the map to get roughly 80% emptier; say so up
 front or it reads as a regression.
 
-- [ ] `geo_precision` (`facility` / `city` / `admin1` / `country_centroid` / `region_named` / `unresolved`), `geo_uncertainty_m`, `evidence_span` — **partial**: the two geo columns shipped in `89c6f54`, derived from the matching table branch and from Nominatim's bounding box. `evidence_span` does not exist anywhere in the backend, so this stays unticked
+- [x] `geo_precision` (`facility` / `city` / `admin1` / `country_centroid` / `region_named` / `unresolved`), `geo_uncertainty_m`, `evidence_span` — the two geo columns shipped in `89c6f54`; `evidence_span` shipped in *this commit*, three-valued (a quote / `''` / NULL), computed at **every** writer — including `demo.py` and the OSINT importer, which were found writing NULLs the repair pass then quietly absorbed — and backfilled over every row on disk. NULL is therefore a detector for a writer that forgot it, but only within the window between that write and the next boot: nothing asserts on it, and the pass fills it in. The comment on the column says that rather than more. Deliberately **not** a provenance tag — `geo_method` already records which branch produced the coordinate, and this answers the link upstream of it. See Measured facts
 - [x] Kill all four severity-5 defaults, including `Field(default=5)` where an omitted key validates clean — six, in the end, and the dead clamp validator with them (`89c6f54`)
 - [x] Delete the `(-25, 80)` sentinel and migrate the query predicates that *read* it (`89c6f54`)
 - [x] **Same commit**: guard dedup against NULL geometry, or unlocated rows match on time + type across the whole table — it did land in the same commit (`89c6f54`)
 - [x] Word boundaries on the geocoder partial match (simulated: 49 strings change, zero regressions) — and the identical bug in `classifier.py`'s own fallback (`075ce6f`)
-- [ ] Add the ~15 highest-volume missing facilities (`Ras Laffan`, `Ben Gurion`, …; `Prince Sultan Air Base` is now in the table)
+- [x] Add the ~15 highest-volume missing facilities — 11 places / 17 keys in *this commit*, picked by event volume off `tools/gazetteer_gaps.py` rather than from intuition, every coordinate resolved through `_query_nominatim` and checked against an anchor already in the table. Four candidates left out because Nominatim returned `[]` for them, and `Taybeh` left out because it resolves to three different villages. **`Ras Laffan` is in this roadmap line by name and ranks #22 by volume, below the cut** — reported rather than promoted to fit the brief. See Measured facts
 
 ### Phase 2 — The denominator
 
@@ -1179,15 +1357,16 @@ signal. See Measured facts.
 ### Phase 3 — The display
 
 - [ ] Mark geometry = evidence geometry, driven by `geo_precision`; unresolved rows go to a tray, never the map
+- [ ] Show `evidence_span` beside the location — the column shipped in *this commit* and no UI reads it. The display question it raises is not "print the string": a quote and `''` are different states and `''` must not read as a warning about the location, because 19.9% of place-naming archive rows are honestly derived rather than quoted — and because `''` also covers the 38,319 rows that name no place at all, which is a third thing to render and is told apart by `location_name`, not by this column
 - [ ] Replace DOM `<Marker>` loops with Source/Layer; the trails code already does this correctly
 - [ ] Promote the timeline into a feed-liveness lane so a collection gap and a quiet period are different shapes
 - [x] Delete `EscalationGauge`; replace with an indicator rail whose row zero is feed currency (`e60c44d`, finding `C43`)
 - [x] Render age, never a green dot — the pulsing LIVE dot is gone; nominal gets no mark at all (`e60c44d`)
 - [ ] Shape for class, hue spent once; `prefers-reduced-motion` on every animation
-- [ ] Decide the three-renderer question (recommendation: delete `GlobeView`, keep Mapbox, demote Cesium to an explicit terrain/LOS action)
-
-### Phase 4 — Corroboration
-
+- [ ] Decide the three-renderer question — **answered, then reversed.** Deleting `GlobeView` for a Mapbox globe
+      projection was built and reverted: the three.js globe is visually distinct and the owner keeps it. The
+      duplication it caused is real, so the resolution is one shared spec (predicate + precision) imported by
+      both renderers, not one renderer
 - [ ] Link, don't merge — **half shipped in *this commit*, and the box stays unticked for the other
       half.** `event_reports` preserves both reports' text, and `killed_reported` no longer waits on
       anything: the count lives on the report row beside the text that stated it (`C10` closed,
@@ -1274,4 +1453,5 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-20 | `9539eb2` | Run the sentinel migration against a restored copy of the archive: 39,949 rows retired, exactly as predicted; geolocation 100% -> 52.4%; idempotency demonstrated. Phase 0's last un-run item closed |
 | 2026-09-20 | `ce5d994` | `merge_duplicate` stops writing `killed_reported`: the column becomes a pure function of this row's own `raw_text`, and an incoming count is logged as dropped rather than stored. Narrows `C74`, opens `C76` and `C77`; the match is exactly as loose as it was |
 | 2026-09-20 | `8523961` | `event_reports`: one row per incoming report, written at both insert sites and inside the merge's own transaction, so no contributing report loses its text, its URL, its message id, its stated death toll or the classifier status that says whether anything ever looked for one — `killed_reported` NULL is three-valued and `extraction_status` on the same row is what tells the three apart. Both dedup guards move onto it — and `_message_already_saved` is re-keyed on `(channel, message_id)`, which it never was. The `IntegrityError` its UNIQUE index raises is caught in `_process_message`, because uncaught it ended the whole channel sweep; the backfill gets its own transaction, and the 16 schema statements around it log their failures instead of passing in silence. The reliability boost gates on distinct channels instead of `report_count`, a count that is a floor bounded by what the table holds. Closes `C10`, narrows `C11` and `C74`, opens `C78` and `C79`. Four Measured-facts numbers corrected or added, with `tools/archive_report_counts.py` behind them |
-| 2026-09-21 | *this commit* | The first tests in this repo: 103 of them, 8.35s, one documented command. Every one is a regression test for a defect that actually occurred and names the commit it protects in its docstring — the merge that moved a death toll between events, the geometry guard, `reject_boolean`, the geocoder's word anchors, `"think": False`, the ingest guard's `(channel, message_id)` key, the sentinel retirement and the first-report backfill. The suite was shown to FAIL before it was believed: nine defects re-introduced into the source, nine caught by the test that names them. The dev database held 159 events before the run and 159 after. One production change, a pure move: the migration block lifted out of `lifespan` into `run_startup_migrations(engine)`, because entering `lifespan` also starts five network pollers and the alternative was to test a COPY of the SQL. Narrows `C66` to medium — what stays open is that there is still no CI, and that a suite whose schema comes from `create_all` cannot see the drift `C63` describes |
+| 2026-09-21 | `e2a8ee0` | The first tests in this repo: 103 of them, 8.35s, one documented command. Every one is a regression test for a defect that actually occurred and names the commit it protects in its docstring — the merge that moved a death toll between events, the geometry guard, `reject_boolean`, the geocoder's word anchors, `"think": False`, the ingest guard's `(channel, message_id)` key, the sentinel retirement and the first-report backfill. The suite was shown to FAIL before it was believed: nine defects re-introduced into the source, nine caught by the test that names them. The dev database held 159 events before the run and 159 after. One production change, a pure move: the migration block lifted out of `lifespan` into `run_startup_migrations(engine)`, because entering `lifespan` also starts five network pollers and the alternative was to test a COPY of the SQL. Narrows `C66` to medium — what stays open is that there is still no CI, and that a suite whose schema comes from `create_all` cannot see the drift `C63` describes |
+| 2026-09-21 | *this commit* | **Phase 1 closed.** `evidence_span`: the words in a row's own `raw_text` that spell its own `location_name`, so a location becomes checkable in one second the way `killed_reported` is. Three values, three statements — a quote, `''` for "looked, and there is nothing here to quote", NULL for "nothing looked" — and a repair pass that empties the NULL set. `''` carries two of those cases and `location_name` is what separates them: a place was named and this text does not spell it (10,131 archive rows), or no place was named at all (38,319). That second case is the one the first implementation got wrong, and got wrong in this project's own bug class: with no notion of `_NOT_A_PLACE` it answered `"unknown"` for a row whose `location_name` is the classifier's could-not-tell sentinel, writing state 3 into the field a reader reads as state 1 — 60 archive rows, and 104 of the live 201 are exposed to it. It now applies the same list `geocode()` applies at its front door, imported and not copied. It is a SEARCH, never an argument: nothing can pass a span in, so a model naming a plausible town that appears nowhere gets `''` and has no fabricated span to offer. Deliberately not a provenance tag (`geo_method` already owns that question) and deliberately not a boolean (the evidence costs one column and cannot be wrong about itself). Measured first, and the measurement changed the design twice: the markdown-boundary and apostrophe-folding rules bought 33 events out of 45,619 and were dropped, and `'İ'.lower()` being two characters made searching a lowered copy a real slicing bug rather than a hypothetical one. A third variant — a name whose first or last character is non-word, which `\b` can never match — is 7 events and is recorded rather than fixed, on the same arithmetic. The headline split is **77.8% / 22.2% over the 45,619 place-naming rows**, and both halves of that sentence are load-bearing: the first replay said 77.5% because it matched against the dump's COPY escape form, where the letter n of ` ` is a word character (134 events), and the column is written on all 83,938 rows, not on the 45,619 the percentage is over. The startup repair pass now walks a cursor on `id`: its only exit used to be `WHERE evidence_span IS NULL`, so termination rested on `evidence_span()` never returning `None`, and removing that property hung pytest instead of failing it. **Gazetteer**: 11 places / 17 keys off the top of `tools/gazetteer_gaps.py`'s volume ranking, eight coordinates resolved through `_query_nominatim` and checked against an anchor already in the table, three reused from an alias already in the table and now saying so with the measured distance that justifies the reuse (0.683 / 0.493 / 2.126 km) instead of a derivation that did not happen — killing errors of 2,011 km (`Al-Khiyam`, in Yemen), 3,096 km (`Karaj`, in Slovakia), 9,124 km (`Galilee`, on Long Island) and 1,010 km (`Anbar`, in Turkey), plus two partial-match hijacks. Four candidates left out because Nominatim answered `[]`, confirmed with four extra requests rather than assumed from four consecutive failures; `Taybeh` left out because it is two villages. 89 strings change across the archive, 472 events, no key capturing a name it did not mean. `Anbar` keeps its 352 km bound but stops claiming to be a country: the tier is the word the UI prints, so a per-key `_KEY_UNCERTAINTY_M` of **measured** extents now carries the number wherever the tier estimate errs narrow (Anbar, and Ben Gurion Airport at 3,265 m against the facility tier's 500 m). 51 new tests (103 → 154), six of them shown to fail against the defect they name — the four from the first pass, plus the sentinel rule and the loop's bound. The live dev database held 200 events before and after; all 200 got a span in one pass and the six reloads after it printed nothing, and a re-read at 201 rows found no sentinel row carrying a quote |

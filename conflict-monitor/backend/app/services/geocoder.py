@@ -111,9 +111,13 @@ _WATER_RE = re.compile(
 )
 
 # Key text that names a built facility rather than a settlement.
+#
+# 'mosque' joined the list with 'al-aqsa mosque' (2026-09-21). It changed the
+# tier of no existing key — there were none containing the word — so it is a
+# rule for the entry that arrived with it, not a reclassification of the table.
 _FACILITY_RE = re.compile(
     r"\b(airbase|air base|afb|base|facility|enrichment|port|refinery|terminal"
-    r"|plant|reactor|airport|field|complex|hq)\b"
+    r"|plant|reactor|airport|field|complex|hq|mosque)\b"
 )
 
 # Table keys that name an area rather than a settlement or a structure.
@@ -128,7 +132,7 @@ _FACILITY_RE = re.compile(
 # same class of name, reached Nominatim and honestly reported ±1,231km. Two
 # orders of magnitude apart, and the confident one was the wrong one.
 #
-# It names only the exceptions — a dozen entries out of 375, not an audit of
+# It names only the exceptions — twenty entries out of 392, not an audit of
 # the table. Anything absent keeps its derived tier.
 _AREA_KEYS: dict[str, str] = {
     "oman":                 PRECISION_COUNTRY,   # country centroid, empty desert
@@ -145,6 +149,66 @@ _AREA_KEYS: dict[str, str] = {
     "baalbek district":     PRECISION_ADMIN1,    # 'baalbek' the city stays city
     "qalamoun":             PRECISION_ADMIN1,    # mountain region
     "ghawar":               PRECISION_ADMIN1,    # oil field, ~280km long
+    # Added 2026-09-21 with the entries below. Each tier is the nearest one
+    # that does NOT understate the extent Nominatim measured for the name, and
+    # that direction is deliberate: _TIER_UNCERTAINTY_M is a table of estimates,
+    # so a table hit trades a measured bound for a guessed one, and the guess
+    # must be the wide one. Erring narrow is the 48x understatement that split
+    # _CHOKEPOINT_RE from _OPEN_WATER_RE.
+    "galilee":              PRECISION_ADMIN1,    # region; derived tier was city
+    "western galilee":      PRECISION_ADMIN1,
+    "upper galilee":        PRECISION_ADMIN1,
+    # Governorate, 138,000 km2 — an admin1 and nothing else. Its measured
+    # extent does not fit admin1's estimate; see _KEY_UNCERTAINTY_M, which is
+    # where that fact now lives.
+    "anbar":                PRECISION_ADMIN1,
+    "al-anbar":             PRECISION_ADMIN1,
+    # The EMIRATE, measured at +/-50.5km — not Fujairah city and not the oil
+    # terminal the messages name, both of which are inside that bound. A port
+    # entry would need its own resolution and does not have one.
+    "fujairah":             PRECISION_ADMIN1,
+}
+
+
+# Per-KEY uncertainty, for the case a tier cannot carry. MEASUREMENTS, not
+# estimates: each is the half-diagonal `_query_nominatim` computed for that name
+# on 2026-09-21, kept because the tier's estimate understates it.
+#
+# It exists because geo_precision is NOT a private uncertainty knob. It is a
+# category the UI renders as words — frontend/src/lib/tokens.ts turns
+# country_centroid into "country-level" — so tiering Anbar as a country to
+# borrow the 500km that goes with it told every reader the monitor had resolved
+# an Iraqi governorate only as far as a country, and counted it into the
+# country-level rollup. Two facts were being forced through one field: WHAT
+# KIND of place was named, and HOW WIDE the answer is. Oman is in _AREA_KEYS at
+# country tier because Oman IS a country and the label is literally true there;
+# Anbar was the first non-country key given that tier, and the label was the
+# price. The tier now says what was named and the number below says how wide.
+#
+# ONLY ONE DIRECTION BELONGS HERE. _TIER_UNCERTAINTY_M holds estimates and a
+# table hit trades a measured bound for a guessed one, so the guess must err
+# WIDE: where it already does — 'fujairah' takes admin1's 100km against a
+# measured 50.5km — the estimate stands and no entry is needed. An entry is
+# only for a tier that errs NARROW against a measurement, which is the
+# understatement that split _CHOKEPOINT_RE from _OPEN_WATER_RE.
+#
+# Exact hits only. A partial match ("strike near Ben Gurion Airport") has
+# already been coarsened one tier on purpose, to 10km here, and a measured
+# extent of the key is not the bound for something merely NEAR it. The cost is
+# recorded rather than hidden: "Anbar Governorate" partial-matches 'anbar' and
+# still takes admin1's 100km, because admin1's own 100km — unmeasured, and what
+# actually failed here — is a question about _TIER_UNCERTAINTY_M and the other
+# 17 keys _AREA_KEYS declares admin1, not about these four entries.
+_KEY_UNCERTAINTY_M: dict[str, int] = {
+    "anbar":                            352_000,  # admin1's 100km is 3.5x narrow
+    "al-anbar":                         352_000,
+    # The runway and terminals, measured at 3,265m against the facility tier's
+    # 500m — 6.5x narrow. The tier is right about what this is (a built
+    # facility, which is why it beats 'tel aviv' 13km away) and wrong about how
+    # big it is. Widening the tier itself would move ~8 other airport keys on
+    # one measurement, so the measurement stays where it was made.
+    "ben gurion airport":                 3_265,
+    "ben gurion international airport":   3_265,
 }
 
 
@@ -266,6 +330,66 @@ _DIRECTIONAL_REGIONS: dict[str, tuple[float, float]] = {
 # PRECISION LOCATION TABLE
 # ~400 entries: facilities, districts, bases, ports, infrastructure
 # =========================================================================
+#
+# ── Batch of 2026-09-21, marked `+2026-09-21` on every line it added ──────
+#
+# Picked by measurement, not by memory. `tools/gazetteer_gaps.py` replays this
+# table against all 3,665 distinct `location_name` values in the 2026-08-18
+# archive and ranks the ones it MISSES by how many EVENTS carry them, because
+# forty spellings on one event each are worth less than one name on 4,970 and
+# the table costs the same either way. 13,424 events (16.0%) miss it today.
+#
+# Two thirds of that bucket was deliberately NOT taken. "Iran" alone is 3,846
+# events and "United States" 1,881; those already resolve to a centroid and the
+# country tier is the honest answer, so a facility-shaped entry for them would
+# be `C6` written by hand. Borders and rivers ("Lebanon-Israel border", "Litani
+# River", 88 events, all sentinel in the archive) are lines, and the fix for a
+# line is not a point.
+#
+# NO COORDINATE BELOW WAS RECALLED. Eight were RESOLVED: each came back from
+# `_query_nominatim` — this file's own function, so the same URL, params,
+# viewbox, contact-bearing User-Agent and >=1.1s spacing — on 2026-09-21, and
+# each was then checked against an anchor ALREADY IN THIS TABLE before being
+# written down:
+#
+#   query sent to Nominatim            ->  result            anchor check
+#   "Karaj, Iran"                          35.8225,50.9905   38.9km from 'tehran'
+#   "Galilee, Israel"                      32.8008,35.5890   13.8km from 'northern israel'
+#   "Anbar Governorate, Iraq"              32.7889,41.6094   263.3km from 'baghdad'
+#   "Arad, Israel"                         31.2612,35.2146   40.3km from 'beer sheva'
+#   "Al-Aqsa Mosque, Jerusalem"            31.7763,35.2356   2.3km from 'jerusalem'
+#   "Ben Gurion Airport"                   32.0027,34.8809   13.1km from 'tel aviv'
+#   "Fujairah, United Arab Emirates"       25.4147,56.2314   99.5km from 'dubai'
+#   "Beit Shemesh, Israel"                 31.7462,34.9887   21.4km from 'jerusalem'
+#
+# THE OTHER THREE WERE NOT RESOLVED, and say so on their own lines (four keys:
+# the two Khiyam spellings share one comment). 'beersheba', 'prince sultan air
+# base' and 'khiyam'/'al-khiyam' REUSE the coordinate of an alias already in
+# this table, and spent no request. That is the right call for
+# an alias — a second resolution of the same village buys a second point to
+# disagree with — but it is a different provenance, and the comment is the
+# whole audit trail for entries with no request behind them. What each of those
+# lines records is the CHECK, not a derivation: the archive's own stored point
+# for the new spelling, and its haversine distance from the coordinate being
+# reused (0.683km, 0.493km, 2.126km). The distance is the evidence that the two
+# spellings name one place; the coordinate is the neighbour's.
+#
+# FOUR CANDIDATES WERE LEFT OUT because Nominatim has no answer for them:
+# "Dura, Hebron, Palestine", "Masafer Yatta", "RAF Akrotiri, Cyprus" and
+# "Nabi Sheet, Lebanon" each returned HTTP 200 with a body of `[]`. That was
+# confirmed rather than assumed — the four failed consecutively, which is also
+# what a rate-limit burst looks like, and "the request failed" and "there is no
+# such place" are the two states this project exists to keep apart. They cost
+# four more requests to separate, and separating them was worth it: three of
+# the four (Masafer Yatta 32 events, RAF Akrotiri 17, Nabi Sheet 17) are
+# stored as the Indian Ocean sentinel in the archive, so they are exactly the
+# rows where an invented point would look like an improvement. They stay
+# missing, and missing is the honest state.
+#
+# "Taybeh" was left out for the opposite reason: it resolves too well. Its
+# three archive spellings gave three points up to 50km apart and the raw_texts
+# describe at least two different villages, so one key would pin one real place
+# onto another.
 
 KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
 
@@ -336,6 +460,9 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "tehran":                      (35.6892, 51.3890),
     "tehran north":                (35.8000, 51.4500),
     "tehran refinery":             (35.6300, 51.3300),
+    # +2026-09-21. 50 events. The archive stored (48.701, 17.687) — Slovakia,
+    # 3,096km away — for messages reading "Karaj, west of Tehran".
+    "karaj":                       (35.8225, 50.9905),
     "isfahan":                     (32.6546, 51.6680),
     "shiraz":                      (29.5918, 52.5836),
     "shiraz airbase":              (29.5400, 52.5900),
@@ -405,8 +532,39 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "jerusalem":                   (31.7683, 35.2137),
     "west jerusalem":              (31.7760, 35.2050),
     "east jerusalem":              (31.7810, 35.2290),
+    # +2026-09-21, 59 events, 43 of which currently answer as 'jerusalem' via
+    # partial match — the city centre standing in for a building 2.3km away.
+    # Bare "al-aqsa" is deliberately NOT a key: the Al-Aqsa Martyrs Brigades are
+    # an actor and "Al-Aqsa Flood" is an operation, and the note at the foot of
+    # this table explains what happens when an actor is given a coordinate.
+    "al-aqsa mosque":              (31.7763, 35.2356),
+    "al aqsa mosque":              (31.7763, 35.2356),
     "beer sheva":                  (31.2518, 34.7913),
     "be'er sheva":                 (31.2518, 34.7913),
+    # +2026-09-21, 36 events. Pure alias gap, and NOT resolved through
+    # Nominatim: this is the 'beer sheva' coordinate above, copied. The
+    # archive's own stored point for "Beersheba" is (31.2457442, 34.7925181),
+    # which is 0.683km away and is the evidence that the two spellings name one
+    # city — not the coordinate written here.
+    "beersheba":                   (31.2518, 34.7913),
+    # +2026-09-21, 76 events — the highest-volume single candidate in the pool.
+    "arad":                        (31.2612, 35.2146),
+    "beit shemesh":                (31.7462, 34.9887),   # +2026-09-21, 27 events
+    # +2026-09-21, 48 events. The archive resolved "Galilee" to (40.34,-73.97)
+    # — Long Island — "Western Galilee" to Australia and "Upper Galilee" to the
+    # Belgian coast. The two qualified keys take the Galilee's own point: at the
+    # admin1 bound declared in _AREA_KEYS the sub-region is inside the answer,
+    # which is a containment claim and not a second resolution.
+    "galilee":                     (32.8008, 35.5890),
+    "western galilee":             (32.8008, 35.5890),
+    "upper galilee":               (32.8008, 35.5890),
+    # +2026-09-21, 44 events. Also the fix for a partial-match hijack: with no
+    # key of its own, "Ben Gurion Airport, Tel Aviv" matched 'tel aviv' and
+    # answered with the city centre 13km away, at a tier it had not earned.
+    # Bare "ben gurion" is deliberately NOT a key — Ben-Gurion University is in
+    # Beer Sheva, 70km from this runway, and the airport must not swallow it.
+    "ben gurion airport":          (32.0027, 34.8809),
+    "ben gurion international airport": (32.0027, 34.8809),
     "eilat":                       (29.5577, 34.9519),
     "eilat port":                  (29.5500, 34.9480),
     "ashdod":                      (31.8014, 34.6503),
@@ -459,6 +617,15 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "bint jbeil":                  (33.1200, 35.4320),
     "bint jbayl":                  (33.1200, 35.4320),
     "khiam":                       (33.3440, 35.5980),
+    # +2026-09-21, 47 events, and the worst single error the ranking found.
+    # "Al-Khiyam" resolved to (16.822, 43.779) — Yemen, 2,011km away — on
+    # messages reading "southern Lebanon's Shiite village of Al-Khiyam". NOT
+    # resolved through Nominatim and no request was spent: both keys take the
+    # 'khiam' coordinate above. The archive is what shows they are one village
+    # — its stored point for bare "Khiyam" is (33.3272226, 35.6089702), 2.126km
+    # from that key, against 2,011km for the spelling with the article.
+    "al-khiyam":                   (33.3440, 35.5980),
+    "khiyam":                      (33.3440, 35.5980),
     "marjayoun":                   (33.3640, 35.5820),
     "baalbek":                     (34.0047, 36.2110),
     "baalbek district":            (34.0047, 36.2110),
@@ -528,6 +695,17 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "balad airbase":               (33.9402, 44.3616),
     "balad":                       (33.9402, 44.3616),
     "ain al-asad":                 (33.7856, 42.4411),
+    # +2026-09-21, 41 events. The archive stored (38.746, 35.352) — central
+    # Turkey, 1,010km from Baghdad — for messages reading "Anbar, Iraq". It is
+    # an Iraqi governorate, so the tier is admin1 (_AREA_KEYS), and its measured
+    # 352km extent lives in _KEY_UNCERTAINTY_M rather than being forced through
+    # the tier. An earlier draft tiered it country_centroid to borrow that
+    # tier's wider bound — which made every Anbar event tell a reader the
+    # monitor had resolved only a country, because geo_precision is rendered as
+    # text in the UI. What kind of place was named and how wide the answer is
+    # are two facts; one field cannot carry both.
+    "anbar":                       (32.7889, 41.6094),
+    "al-anbar":                    (32.7889, 41.6094),
     "al-asad airbase":             (33.7856, 42.4411),
     "al asad":                     (33.7856, 42.4411),
     "ain al asad":                 (33.7856, 42.4411),
@@ -593,6 +771,12 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "jubail":                      (27.0020, 49.6200),
     "jubail industrial":           (27.0020, 49.6200),
     "prince sultan airbase":       (24.0620, 47.5810),
+    # +2026-09-21, 37 events. NOT resolved through Nominatim: this is the
+    # coordinate of the key above it, reused. What was checked is that the two
+    # spellings are the same place — the archive's own stored point for the
+    # spelling with the space is (24.066252, 47.5823882), 0.493km from the
+    # point written here — and no request was spent.
+    "prince sultan air base":      (24.0620, 47.5810),
     "al-kharj":                    (24.0620, 47.5810),
     "king khalid military city":   (27.9000, 45.5200),
     "tabuk":                       (28.3838, 36.5550),
@@ -612,6 +796,7 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float]] = {
     "al minhad airbase":           (25.0260, 55.3660),
     "abu dhabi port":              (24.4800, 54.3600),
     "ruwais":                      (24.1100, 52.7300),   # refinery complex
+    "fujairah":                    (25.4147, 56.2314),   # +2026-09-21, 34 events
 
     # ─── QATAR ──────────────────────────────────────────────────────────────
     "doha":                        (25.2854, 51.5310),
@@ -763,13 +948,18 @@ def _precision_for_key(key: str, coords: tuple[float, float]) -> str:
 
 
 def _table_result(
-    coords: tuple[float, float], precision: str, method: str
+    coords: tuple[float, float],
+    precision: str,
+    method: str,
+    uncertainty_m: int | None = None,
 ) -> GeoResult:
     return GeoResult(
         lat=coords[0],
         lon=coords[1],
         precision=precision,
-        uncertainty_m=_TIER_UNCERTAINTY_M[precision],
+        uncertainty_m=(
+            _TIER_UNCERTAINTY_M[precision] if uncertainty_m is None else uncertainty_m
+        ),
         method=method,
     )
 
@@ -938,7 +1128,10 @@ async def geocode(location_name: str) -> GeoResult | None:
     if normalized in KNOWN_LOCATIONS:
         coords = KNOWN_LOCATIONS[normalized]
         result = _table_result(
-            coords, _precision_for_key(normalized, coords), "table-exact"
+            coords,
+            _precision_for_key(normalized, coords),
+            "table-exact",
+            _KEY_UNCERTAINTY_M.get(normalized),
         )
         _cache_set(name, result)
         logger.debug("Precision table exact '%s' → %s", name, result)

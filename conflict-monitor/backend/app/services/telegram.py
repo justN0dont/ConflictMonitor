@@ -14,7 +14,7 @@ from app.models import ChannelCheckpoint, Event, EventReport
 from app.schemas import EventRead, EventWS
 from app.seed_channels import DEFAULT_CHANNELS, get_reliability
 from app.services.broadcaster import broadcaster
-from app.services.classifier import classify_message
+from app.services.classifier import classify_message, evidence_span
 from app.services.dedup import check_duplicate, merge_duplicate
 from app.services.geocoder import geocode
 
@@ -410,6 +410,13 @@ async def _process_message(
                 geo_precision=geo.precision if geo else None,
                 geo_uncertainty_m=geo.uncertainty_m if geo else None,
                 geo_method=geo.method if geo else None,
+                # Computed HERE, from the two values this row is about to
+                # store, rather than carried in the classifier's dict. The
+                # dict's location_name and the row's can differ — events.py
+                # keeps the existing name when a re-classification is skipped —
+                # and a span describing a name the row does not hold is the
+                # exact lie the column exists to prevent.
+                evidence_span=evidence_span(raw_text, location_name),
             )
             session.add(db_event)
             # flush, not commit: db_event.id does not exist until the INSERT

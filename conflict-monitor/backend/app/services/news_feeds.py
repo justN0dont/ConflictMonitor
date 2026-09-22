@@ -54,7 +54,7 @@ from app.db import async_session
 from app.models import Event, EventReport
 from app.services.broadcaster import broadcaster
 from app.schemas import EventRead, EventWS
-from app.services.classifier import classify_message
+from app.services.classifier import classify_message, evidence_span
 from app.services.dedup import check_duplicate, merge_duplicate
 from app.services.geocoder import geocode
 
@@ -441,6 +441,10 @@ async def _process_article(
             geo_precision=geo.precision if geo else None,
             geo_uncertainty_m=geo.uncertainty_m if geo else None,
             geo_method=geo.method if geo else None,
+            # From this row's own text. `full_text` is what was classified and
+            # is what raw_text stores above, so the span is a slice of the
+            # column it sits beside.
+            evidence_span=evidence_span(full_text, location_name),
         )
         session.add(db_event)
         # flush, not commit: db_event.id does not exist until the INSERT runs,

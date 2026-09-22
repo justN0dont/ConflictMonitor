@@ -8,6 +8,10 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config import settings
+# The values that are not places, shared rather than restated. evidence_span
+# and geocode() have to agree about what "Unknown" is, or one of them writes a
+# location claim the other refuses to resolve.
+from app.services.geocoder import _NOT_A_PLACE
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +339,68 @@ def _regex_location_fallback(text: str) -> str | None:
             best = loc
             best_len = len(loc)
     return best
+
+
+def evidence_span(raw_text: str, location_name: str) -> str:
+    """The words in `raw_text` that spell `location_name`, or "" if there are none.
+
+    THE ONE RULE, IN ONE PLACE, because every writer and the startup repair pass
+    have to mean the same thing by "quoted" or the column is unreadable.
+
+    It is a SEARCH, never an argument. Nothing can pass a span in: the only way
+    text reaches `events.evidence_span` is by already being in that row's own
+    `raw_text`, which is what stops the column becoming somewhere a guess can be
+    written. A model that names a plausible town appearing nowhere in the
+    message gets "" — there is no fabricated span for it to offer.
+
+    NOT EVERY location_name IS A PLACE, and this is the test that matters most
+    here. `_NOT_A_PLACE` holds the classifier's own could-not-tell values
+    ("Unknown", "various", "multiple") and its actor names ("IDF", "NATO");
+    `geocode()` rejects them at its front door and so does this, for the same
+    reason — a row that named no place has no location claim to quote, and the
+    sentinels are ordinary words in conflict reporting. Without the test this
+    column answered "Casualty figures remain unknown after the blast." with the
+    span "unknown": the monitor's I-could-not-tell state, written into the field
+    a reader reads as evidence that it could tell. 60 rows of the 2026-08-18
+    archive did exactly that — 55 found "unknown" in their own text and 5 found
+    "NATO" — out of the 38,319 that name no place.
+
+    "" THEREFORE ANSWERS TWO QUESTIONS, and the column beside it says which.
+    `location_name in _NOT_A_PLACE` means no place was named at all (38,319
+    archive rows; 103 of the 200 live ones). Anything else means a place was
+    named and this text does not spell it (10,131 archive rows). The two are
+    separable in one query, which is why they are not given a fourth value:
+    every other value of this column is text lifted out of `raw_text`, so a
+    sentinel string here would be a value a message could also produce.
+
+    Case-insensitive, on the ORIGINAL text rather than a lowered copy, and that
+    is a correctness point rather than a style one. Lowering can change a
+    string's LENGTH — one archive message does, via Turkish dotted-I — so
+    offsets taken from a lowered copy can land a character off in the original
+    and slice out text that is genuinely in `raw_text` but is not the place.
+    That is the failure this column exists to prevent, committed by the column
+    itself. Searching the original makes the slice exact by construction.
+
+    Word-anchored, for the reason `_LOCATION_PATTERNS` above is: 'Kirya' sits
+    inside 'Kiryat Shemona'. Measured on the 2026-08-18 archive, the two
+    cleverer rules tried first — treating markdown '_' as a boundary, and
+    folding curly apostrophes — were worth 33 events out of 45,619 between
+    them, so this stays the same \\b the rest of the file already uses.
+
+    That \\b also cannot match a location_name whose FIRST or LAST character is
+    non-word — '"Zrariyeh"', "Jaba'", 'USS Gerald R. Ford (CVN-78)' — even when
+    the name is verbatim in the text, because there is no word boundary to find
+    beside a quote mark or a bracket. Measured on the same archive: 7 events
+    across 6 strings, smaller than the 33 the two rules above bought and were
+    rejected for. Recorded here rather than fixed, on the same arithmetic.
+    """
+    loc = (location_name or "").strip()
+    if not raw_text or not loc:
+        return ""
+    if loc.lower() in _NOT_A_PLACE:
+        return ""
+    match = re.search(r"\b" + re.escape(loc) + r"\b", raw_text, re.IGNORECASE)
+    return raw_text[match.start():match.end()] if match else ""
 
 
 _client: anthropic.AsyncAnthropic | None = None

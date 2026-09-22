@@ -131,3 +131,119 @@ async def test_a_partial_match_says_so_in_its_method_and_tier():
     assert (result.lat, result.lon) == geocoder.KNOWN_LOCATIONS["natanz"]
     assert result.precision == PRECISION_CITY
     assert result.method == "partial"
+
+
+# ── *this commit*: the 2026-09-21 gazetteer batch ────────────────────────────
+# Each entry was picked by event volume from the archive and resolved through
+# _query_nominatim on 2026-09-21; the block above KNOWN_LOCATIONS records the
+# query sent and the anchor it was checked against. These tests pin the two
+# things a new row can get wrong: the tier it claims, and what else it starts
+# capturing.
+
+
+@pytest.mark.parametrize(
+    "name,coords,precision",
+    [
+        ("Karaj", (35.8225, 50.9905), PRECISION_CITY),
+        ("Arad", (31.2612, 35.2146), PRECISION_CITY),
+        ("Beit Shemesh", (31.7462, 34.9887), PRECISION_CITY),
+        ("Beersheba", (31.2518, 34.7913), PRECISION_CITY),
+        ("Al-Khiyam", (33.3440, 35.5980), PRECISION_CITY),
+        ("Galilee", (32.8008, 35.5890), PRECISION_ADMIN1),
+        ("Upper Galilee", (32.8008, 35.5890), PRECISION_ADMIN1),
+        ("Fujairah", (25.4147, 56.2314), PRECISION_ADMIN1),
+        ("Al-Aqsa Mosque", (31.7763, 35.2356), PRECISION_FACILITY),
+        ("Ben Gurion Airport", (32.0027, 34.8809), PRECISION_FACILITY),
+        ("Prince Sultan Air Base", (24.0620, 47.5810), PRECISION_FACILITY),
+    ],
+)
+async def test_a_new_entry_resolves_offline_at_the_tier_it_earned(
+    name, coords, precision, nominatim_calls
+):
+    """*this commit*. 13,424 archive events (16.0%) miss the table and reach
+    Nominatim on every one of them, forever. These names are the ones carrying
+    the most events, and the assertion on `nominatim_calls` is the half that
+    matters: an entry that resolves but still costs a lookup has bought
+    nothing."""
+    result = await geocoder.geocode(name)
+    assert result is not None
+    assert (result.lat, result.lon) == coords
+    assert result.precision == precision
+    assert result.method == "table-exact"
+    assert nominatim_calls == [], "a tabled name still reached the network"
+
+
+@pytest.mark.parametrize(
+    "name,precision,uncertainty_m",
+    [
+        # 138,000 km2 governorate: measured half-diagonal 352km against
+        # admin1's 100km estimate, 3.5x narrow.
+        ("Anbar", PRECISION_ADMIN1, 352_000),
+        # A built facility, measured at 3,265m against the tier's 500m.
+        ("Ben Gurion Airport", PRECISION_FACILITY, 3_265),
+    ],
+)
+async def test_a_measured_extent_beats_its_tier_estimate_without_moving_the_tier(
+    name, precision, uncertainty_m
+):
+    """*this commit*, and it replaces a test that pinned the defect in place.
+
+    _TIER_UNCERTAINTY_M holds estimates, so where a table hit replaces a
+    measured bound the estimate must err WIDE — and for these two it errs
+    narrow. The first fix was to give Anbar the country tier and borrow its
+    500km, which bought the number by lying about the category: geo_precision
+    is rendered to the reader as "country-level", so every Anbar event then
+    reported that an Iraqi governorate had been resolved only as far as a
+    country, and inflated the country-level rollup.
+
+    Both assertions together are the point. The tier answers WHAT KIND of place
+    was named, the bound answers HOW WIDE the answer is, and neither may be
+    moved to pay for the other."""
+    result = await geocoder.geocode(name)
+    assert result is not None
+    assert result.precision == precision
+    assert result.uncertainty_m == uncertainty_m
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Muradiye", "Anbarabad", "Ben Gurion University", "Al-Aqsa Martyrs Brigades"],
+)
+async def test_a_new_key_does_not_capture_a_name_it_was_never_meant_for(
+    name, nominatim_calls
+):
+    """*this commit*. The risk every short key carries, and the one word
+    boundaries narrow without removing: 'arad' sits inside 'Muradiye' and
+    'anbar' inside 'Anbarabad'. The other two are the reason bare 'ben gurion'
+    and bare 'al-aqsa' are deliberately NOT keys — Ben-Gurion University is in
+    Beer Sheva, 70km from the runway, and the Al-Aqsa Martyrs Brigades are an
+    actor, which the foot of KNOWN_LOCATIONS explains at length.
+
+    Verified against the archive before it shipped as well: replaying the old
+    and new tables over all 3,665 distinct location_name values changed 89 of
+    them, 472 events, with no name captured by a key that did not mean it."""
+    assert await geocoder.geocode(name) is None
+    assert nominatim_calls == [name], "a new key swallowed it"
+
+
+@pytest.mark.parametrize(
+    "name,coords",
+    [
+        ("Ben Gurion Airport, Tel Aviv", (32.0027, 34.8809)),
+        ("Al-Aqsa Mosque, Jerusalem", (31.7763, 35.2356)),
+    ],
+)
+async def test_a_qualified_facility_no_longer_answers_as_its_city(name, coords):
+    """*this commit*. Measured on the archive: with no key of its own, "Ben
+    Gurion Airport, Tel Aviv" partial-matched 'tel aviv' and answered with the
+    city centre 13km from the runway, and 43 of the 59 "Al-Aqsa Mosque" events
+    answered as 'jerusalem'. Longest-key-wins does the rest once the facility
+    is in the table — these were never Nominatim failures, and a table entry is
+    what stops the hijack."""
+    result = await geocoder.geocode(name)
+    assert result is not None
+    assert (result.lat, result.lon) == coords
+    # Still a partial match, so it still drops a tier: the event was near the
+    # named facility, not necessarily at it.
+    assert result.method == "partial"
+    assert result.precision == PRECISION_CITY

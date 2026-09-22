@@ -11,12 +11,14 @@ They commit for real, so they use `migration_engine` (TRUNCATE either side)
 rather than the rolled-back `session`.
 """
 
+import asyncio
 import datetime
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from app import main
 from app.main import run_startup_migrations
 
 NOW = datetime.datetime(2026, 9, 20, 12, 0, tzinfo=datetime.timezone.utc)
@@ -352,3 +354,176 @@ async def test_severity_can_be_null_after_the_migration(migration_engine):
             )
         ).one()
     assert row.severity is None, "nothing may substitute 5 for an unmeasured severity"
+
+
+# ── *this commit*: the evidence_span repair pass ─────────────────────────────
+
+
+async def test_every_row_on_disk_gets_a_span_or_an_empty_one(migration_engine):
+    """*this commit*. The pass exists so that NULL stops being a data state.
+    Two rows, two different answers, and neither is NULL afterwards: the quoted
+    one carries the words out of its own raw_text, the derived one carries ''.
+    Run against a restored archive this writes a span on ALL 83,938 rows --
+    the column is written on every row. The 45,619 place-naming rows are the
+    population of the SPLIT, not of the column, and that split is 77.8% quote
+    non-empty."""
+    async with migration_engine.begin() as conn:
+        quoted_id = (
+            await conn.execute(
+                _INSERT_EVENT,
+                _event_params(
+                    "Zrariyeh strike",
+                    None,
+                    None,
+                    raw_text="An Israeli airstrike on Zrariyeh killed 17 people.",
+                ),
+            )
+        ).scalar_one()
+        derived_id = (
+            await conn.execute(
+                _INSERT_EVENT,
+                _event_params(
+                    "Injuries reported",
+                    None,
+                    None,
+                    raw_text="Over 200 Israelis injured in last 24 hours",
+                ),
+            )
+        ).scalar_one()
+        await conn.execute(
+            text("UPDATE events SET location_name = :n WHERE id = :i"),
+            [{"i": quoted_id, "n": "Zrariyeh"}, {"i": derived_id, "n": "Israel"}],
+        )
+
+    await run_startup_migrations(migration_engine)
+
+    async with migration_engine.connect() as conn:
+        rows = dict(
+            (r.id, r.evidence_span)
+            for r in (
+                await conn.execute(
+                    text("SELECT id, evidence_span FROM events ORDER BY id")
+                )
+            ).all()
+        )
+    assert rows[quoted_id] == "Zrariyeh"
+    # '' is a measurement — "this text does not spell this place" — and the
+    # column must not be able to confuse it with "nothing looked".
+    assert rows[derived_id] == ""
+    assert None not in rows.values(), "the pass left a row saying nothing looked"
+
+
+async def test_the_repair_pass_does_not_rewrite_a_row_that_has_one(migration_engine):
+    """*this commit*. `WHERE evidence_span IS NULL` is both the filter and the
+    termination condition, so it has to be the filter that is actually running:
+    a pass that rewrote every row on every boot would terminate by luck and
+    would silently overwrite anything a writer had put there. The sentinel is a
+    value the rule could never produce."""
+    async with migration_engine.begin() as conn:
+        event_id = (
+            await conn.execute(
+                _INSERT_EVENT,
+                _event_params("Strike", None, None, raw_text="Strike on Zrariyeh"),
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "UPDATE events SET location_name = 'Zrariyeh', "
+                "evidence_span = 'DO NOT TOUCH' WHERE id = :i"
+            ),
+            {"i": event_id},
+        )
+
+    await run_startup_migrations(migration_engine)
+    await run_startup_migrations(migration_engine)
+
+    async with migration_engine.connect() as conn:
+        span = (
+            await conn.execute(
+                text("SELECT evidence_span FROM events WHERE id = :i"), {"i": event_id}
+            )
+        ).scalar_one()
+    assert span == "DO NOT TOUCH"
+
+
+async def test_the_column_is_added_to_a_table_that_predates_it(migration_engine):
+    """*this commit*, and the first instance of the test conftest.py names as
+    "the single most valuable test to add next" (`C63`).
+
+    This database's schema comes from `Base.metadata.create_all`, so the column
+    is already there and the ALTER in main.py's migration list has nothing to
+    do — delete that line and every other test in this file still passes, while
+    production's restored archive, which has no such column, fails on its first
+    INSERT. Dropping the column first is what makes the assertion below about
+    the migration instead of about the fixture. It needs no teardown: the
+    statement under test puts the column back."""
+    async with migration_engine.begin() as conn:
+        event_id = (
+            await conn.execute(
+                _INSERT_EVENT,
+                _event_params("Strike", None, None, raw_text="Strike on Zrariyeh"),
+            )
+        ).scalar_one()
+        await conn.execute(
+            text("UPDATE events SET location_name = 'Zrariyeh' WHERE id = :i"),
+            {"i": event_id},
+        )
+        await conn.execute(text("ALTER TABLE events DROP COLUMN evidence_span"))
+
+    await run_startup_migrations(migration_engine)
+
+    async with migration_engine.connect() as conn:
+        span = (
+            await conn.execute(
+                text("SELECT evidence_span FROM events WHERE id = :i"), {"i": event_id}
+            )
+        ).scalar_one()
+    # Added AND populated: the ALTER and the repair pass are one feature, and a
+    # column that exists holding NULL on every archived row is the state this
+    # commit set out to avoid.
+    assert span == "Zrariyeh"
+
+
+async def test_the_repair_pass_terminates_even_when_a_row_stays_null(
+    migration_engine, monkeypatch
+):
+    """*this commit*. Termination must not rest on a property of another
+    function. The pass used to re-SELECT the head of `WHERE evidence_span IS
+    NULL` with no offset and no cap, so the guard was its only exit and the
+    guard is only ever reached because evidence_span() happens never to return
+    None. Stub that away — as a writer bug one day will — and the old loop
+    re-read the same rows for ever, inside `engine.begin()`, during lifespan:
+    a held transaction and an app that never serves. It did not fail the suite,
+    it HUNG it, which is the failure a test cannot report.
+
+    So this test stubs exactly that and asserts two things: the pass RETURNS,
+    and the row it could not fill is still NULL. Both matter — a loop that
+    terminated by writing something to get rid of the row would be the same
+    lie in a different place. NULL is this column's honest value for "nothing
+    looked", and the next boot repairs it.
+
+    `wait_for` is the assertion. Without it a regression here hangs pytest
+    instead of failing it."""
+    monkeypatch.setattr(main, "evidence_span", lambda raw_text, location_name: None)
+
+    async with migration_engine.begin() as conn:
+        event_id = (
+            await conn.execute(
+                _INSERT_EVENT,
+                _event_params("Strike", None, None, raw_text="Strike on Zrariyeh"),
+            )
+        ).scalar_one()
+        await conn.execute(
+            text("UPDATE events SET location_name = 'Zrariyeh' WHERE id = :i"),
+            {"i": event_id},
+        )
+
+    await asyncio.wait_for(run_startup_migrations(migration_engine), timeout=60)
+
+    async with migration_engine.connect() as conn:
+        span = (
+            await conn.execute(
+                text("SELECT evidence_span FROM events WHERE id = :i"), {"i": event_id}
+            )
+        ).scalar_one()
+    assert span is None, "the loop wrote a value just to clear its own predicate"

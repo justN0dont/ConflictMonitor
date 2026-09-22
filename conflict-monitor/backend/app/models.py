@@ -62,6 +62,93 @@ class Event(Base):
     geo_precision: Mapped[str | None] = mapped_column(String(32), nullable=True)
     geo_uncertainty_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
     geo_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The words in THIS row's raw_text that spell THIS row's location_name,
+    # copied out of it verbatim. What killed_reported did for a death toll, this
+    # does for a place: it makes the claim checkable in one second, because the
+    # value is a substring of a column sitting next to it.
+    #
+    # THREE VALUES, AND ALL THREE ARE STATEMENTS:
+    #   a non-empty string  the quote. `evidence_span IN raw_text` is true of
+    #                       every row that has one, by construction.
+    #   ''                  something looked, and this row carries no quotable
+    #                       location claim.
+    #   NULL                nothing has looked yet.
+    # '' is load-bearing and is not "no value" — it is the string column's
+    # version of `is_geolocated = false`, which this table already uses to mean
+    # "we tried to place this and could not" as distinct from its own NULL. A
+    # zero-length quote cannot occur, so '' is never a quote.
+    #
+    # '' COVERS TWO CASES, AND location_name SEPARATES THEM. Either a place was
+    # named and this text does not spell it, or no place was named at all —
+    # location_name is one of geocoder._NOT_A_PLACE, the classifier's own
+    # "Unknown"/"various"/"IDF". evidence_span() applies that same test before
+    # it searches, so a row whose could-not-tell sentinel happens to be a word
+    # in its own message gets '' and not a span reading "unknown". The
+    # discriminator is therefore a column-to-column check, the way a NULL
+    # killed_reported is read against extraction_status.
+    #
+    # WRITE THAT CHECK AS `coalesce(location_name, '') IN (...)`, NOT
+    # `location_name IN (...)`. A row can carry location_name SQL NULL — demo.py
+    # never sets it — and in SQL `NULL IN (...)` evaluates to NULL, not false,
+    # so the bare form silently drops every such row out of BOTH sides of the
+    # split instead of filing it under "no place was named". A discriminator
+    # that quietly answers neither is the same failure as a field that quietly
+    # answers wrongly. The counts are
+    # over two different populations: of the 2026-08-18 archive's 83,938 rows,
+    # 38,319 name no place and the remaining 45,619 split 77.8% quote /
+    # 22.2% ''.
+    #
+    # After the repair pass in run_startup_migrations there are no NULLs left.
+    # That makes NULL a DETECTOR for a writer that forgot to call
+    # classifier.evidence_span() — but only within the window between that
+    # write and the next boot, because the pass itself fills the row in. It is
+    # a signal to look at a running database with, not a guarantee, and no test
+    # asserts on it. What actually keeps the writers honest is that every one
+    # of them calls the one function — telegram, news_feeds, the events route,
+    # demo and the OSINT importer, the last two wired in *this commit* after
+    # they were found writing NULLs the pass then quietly absorbed. The pass is
+    # not one-off: it re-runs for any row that reaches disk without a span.
+    #
+    # WHAT '' DOES NOT MEAN. It does not mean the model invented the place.
+    # Measured on the 2026-08-18 archive, over the 45,619 place-naming rows
+    # (NOT all 83,938 — the column is written on every row, the split is not):
+    # 77.8% carry a quote and 22.2% carry ''. Of that 22.2%, a tenth
+    # (2.3% of the place-naming rows) names the place perfectly well and fails only
+    # because location_name carries a qualifier the text does not — "Qasamia
+    # Bridge, southern Lebanon" against a message reading "the Qasamia Bridge in
+    # southern Lebanon". The rest is real derivation: a flag emoji, an adjective
+    # ("Israelis" -> Israel), another language ("صفد" -> Safed), or an inference
+    # ("Beirut's southern suburb" -> Dahieh). '' says the location is not
+    # QUOTABLE from this text. Which of those it is, this column does not know
+    # and does not guess.
+    #
+    # It also does not certify that the classifier READ the quote: ~969 archive
+    # quotes sit beyond offset 2000, past the window classify_message sends.
+    # The claim is about the text, not about the model.
+    #
+    # DELIBERATELY NOT A PROVENANCE TAG. geo_method already records which branch
+    # produced the COORDINATE (table-exact / directional-exact / partial /
+    # nominatim); duplicating that here would give one row two columns that can
+    # disagree about one fact. The link neither column covered is the one
+    # upstream of both — whether location_name is grounded in the message at
+    # all — and that is this one. The provenances the roadmap listed differ in
+    # how they score against it rather than being told apart by it, which is the
+    # stronger test: _regex_location_fallback finds its answer IN raw_text, so
+    # it always produces a quote; the flag fallback reads an emoji, so it never
+    # does; the LLM may do either. The column measures that difference instead
+    # of accepting a self-declaration.
+    #
+    # NOT A BOOLEAN, though under a case-insensitive match the quote can differ
+    # from location_name only in capitalisation (~3,864 archive rows, 10.9% of
+    # quotes, do). The reason is the same one that put raw_text on EventReport:
+    # a boolean is an assertion ABOUT evidence, and the evidence itself costs
+    # one TEXT column and cannot be wrong about itself.
+    #
+    # NOT WIDENED TO A SENTENCE either. A window of surrounding words would read
+    # better and would still be verbatim, but its width would be a constant
+    # nobody measured, and it would not separate a quoted place from an invented
+    # one any better than the bare occurrence does.
+    evidence_span: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class EventReport(Base):

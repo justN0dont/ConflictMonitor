@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import async_session as make_session, get_session
 from app.models import Event, EventReport
 from app.schemas import EventRead
-from app.services.classifier import classify_message
+from app.services.classifier import classify_message, evidence_span
 from app.services.geocoder import geocode
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,10 @@ async def _fix_null_coords_task():
                 db_ev.geo_precision = geo.precision
                 db_ev.geo_uncertainty_m = geo.uncertainty_m
                 db_ev.geo_method = geo.method
+                # location_name may have just changed under it, and a span
+                # quoting the name this row no longer holds would be worse than
+                # no span at all. Rewritten from the pair as stored, every time.
+                db_ev.evidence_span = evidence_span(db_ev.raw_text, location_name)
                 await session.commit()
                 fixed += 1
                 logger.info(
@@ -248,6 +252,7 @@ async def _reclassify_vague_locations_task():
                     db_ev.geo_precision = geo.precision
                     db_ev.geo_uncertainty_m = geo.uncertainty_m
                     db_ev.geo_method = geo.method
+                    db_ev.evidence_span = evidence_span(db_ev.raw_text, new_loc)
                     if classified.get("severity"):
                         db_ev.severity = classified["severity"]
                     db_ev.killed_reported = classified.get("killed_reported")
@@ -599,6 +604,13 @@ async def _import_osint_waves_task():
                 source_reliability=_OSINT_RELIABILITY,
                 location_name=location_name,
                 source_url=source_url,
+                # This importer classifies nothing, and the span does not need
+                # it to: it is a fact about raw_text and location_name, not
+                # about a model. Leaving it for the startup repair pass would
+                # have worked too — this just keeps the gap at zero from the
+                # moment of import, for the same reason the report row below is
+                # written here rather than on the next boot.
+                evidence_span=evidence_span(raw_text, location_name),
             )
             session.add(db_event)
             # This is a third writer of events, so it writes its report row too

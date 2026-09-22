@@ -1,5 +1,8 @@
-import gzip, collections, io
-path = "/root/archive/conflict_monitor-20260818.sql.gz"
+import gzip, collections, io, sys
+# Defaults are the VPS copy and its scratch dir; pass paths to run against the
+# second verified copy instead (the archive is no longer single-copy, 0a5808b).
+path = sys.argv[1] if len(sys.argv) > 1 else "/root/archive/conflict_monitor-20260818.sql.gz"
+out_path = sys.argv[2] if len(sys.argv) > 2 else "/tmp/locations.tsv"
 agg = collections.defaultdict(lambda: collections.Counter())
 n = 0
 inev = False
@@ -17,7 +20,7 @@ with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
         n += 1
         loc, lat, lon = f[15], f[7], f[8]
         agg[loc][(lat, lon)] += 1
-out = io.open("/tmp/locations.tsv", "w", encoding="utf-8")
+out = io.open(out_path, "w", encoding="utf-8")
 out.write("count\tlocation_name\tlat\tlon\tdistinct_coords\n")
 rows = sorted(agg.items(), key=lambda kv: -sum(kv[1].values()))
 for loc, coords in rows:

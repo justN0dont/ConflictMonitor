@@ -6,7 +6,12 @@ Fetches confirmed wave data (27 waves, Feb 28–Mar 7 2026) and inserts as Event
 Safe to re-run: uses source_url as dedup key (skips already-imported waves).
 
 Run inside backend container:
-    docker compose exec backend python /app/app/scripts/import_osint_data.py
+    docker compose exec backend python -m app.scripts.import_osint_data
+
+`-m`, and not the file path it used to be. Running a file puts the SCRIPT's
+directory on sys.path and not the working directory, so `from app.services...`
+below would fail with ModuleNotFoundError — measured, not assumed. `-m` puts
+/app on the path, which is what makes the import resolve.
 """
 
 import asyncio
@@ -20,6 +25,8 @@ from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.services.classifier import evidence_span
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -164,12 +171,12 @@ async def import_waves(session: AsyncSession, waves: list[dict]) -> tuple[int, i
                     source, channel_name, raw_text, summary, event_type,
                     severity, lat, lon, geometry, timestamp, created_at,
                     report_count, reporting_channels, source_reliability,
-                    location_name, source_url
+                    location_name, source_url, evidence_span
                 ) VALUES (
                     :source, :channel_name, :raw_text, :summary, :event_type,
                     :severity, :lat, :lon, ST_GeomFromEWKB(:geometry), :timestamp,
                     NOW(), 1, :reporting_channels, :source_reliability,
-                    :location_name, :source_url
+                    :location_name, :source_url, :evidence_span
                 )
             """),
             {
@@ -187,6 +194,13 @@ async def import_waves(session: AsyncSession, waves: list[dict]) -> tuple[int, i
                 "source_reliability": SOURCE_RELIABILITY,
                 "location_name": location_name,
                 "source_url": source_url,
+                # An explicit column list is a place a column can be forgotten,
+                # and this one was: every wave imported before *this commit*
+                # reached disk with evidence_span NULL — "nothing looked" — and
+                # the startup repair pass then filled it in, so the omission
+                # left no trace to find. Same one function as every other
+                # writer; the span is searched here, never supplied.
+                "evidence_span": evidence_span(raw_text, location_name),
             },
         )
         await session.commit()

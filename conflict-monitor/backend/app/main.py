@@ -13,6 +13,7 @@ from app.routes.channels import router as channels_router
 from app.routes.events import router as events_router
 from app.routes.tracking import router as tracking_router
 from app.routes.ws import router as ws_router
+from app.services.classifier import evidence_span
 from app.services.connectivity import start_connectivity_poller
 from app.services.satellites import start_tle_fetcher
 
@@ -57,6 +58,12 @@ async def run_startup_migrations(engine):
             ("geo_precision",       "TEXT",    "NULL"),
             ("geo_uncertainty_m",   "INTEGER", "NULL"),
             ("geo_method",          "TEXT",    "NULL"),
+            # DEFAULT NULL, not '', and the difference is the whole column:
+            # '' is a measurement ("nothing in this text spells this place")
+            # and NULL is the absence of one. Defaulting to '' would stamp the
+            # measurement on 83,938 rows nothing had read. The repair pass
+            # below is what turns those NULLs into answers.
+            ("evidence_span",       "TEXT",    "NULL"),
         ]
         for col, col_type, default in migrations:
             try:
@@ -257,6 +264,69 @@ async def run_startup_migrations(engine):
             "CREATE INDEX IF NOT EXISTS idx_event_reports_source_url "
             "ON event_reports(source_url) WHERE source_url <> ''"
         ))
+
+    # ── Repair pass: give every row on disk its evidence_span ───────────────
+    # In Python, and NOT in SQL, on purpose. Postgres can express a word-
+    # anchored case-insensitive match, so this loop could have been one UPDATE
+    # — and then there would be two definitions of what counts as a quote,
+    # drifting apart, with the column unable to say which one wrote it. The
+    # writers call classifier.evidence_span(); so does this. One rule.
+    #
+    # Its own transaction, for the reason the report backfill gives above. It
+    # is CAUGHT, unlike that one, and the difference is what a skip costs: a
+    # skipped report backfill is 49,369 classifier calls on the next sweep, a
+    # skipped pass here leaves NULLs, and NULL already means exactly "nothing
+    # has looked at this row". The failure mode is the honest value, so it does
+    # not get to fail the boot.
+    #
+    # Batched because a restored archive is 83,938 rows, and walked by a
+    # CURSOR on id rather than by re-reading the head of the same predicate.
+    # `WHERE evidence_span IS NULL` alone would make termination depend on
+    # evidence_span() never returning None: with the cursor removed and the
+    # function stubbed to None the loop re-selects the same 5,000 rows for
+    # ever, inside engine.begin(), during lifespan — a held transaction and an
+    # app that never serves. `AND id > :last` bounds it structurally instead.
+    # Every iteration strictly advances `last`, so the pass ends after at most
+    # ceil(rows/5000) of them whatever the function returns, and a row it
+    # somehow failed to fill stays NULL — which is this column's honest value
+    # for "nothing looked" and is repaired on the next boot.
+    try:
+        async with engine.begin() as conn:
+            repaired = quoted = 0
+            last_id = 0
+            while True:
+                rows = (await conn.execute(text(
+                    "SELECT id, raw_text, location_name FROM events "
+                    "WHERE evidence_span IS NULL AND id > :last "
+                    "ORDER BY id LIMIT 5000"
+                ), {"last": last_id})).all()
+                if not rows:
+                    break
+                last_id = rows[-1].id
+                params = [
+                    {
+                        "id": r.id,
+                        "span": evidence_span(r.raw_text or "", r.location_name or ""),
+                    }
+                    for r in rows
+                ]
+                await conn.execute(
+                    text("UPDATE events SET evidence_span = :span WHERE id = :id"),
+                    params,
+                )
+                repaired += len(params)
+                # Counted from what this pass wrote, not from a SELECT over the
+                # whole column: on a later boot that repairs three new rows, a
+                # table-wide count would report the archive's total beside them.
+                quoted += sum(1 for p in params if p["span"])
+            if repaired:
+                logger.info(
+                    "  Gave %d event(s) an evidence_span; %d of them quote their "
+                    "own location_name. After the first boot this prints nothing",
+                    repaired, quoted,
+                )
+    except Exception:
+        logger.exception("evidence_span repair pass failed — rows stay NULL")
 
     logger.info("Database tables ready")
 

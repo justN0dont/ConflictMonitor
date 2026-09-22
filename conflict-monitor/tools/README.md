@@ -12,6 +12,7 @@ Each one re-derives a claim made there; none of them mutate anything.
 | `archive_fallback_rate.py` | The Phase 0 fallback rate, by re-classifying a stratified archive sample with the real `classify_message()` |
 | `archive_sentinel_audit.py` | What the Indian Ocean sentinel migration would actually do to the archive, counted row by row |
 | `geocoder_vs_archive.py` | Simulates `geocoder.py` against the archive; shows what word boundaries would change |
+| `gazetteer_gaps.py` | Which location names the tables miss, ranked by event volume — the shortlist for new entries |
 | `recover_from_transcripts.py` | Reconstructs source files from Claude Code transcripts (how v3 was partly recovered) |
 
 The `archive_*` scripts read the production dump and are meant to run **on the VPS**:

@@ -23,6 +23,7 @@ from app.db import async_session
 from app.models import Event
 from app.schemas import EventRead, EventWS
 from app.services.broadcaster import broadcaster
+from app.services.classifier import evidence_span
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +338,14 @@ async def seed_demo_history(count: int = 300):
                 lon=evt_data["lon"],
                 geometry=geometry,
                 timestamp=evt_data["timestamp"],
+                # A demo row states no location_name — the place reaches the
+                # database as a coordinate and as words inside raw_text, never
+                # as a claim — so the one rule answers '' for all of them, and
+                # '' is the truth about this row rather than a placeholder.
+                # Written here because NULL is not: NULL means nothing looked,
+                # and in demo mode it used to mean only "this row came from
+                # demo.py", which is what an unwired writer costs a detector.
+                evidence_span=evidence_span(evt_data["raw_text"], ""),
             )
             session.add(db_event)
             created += 1
@@ -376,6 +385,7 @@ async def start_demo_event_generator():
                     lon=evt_data["lon"],
                     geometry=geometry,
                     timestamp=evt_data["timestamp"],
+                    evidence_span=evidence_span(evt_data["raw_text"], ""),
                 )
                 session.add(db_event)
                 await session.commit()
@@ -418,6 +428,7 @@ async def start_demo_event_generator():
                             lon=burst_data["lon"],
                             geometry=geo,
                             timestamp=burst_data["timestamp"],
+                            evidence_span=evidence_span(burst_data["raw_text"], ""),
                         )
                         session.add(be)
                         await session.commit()
