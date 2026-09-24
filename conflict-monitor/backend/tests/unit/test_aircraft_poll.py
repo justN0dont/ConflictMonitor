@@ -10,15 +10,17 @@ Two halves.
    `asyncio.sleep` is replaced so the loop stops after the scripted cycles,
    and the module cache is swapped for a fresh one. No poll_once seam exists
    yet (docs/GODS-EYE-VIEW.md, PHASE2-2); driving the loop tests the code that
-   runs rather than a copy of it. The C31 test is a strict xfail: it describes
-   the defect today and turns into an XPASS failure the day feed_health fixes
-   it, which forces the marker off.
+   runs rather than a copy of it. The C31 test was a strict xfail from
+   2b60071 until the aircraft slice of feed_health fixed it; the marker came
+   off in the fixing commit, as the ratchet required.
 """
 
 import types
 
 import pytest
 
+from app import feeds
+from app.feeds import ErrorKind
 from app.services import opensky
 
 _FL = opensky.MIN_ALTITUDE_FT
@@ -82,21 +84,31 @@ class _StopLoop(Exception):
 async def _run_poller(monkeypatch, cycles):
     """Run the real loop over scripted (adsb_result, opensky_result) cycles.
 
-    Returns the cache the loop wrote to. A result of None is a failed fetch,
-    exactly what _poll_adsb_lol / _poll_opensky return on any error.
+    Returns the cache the loop wrote to. A list is a successful fetch (empty
+    list: a successful empty answer); None is a failed fetch, which the
+    scripted fetcher reports as a fetch_error.
     """
     cache = {**opensky._cache, "states": [], "jamming": []}
     monkeypatch.setattr(opensky, "_cache", cache)
+    fresh = feeds.FeedTracker(feeds.REGISTRY["aircraft"])
+    monkeypatch.setitem(feeds.TRACKERS, "aircraft", fresh)
     monkeypatch.setattr(opensky, "record_aircraft_position", lambda *a: None)
 
     script = list(cycles)
     turn = {"i": 0}
 
+    def result(states, name):
+        if states is None:
+            return opensky.FetchResult(None, ErrorKind.FETCH_ERROR, detail=f"{name} down")
+        kind = ErrorKind.OK if states else ErrorKind.EMPTY
+        # A real upstream clock, so a success reads live rather than stale.
+        return opensky.FetchResult(states, kind, source_epoch=opensky.time.time())
+
     async def adsb(_client):
-        return script[turn["i"]][0]
+        return result(script[turn["i"]][0], "adsb.lol")
 
     async def opensky_fetch(_client, _auth):
-        return script[turn["i"]][1]
+        return result(script[turn["i"]][1], "opensky")
 
     async def sleep(_seconds):
         turn["i"] += 1
@@ -115,12 +127,14 @@ async def _run_poller(monkeypatch, cycles):
 
 
 async def test_a_fallback_poll_records_opensky_as_the_source(monkeypatch):
-    """The switch is at least recorded in the cache. It reaches only
-    /tracking/jamming today; the aircraft route is a bare array (untriaged:
-    bare-array tracking routes, FINDINGS.md)."""
+    """The adsb.lol -> OpenSky switch used to reach only /tracking/jamming, as a
+    source string. It is now `fallback_from` on the aircraft envelope."""
     cache = await _run_poller(monkeypatch, [(None, _cell(3))])
     assert cache["source"] == "opensky"
     assert len(cache["states"]) == 3
+    # ...and now as a field on the envelope, not a string to infer it from.
+    env = opensky.get_aircraft_envelope()
+    assert (env["source"], env["fallback_from"]) == ("opensky", "adsb.lol")
 
 
 async def test_a_failed_poll_does_not_advance_the_success_time(monkeypatch):
@@ -132,17 +146,36 @@ async def test_a_failed_poll_does_not_advance_the_success_time(monkeypatch):
     assert opensky.get_jamming_zones()["as_of"] == first_success
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="C31: a failed poll leaves the last verdict in place with status still ok",
-)
 async def test_after_both_sources_fail_the_verdict_is_not_still_ok(monkeypatch):
     """C31 (FINDINGS.md): with both adsb.lol and OpenSky down, the last
-    measured verdict keeps reading "ok" indefinitely, and the UI shows a dead
+    measured verdict kept reading "ok" indefinitely, and the UI showed a dead
     feed as a calm sky. Reproduced live on 2026-09-24 (docs/GODS-EYE-VIEW.md,
-    section 2). The fix is feed_health's; this test only states the contract:
-    after a poll in which nothing was measured, the status must not claim a
-    measurement."""
+    section 2). Contract: after a poll in which nothing was measured, the
+    status must not claim a measurement."""
     await _run_poller(monkeypatch, [(_cell(10), None), (None, None)])
-    assert opensky.get_jamming_zones()["status"] != "ok"
+    js = opensky.get_jamming_zones()
+    assert js["status"] != "ok"
+    assert js["status"] == "feed_not_live"
+    assert js["feed_state"] == "retrying"
+    assert js["zones"] == []
+
+
+async def test_after_both_sources_fail_the_fleet_is_kept_but_not_counted(monkeypatch):
+    """C31, the aircraft half. The last fleet stays available as last-good, but
+    the envelope says the feed is retrying and prints no count, so neither the
+    header nor the rail can show it as a live reading."""
+    await _run_poller(monkeypatch, [(_cell(10), None), (None, None)])
+    env = opensky.get_aircraft_envelope()
+    assert env["state"] == "retrying"
+    assert env["count"] is None
+    assert env["verdict"] == "unproven"
+    assert len(env["items"]) == 10
+    assert env["reason"].startswith("fetch_error")
+
+
+async def test_a_successful_empty_answer_is_live_with_an_unproven_zero(monkeypatch):
+    """An empty sky from a live feed is a measured zero, printed as 0 — but
+    still `unproven`: `absent` waits for the control ring."""
+    await _run_poller(monkeypatch, [([], None)])
+    env = opensky.get_aircraft_envelope()
+    assert (env["state"], env["count"], env["verdict"]) == ("live", 0, "unproven")

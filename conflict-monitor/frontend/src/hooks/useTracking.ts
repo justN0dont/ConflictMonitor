@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { emptyEnvelope, FEED_DRAWN, type FeedEnvelope, type FeedState } from "../lib/feed";
 
 export interface Aircraft {
   icao24: string;
@@ -30,7 +31,12 @@ export interface JammingZone {
 }
 
 export interface JammingStatus {
-  status: "ok" | "no_integrity_data" | "insufficient_coverage";
+  /**
+   * "feed_not_live": the aircraft feed is not live or stale, so the backend
+   * withholds its last verdict and serves no zones (C31). `feed_state` says why.
+   */
+  status: "ok" | "no_integrity_data" | "insufficient_coverage" | "feed_not_live";
+  feed_state: FeedState | null;
   source: string | null;
   as_of: number;
   cells_evaluated: number;
@@ -216,13 +222,16 @@ const VESSEL_POLL_MS = 10_000;
 const TLE_POLL_MS = 6 * 3600 * 1000;
 const TRACK_POLL_MS = 15_000;
 const CONNECTIVITY_POLL_MS = 60_000;
+const NO_AIRCRAFT: Aircraft[] = [];
 
 export function useTracking() {
-  const [aircraft, setAircraft] = useState<Aircraft[]>([]);
+  const [aircraftFeed, setAircraftFeed] = useState<FeedEnvelope<Aircraft>>(() => emptyEnvelope("aircraft"));
+  const [aircraftReceivedAt, setAircraftReceivedAt] = useState<number | null>(null);
   const [tleData, setTleData] = useState<TLERecord[]>([]);
   const [jammingZones, setJammingZones] = useState<JammingZone[]>([]);
   const [jammingStatus, setJammingStatus] = useState<JammingStatus>({
     status: "no_integrity_data",
+    feed_state: null,
     source: null,
     as_of: 0,
     cells_evaluated: 0,
@@ -261,7 +270,10 @@ export function useTracking() {
     const fetchAircraft = async () => {
       try {
         const res = await fetch(`${API_BASE}/tracking/aircraft`);
-        if (res.ok && mountedRef.current) setAircraft(await res.json());
+        if (res.ok && mountedRef.current) {
+          setAircraftFeed(await res.json());
+          setAircraftReceivedAt(Date.now());
+        }
       } catch { /* backend unavailable */ }
     };
     fetchAircraft();
@@ -279,6 +291,7 @@ export function useTracking() {
           setJammingZones(data.zones ?? []);
           setJammingStatus({
             status: data.status ?? "no_integrity_data",
+            feed_state: data.feed_state ?? null,
             source: data.source ?? null,
             as_of: data.as_of ?? 0,
             cells_evaluated: data.cells_evaluated ?? 0,
@@ -374,5 +387,9 @@ export function useTracking() {
     return () => clearInterval(interval);
   }, []);
 
-  return { aircraft, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus };
+  // The renderers draw last-good items only while the state allows it; the
+  // envelope itself goes to the header and rail, which say what it is worth.
+  const aircraft = FEED_DRAWN[aircraftFeed.state] ? aircraftFeed.items : NO_AIRCRAFT;
+
+  return { aircraft, aircraftFeed, aircraftReceivedAt, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus };
 }

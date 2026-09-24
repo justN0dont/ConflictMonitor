@@ -9,8 +9,9 @@
 import { Plane, Radio, Satellite, Ship, FlaskConical } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Aircraft, JammingStatus, TLERecord, Vessel } from "../hooks/useTracking";
+import { FEED_WORD, feedAge, type FeedEnvelope, type FeedState } from "../lib/feed";
 import { STATUS, formatAge } from "../lib/tokens";
-import { STALE_AFTER, useFeedAges } from "../lib/useFeedAges";
+import { STALE_AFTER, useFeedAges, useNow } from "../lib/useFeedAges";
 import type { ConflictEvent } from "../types/event";
 
 interface HeaderProps {
@@ -19,6 +20,9 @@ interface HeaderProps {
   /** The whole retained stream, for stream currency. */
   allEvents: ConflictEvent[];
   aircraft: Aircraft[];
+  /** The aircraft feed's state, from the server. The count and age come from here. */
+  aircraftFeed: FeedEnvelope<Aircraft>;
+  aircraftReceivedAt: number | null;
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingStatus: JammingStatus;
@@ -41,17 +45,27 @@ function formatUTCTime(): string {
   return `${day} ${month} ${year} | ${hours}:${minutes}:${seconds} UTC`;
 }
 
+/**
+ * One count. `value` null renders "—", never 0: the feed cannot vouch for a
+ * number, and `note` (title and accessible name) says why. `dim` marks a
+ * number that is real but old.
+ */
 function Count({
   Icon,
   value,
   unit,
+  note,
+  dim = false,
 }: {
   Icon: typeof Plane;
-  value: number;
+  value: number | null;
   unit: string;
+  note?: string;
+  dim?: boolean;
 }) {
+  const label = value == null ? `${unit} — ${note ?? "no reading"}` : `${value} ${unit}${note ? ` · ${note}` : ""}`;
   return (
-    <span className="flex items-baseline gap-1.5" title={`${value} ${unit}`}>
+    <span className="flex items-baseline gap-1.5" title={label} aria-label={label} style={dim ? { opacity: 0.55 } : undefined}>
       <Icon
         size={12}
         strokeWidth={2}
@@ -59,7 +73,7 @@ function Count({
         aria-hidden="true"
       />
       <span className="text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">
-        {value}
+        {value ?? "—"}
       </span>
       <span className="text-[9px] tracking-[0.12em] text-[var(--text-muted)]">{unit}</span>
     </span>
@@ -79,16 +93,33 @@ function FeedAge({
   label,
   age,
   staleAfter,
+  state,
+  reason,
 }: {
   label: string;
   age: number | null;
   staleAfter: number;
+  /** When the server reports the feed's state, it decides the mark, not the age. */
+  state?: FeedState;
+  reason?: string | null;
 }) {
-  const status =
-    age == null ? STATUS.unknown : age > staleAfter ? STATUS.warning : null;
+  const status = state
+    ? state === "live"
+      ? null
+      : state === "stale" || state === "retrying"
+        ? STATUS.warning
+        : STATUS.unknown
+    : age == null
+      ? STATUS.unknown
+      : age > staleAfter
+        ? STATUS.warning
+        : null;
   const StatusIcon = status?.Icon;
+  const title = state
+    ? `${label}: ${FEED_WORD[state]}${reason ? ` · ${reason}` : ""} · age since last successful poll`
+    : `${label}: last payload received`;
   return (
-    <span className="flex items-baseline gap-1" title={`${label}: last payload received`}>
+    <span className="flex items-baseline gap-1" title={title} aria-label={`${title}: ${formatAge(age)}`}>
       {StatusIcon && (
         <StatusIcon
           size={11}
@@ -116,6 +147,8 @@ export function Header({
   events,
   allEvents,
   aircraft,
+  aircraftFeed,
+  aircraftReceivedAt,
   vessels,
   tleData,
   jammingStatus,
@@ -123,6 +156,13 @@ export function Header({
   demoMode,
 }: HeaderProps) {
   const [utcTime, setUtcTime] = useState(formatUTCTime);
+  const now = useNow(1000);
+  const adsbAge = feedAge(aircraftFeed, aircraftReceivedAt, now);
+  const acState = aircraftFeed.state;
+  // null unless live or stale (the server decides); airborne is counted from
+  // the items only when there is a count to print.
+  const acCount =
+    aircraftFeed.count == null ? null : aircraft.filter((a) => !a.on_ground).length;
   const ages = useFeedAges({
     aircraft,
     vessels,
@@ -184,7 +224,13 @@ export function Header({
       <div className="flex shrink-0 items-center gap-4">
         <div className="flex items-baseline gap-3.5">
           <Count Icon={Radio} value={events.length} unit="EVT" />
-          <Count Icon={Plane} value={aircraft.filter((a) => !a.on_ground).length} unit="AC" />
+          <Count
+            Icon={Plane}
+            value={acCount}
+            unit="AC"
+            note={acState === "live" ? "airborne" : `${FEED_WORD[acState]}${aircraftFeed.reason ? ` · ${aircraftFeed.reason}` : ""}`}
+            dim={acState === "stale"}
+          />
           <Count Icon={Ship} value={vessels.length} unit="VES" />
           <Count Icon={Satellite} value={tleData.length} unit="SAT" />
         </div>
@@ -192,7 +238,13 @@ export function Header({
         <span className="h-4 w-px bg-[var(--border)]" aria-hidden="true" />
 
         <div className="flex items-baseline gap-3">
-          <FeedAge label="ADS-B" age={ages.adsb} staleAfter={STALE_AFTER.adsb} />
+          <FeedAge
+            label="ADS-B"
+            age={adsbAge}
+            staleAfter={STALE_AFTER.adsb}
+            state={acState}
+            reason={aircraftFeed.reason}
+          />
           <FeedAge label="AIS" age={ages.ais} staleAfter={STALE_AFTER.ais} />
           <FeedAge label="GNSS" age={ages.gnss} staleAfter={STALE_AFTER.gnss} />
         </div>

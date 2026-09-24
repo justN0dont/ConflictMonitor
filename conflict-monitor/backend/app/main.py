@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app import feeds
 from app.config import settings
 from app.db import engine
 from app.models import Base
@@ -357,6 +359,7 @@ async def lifespan(app: FastAPI):
         # Start synthetic generators
         tasks.append(asyncio.create_task(start_demo_event_generator()))
         tasks.append(asyncio.create_task(start_demo_aircraft_poller()))
+        feeds.tracker("aircraft").task = tasks[-1]
         tasks.append(asyncio.create_task(start_demo_vessel_poller()))
 
         # CelesTrak is free, still use real satellite data
@@ -382,6 +385,7 @@ async def lifespan(app: FastAPI):
 
         # Aircraft tracking
         tasks.append(asyncio.create_task(start_opensky_poller()))
+        feeds.tracker("aircraft").task = tasks[-1]
         logger.info("Aircraft poller started")
 
         # Satellite TLEs
@@ -426,9 +430,25 @@ app.include_router(tracking_router)
 app.include_router(ws_router)
 
 
+_PROCESS_STARTED_AT = time.time()
+
+
 @app.get("/")
-async def health():
+async def root():
+    """Process liveness only: it says the process answers, nothing about feeds."""
     return {"status": "ok"}
+
+
+@app.get("/health")
+async def health():
+    """Feed health, read from memory so it answers with the database down.
+
+    Always HTTP 200: what is wrong is said in the body. A non-200 would let a
+    container healthcheck restart the backend because adsb.lol went down.
+    Only the aircraft feed reports so far; the others join as feed_health
+    reaches them (docs/FINDINGS.md, Phase 2).
+    """
+    return feeds.health(time.time(), _PROCESS_STARTED_AT)
 
 
 @app.get("/config")

@@ -20,8 +20,9 @@ import type {
   TLERecord,
   Vessel,
 } from "../hooks/useTracking";
+import { FEED_WORD, feedAge, type FeedEnvelope } from "../lib/feed";
 import { formatAge } from "../lib/tokens";
-import { STALE_AFTER, useFeedAges, type FeedAges } from "../lib/useFeedAges";
+import { STALE_AFTER, useFeedAges, useNow, type FeedAges } from "../lib/useFeedAges";
 import type { ConflictEvent } from "../types/event";
 import { IndicatorRow, type RailState, type Row } from "./IndicatorRow";
 
@@ -31,6 +32,9 @@ interface IndicatorRailProps {
   /** The whole retained stream, for stream currency. */
   allEvents: ConflictEvent[];
   aircraft: Aircraft[];
+  /** The aircraft feed's state, from the server; ADS-B currency comes from here. */
+  aircraftFeed: FeedEnvelope<Aircraft>;
+  aircraftReceivedAt: number | null;
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingStatus: JammingStatus;
@@ -40,15 +44,24 @@ interface IndicatorRailProps {
   demoMode: boolean;
 }
 
-function feedCurrencyRow(ages: FeedAges): Row {
+/**
+ * ADS-B's entry is the server's verdict: "fresh" only when the aircraft feed
+ * is live. The other three are still arrival ages, measured here, until
+ * feed_health reaches them - an arrival cannot tell a dead upstream from a
+ * backend re-serving its cache, which is how 4/4 WATCH sat over a dead fleet.
+ */
+function feedCurrencyRow(
+  ages: FeedAges,
+  adsb: { age: number | null; live: boolean; reported: boolean },
+): Row {
   const feeds = [
-    { key: "ADS-B", age: ages.adsb, stale: STALE_AFTER.adsb },
-    { key: "AIS", age: ages.ais, stale: STALE_AFTER.ais },
-    { key: "GNSS", age: ages.gnss, stale: STALE_AFTER.gnss },
-    { key: "TLE", age: ages.tle, stale: STALE_AFTER.tle },
+    { key: "ADS-B", age: adsb.reported ? adsb.age : null, fresh: adsb.live },
+    { key: "AIS", age: ages.ais, fresh: ages.ais != null && ages.ais <= STALE_AFTER.ais },
+    { key: "GNSS", age: ages.gnss, fresh: ages.gnss != null && ages.gnss <= STALE_AFTER.gnss },
+    { key: "TLE", age: ages.tle, fresh: ages.tle != null && ages.tle <= STALE_AFTER.tle },
   ];
   const reporting = feeds.filter((f) => f.age != null);
-  const fresh = reporting.filter((f) => (f.age as number) <= f.stale);
+  const fresh = reporting.filter((f) => f.fresh);
   const silent = feeds.length - reporting.length;
 
   let state: RailState;
@@ -61,10 +74,10 @@ function feedCurrencyRow(ages: FeedAges): Row {
     note = `${silent} of ${feeds.length} feeds silent since load`;
   } else if (fresh.length < reporting.length) {
     state = "STALE";
-    note = `${reporting.length - fresh.length} feed(s) past poll interval`;
+    note = `${reporting.length - fresh.length} feed(s) not current`;
   } else {
     state = "WATCH";
-    note = "every feed is arriving within its poll interval";
+    note = "every feed is current";
   }
 
   const worst = reporting.length
@@ -81,24 +94,42 @@ function feedCurrencyRow(ages: FeedAges): Row {
   };
 }
 
-function aircraftRow(aircraft: Aircraft[], ages: FeedAges): Row {
-  const airborne = aircraft.filter((a) => !a.on_ground).length;
+/**
+ * The server says what state the feed is in; this row only chooses words.
+ * A count is printed only when the envelope carries one (live or stale), so a
+ * dead feed reads "—" and a reason, never a number from its last good poll.
+ */
+function aircraftRow(feed: FeedEnvelope<Aircraft>, age: number | null): Row {
+  const airborne = feed.items.filter((a) => !a.on_ground).length;
+  const via = feed.fallback_from ? ` · via ${feed.source} (fallback from ${feed.fallback_from})` : "";
+  const why = feed.reason ? ` — ${feed.reason}` : "";
   let state: RailState;
+  let value = "—";
   let note: string;
-  if (ages.adsb == null) {
-    state = "NOT-OBSERVED";
-    note = "ADS-B has not reported since load";
-  } else if (aircraft.length === 0) {
-    state = "DEGRADED";
-    note = "feed returned no aircraft — coverage unknown";
-  } else if (ages.adsb > STALE_AFTER.adsb) {
-    state = "STALE";
-    note = "count is from a missed poll";
-  } else {
-    state = "WATCH";
-    note = `${aircraft.length} in feed, ${airborne} airborne`;
+  switch (feed.state) {
+    case "live":
+      state = feed.count === 0 ? "DEGRADED" : "WATCH";
+      value = String(airborne);
+      note =
+        feed.count === 0
+          ? `feed is live and returned no aircraft — coverage unknown${via}`
+          : `${feed.count} in feed, ${airborne} airborne${via}`;
+      break;
+    case "stale":
+      state = "STALE";
+      value = String(airborne);
+      note = `count is real but old${why}${via}`;
+      break;
+    case "pending":
+      state = "NOT-OBSERVED";
+      note = `${FEED_WORD.pending.toLowerCase()}${why}`;
+      break;
+    default:
+      // retrying, unavailable, auth_failed, dead, unconfigured
+      state = "DEGRADED";
+      note = `${FEED_WORD[feed.state].toLowerCase()}${why}`;
   }
-  return { name: "AIRCRAFT TRACKED", value: String(airborne), state, note, age: ages.adsb };
+  return { name: "AIRCRAFT TRACKED", value, state, note, age };
 }
 
 /**
@@ -130,6 +161,10 @@ function gpsRow(js: JammingStatus, zones: JammingZone[], ages: FeedAges): Row {
 
   if (ages.gnss == null) {
     return row("NOT-OBSERVED", "—", "integrity feed has not reported since load");
+  }
+  if (js.status === "feed_not_live") {
+    const why = js.feed_state ? FEED_WORD[js.feed_state].toLowerCase() : "not live";
+    return row("DEGRADED", "—", `aircraft feed ${why} — last verdict withheld, nothing measured now`);
   }
   if (js.status === "no_integrity_data") {
     return row("DEGRADED", "—", "no NIC/NACp integrity fields in feed — nothing to judge");
@@ -204,6 +239,8 @@ export function IndicatorRail({
   events,
   allEvents,
   aircraft,
+  aircraftFeed,
+  aircraftReceivedAt,
   vessels,
   tleData,
   jammingStatus,
@@ -211,6 +248,8 @@ export function IndicatorRail({
   isConnected,
   demoMode,
 }: IndicatorRailProps) {
+  const now = useNow(1000);
+  const adsbAge = feedAge(aircraftFeed, aircraftReceivedAt, now);
   const ages = useFeedAges({
     aircraft,
     vessels,
@@ -220,8 +259,12 @@ export function IndicatorRail({
   });
 
   const rows: Row[] = [
-    feedCurrencyRow(ages),
-    aircraftRow(aircraft, ages),
+    feedCurrencyRow(ages, {
+      age: adsbAge,
+      live: aircraftFeed.state === "live",
+      reported: aircraftReceivedAt != null && aircraftFeed.state !== "pending",
+    }),
+    aircraftRow(aircraftFeed, adsbAge),
     gpsRow(jammingStatus, jammingZones, ages),
     vesselRow(vessels, ages),
     eventVolumeRow(events, isConnected, ages),
@@ -247,7 +290,8 @@ export function IndicatorRail({
       <div className="border-t border-[var(--border)] px-3 py-[6px] text-[9px] leading-[1.4] text-[var(--text-muted)]">
         DEGRADED = coverage insufficient to evaluate. It is not a calm reading.
         <br />
-        Row 0 measures arrival, not content: a feed can answer on time with nothing in it.
+        Row 0: ADS-B is judged by the server from the upstream's own clock; the other
+        feeds still measure arrival, not content.
         <br />
         Colour marks the exception only. An unlit row is nominal.
       </div>

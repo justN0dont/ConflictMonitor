@@ -12,7 +12,7 @@ const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:800
 
 export default function App() {
   const { events, isConnected } = useEventStream();
-  const { aircraft, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus } = useTracking();
+  const { aircraft, aircraftFeed, aircraftReceivedAt, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus } = useTracking();
   const [demoMode, setDemoMode] = useState(false);
   const [timeRange, setTimeRange] = useState<{ earliest: Date; latest: Date } | null>(null);
   const [activeRange, setActiveRange] = useState<{ start: Date; end: Date } | null>(null);
@@ -66,13 +66,15 @@ export default function App() {
         events={filteredEvents}
         allEvents={events}
         aircraft={aircraft}
+        aircraftFeed={aircraftFeed}
+        aircraftReceivedAt={aircraftReceivedAt}
         vessels={vessels}
         tleData={tleData}
         jammingStatus={jammingStatus}
         isConnected={isConnected}
         demoMode={demoMode}
       />
-      <MapPanel events={filteredEvents} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} />
+      <MapPanel events={filteredEvents} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} aircraftFeedState={aircraftFeed.state} />
       <div className="sidebar">
         <div className="sidebar-feed"><LiveFeed events={filteredEvents} /></div>
         <div className="sidebar-connectivity">
@@ -83,6 +85,8 @@ export default function App() {
             events={filteredEvents}
             allEvents={events}
             aircraft={aircraft}
+            aircraftFeed={aircraftFeed}
+            aircraftReceivedAt={aircraftReceivedAt}
             vessels={vessels}
             tleData={tleData}
             jammingStatus={jammingStatus}
