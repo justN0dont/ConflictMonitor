@@ -150,11 +150,22 @@ class FeedTracker:
     synthetic: bool = False
     count: int | None = None
     task: asyncio.Task | None = field(default=None, repr=False)
+    # What the collector did since the last heartbeat; drained by the flusher.
+    window_attempts: int = 0
+    window_successes: int = 0
+    window_failures: dict = field(default_factory=dict)
 
     def _attempt(self, now: float) -> None:
         if self.first_attempt_at is None:
             self.first_attempt_at = now
         self.last_attempt_at = now
+        self.window_attempts += 1
+
+    def drain_window(self) -> tuple[int, int, dict]:
+        """(attempts, successes, failures by kind) since the last drain, and reset."""
+        out = (self.window_attempts, self.window_successes, dict(self.window_failures))
+        self.window_attempts, self.window_successes, self.window_failures = 0, 0, {}
+        return out
 
     def succeeded(self, now: float, *, count: int, source: str,
                   source_epoch: float | None, kind: ErrorKind = ErrorKind.OK,
@@ -162,6 +173,7 @@ class FeedTracker:
         if kind not in SUCCESS_KINDS:
             raise ValueError(f"{kind} is not a success")
         self._attempt(now)
+        self.window_successes += 1
         self.last_success_at = now
         # None stays None: an upstream that gave no time does not get ours.
         self.source_epoch = source_epoch
@@ -177,6 +189,7 @@ class FeedTracker:
         if kind in SUCCESS_KINDS:
             raise ValueError(f"{kind} is not a failure")
         self._attempt(now)
+        self.window_failures[kind.value] = self.window_failures.get(kind.value, 0) + 1
         self.consecutive_failures += 1
         self.error_kind = kind
         self.error_detail = clean_detail(detail)

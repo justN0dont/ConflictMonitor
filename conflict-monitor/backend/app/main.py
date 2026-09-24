@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ from sqlalchemy import text
 
 from app import feeds
 from app.config import settings
-from app.db import engine
+from app.db import async_session, engine
 from app.models import Base
 from app.routes.channels import router as channels_router
 from app.routes.events import router as events_router
@@ -409,6 +410,11 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(start_news_feed_poller()))
         logger.info("News feed poller started (RSS: Reuters, BBC, Al Jazeera, Times of Israel, Iran International, RFI, MEE)")
 
+    # feed_health persistence: the only writer of feed_health, feed_transition
+    # and feed_heartbeat. Runs in both modes; demo rows are marked synthetic.
+    from app.feed_store import start_feed_flusher
+    tasks.append(asyncio.create_task(start_feed_flusher(async_session)))
+
     for task in tasks:
         task.add_done_callback(_log_task_exception)
 
@@ -453,6 +459,47 @@ async def health():
     reaches them (docs/FINDINGS.md, Phase 2).
     """
     return feeds.health(time.time(), _PROCESS_STARTED_AT)
+
+
+@app.get("/health/history")
+async def health_history(feed: str, hours: float = 24):
+    """One feed's liveness over the last `hours`, from the heartbeat rows.
+
+    `segments` cover the whole window; a gap of more than 120 s between
+    heartbeats is an explicit `unknown` segment, never the last state stretched
+    across it. `transitions` include a `process_start` row per boot. Unlike
+    /health this reads the database, so it fails if Postgres is down.
+    """
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    from app.feed_store import liveness_timeline
+    from app.models import FeedTransition
+
+    if feed not in feeds.TRACKERS:
+        raise HTTPException(status_code=404, detail=f"unknown feed {feed!r}")
+    hours = min(max(hours, 0.1), 24 * 30)
+    until = time.time()
+    since = until - hours * 3600
+    async with async_session() as session:
+        segments = await liveness_timeline(session, feed, since, until)
+        rows = (await session.execute(
+            select(FeedTransition)
+            .where(FeedTransition.feed == feed,
+                   FeedTransition.at >= datetime.datetime.fromtimestamp(since, tz=datetime.timezone.utc))
+            .order_by(FeedTransition.at)
+        )).scalars().all()
+    return {
+        "feed": feed,
+        "since": since,
+        "until": until,
+        "segments": segments,
+        "transitions": [
+            {"at": r.at.timestamp(), "from": r.from_state, "to": r.to_state,
+             "error_kind": r.error_kind, "detail": r.detail}
+            for r in rows
+        ],
+    }
 
 
 @app.get("/config")
