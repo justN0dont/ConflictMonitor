@@ -92,8 +92,10 @@ def test_no_success_for_longer_than_max_stale_is_unavailable():
 
 def test_a_feed_that_never_succeeded_becomes_unavailable_not_pending_forever():
     t = _tracker()
-    t.failed(T0, ErrorKind.FETCH_ERROR)
+    t.failed(T0, ErrorKind.FETCH_ERROR, "ConnectionClosedError")
     assert t.state(T0 + 10) is FeedState.PENDING
+    # Polled and failing is not "not yet polled": the reason names the failure.
+    assert t.reason(T0 + 10) == "no success yet · fetch_error: ConnectionClosedError"
     assert t.state(T0 + SPEC.max_stale_s + 1) is FeedState.UNAVAILABLE
 
 

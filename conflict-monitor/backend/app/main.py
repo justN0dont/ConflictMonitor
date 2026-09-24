@@ -361,6 +361,7 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(start_demo_aircraft_poller()))
         feeds.tracker("aircraft").task = tasks[-1]
         tasks.append(asyncio.create_task(start_demo_vessel_poller()))
+        feeds.tracker("vessels").task = tasks[-1]
 
         # CelesTrak is free, still use real satellite data
         tasks.append(asyncio.create_task(start_tle_fetcher()))
@@ -398,6 +399,7 @@ async def lifespan(app: FastAPI):
 
         # Maritime vessels
         tasks.append(asyncio.create_task(start_maritime_poller()))
+        feeds.tracker("vessels").task = tasks[-1]
         logger.info("Maritime poller started")
 
         # News feed ingestion (RSS from Reuters, BBC, Al Jazeera, Times of Israel, etc.)
@@ -445,7 +447,7 @@ async def health():
 
     Always HTTP 200: what is wrong is said in the body. A non-200 would let a
     container healthcheck restart the backend because adsb.lol went down.
-    Only the aircraft feed reports so far; the others join as feed_health
+    Aircraft and vessels report so far; the others join as feed_health
     reaches them (docs/FINDINGS.md, Phase 2).
     """
     return feeds.health(time.time(), _PROCESS_STARTED_AT)

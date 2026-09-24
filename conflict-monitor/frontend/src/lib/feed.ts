@@ -52,7 +52,7 @@ export const FEED_WORD: Record<FeedState, string> = {
   unavailable: "UNAVAILABLE",
   retrying: "RETRYING",
   stale: "STALE",
-  pending: "NOT YET POLLED",
+  pending: "NO DATA YET",
   live: "LIVE",
   unconfigured: "NOT CONFIGURED",
 };

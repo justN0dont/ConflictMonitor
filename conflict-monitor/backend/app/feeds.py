@@ -107,6 +107,15 @@ REGISTRY: dict[str, FeedSpec] = {
         silence_means="zero aircraft is state 2 unless the feed is live: the configured "
                        "centre has thin ADS-B coverage (FINDINGS.md, Sensor coverage)",
     ),
+    "vessels": FeedSpec(
+        id="vessels",
+        cadence_s=10,         # a stream; this is the client's poll, not the upstream's
+        stale_after_s=120,    # no accepted position report for 2 min (unmeasured)
+        max_stale_s=600,      # the existing 600 s vessel filter
+        requires_env=("AISSTREAM_API_KEY",),
+        silence_means="zero vessels in the Gulf is state 2: AISStream's free tier has no "
+                      "receivers there (FINDINGS.md, Blocked: no AIS coverage in the Gulf)",
+    ),
 }
 
 
@@ -189,11 +198,17 @@ class FeedTracker:
         if st is FeedState.LIVE:
             return None
         if st is FeedState.UNCONFIGURED:
-            return "not configured: set " + ", ".join(self.spec.requires_env)
+            return "set " + ", ".join(self.spec.requires_env)
         if st is FeedState.DEAD:
             return "collector task exited"
         if st is FeedState.PENDING:
-            return "not yet polled" if self.last_attempt_at is None else "no successful poll yet"
+            if self.last_attempt_at is None:
+                return "not yet polled"
+            if self.consecutive_failures and self.error_kind:
+                # Polled and failing: say how, not "not yet polled".
+                last = f"{self.error_kind.value}: {self.error_detail}" if self.error_detail else self.error_kind.value
+                return f"no success yet · {last}"
+            return "no successful poll yet"
         if st is FeedState.STALE:
             if self.source_epoch is None:
                 return "upstream gave no timestamp"

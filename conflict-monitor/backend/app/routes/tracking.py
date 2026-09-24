@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from app.services.connectivity import get_connectivity
-from app.services.maritime import get_vessels
+from app.services.maritime import get_vessels_envelope
 from app.services.opensky import get_aircraft_envelope, get_jamming_zones
 from app.services.satellites import get_tles
 from app.services.track_history import get_aircraft_tracks, get_vessel_tracks
@@ -87,8 +87,12 @@ async def connectivity():
 
 @router.get("/vessels")
 async def vessels():
-    """Return cached maritime vessel positions from AISStream."""
-    return get_vessels()
+    """Vessel positions, wrapped in the feed envelope.
+
+    With no AISSTREAM_API_KEY the state is `unconfigured` and the count null:
+    a missing key is not an empty sea. See app/feeds.py and app/services/maritime.py.
+    """
+    return get_vessels_envelope()
 
 
 @router.get("/aircraft/tracks")

@@ -23,6 +23,8 @@ interface HeaderProps {
   /** The aircraft feed's state, from the server. The count and age come from here. */
   aircraftFeed: FeedEnvelope<Aircraft>;
   aircraftReceivedAt: number | null;
+  vesselsFeed: FeedEnvelope<Vessel>;
+  vesselsReceivedAt: number | null;
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingStatus: JammingStatus;
@@ -149,6 +151,8 @@ export function Header({
   aircraft,
   aircraftFeed,
   aircraftReceivedAt,
+  vesselsFeed,
+  vesselsReceivedAt,
   vessels,
   tleData,
   jammingStatus,
@@ -163,6 +167,8 @@ export function Header({
   // the items only when there is a count to print.
   const acCount =
     aircraftFeed.count == null ? null : aircraft.filter((a) => !a.on_ground).length;
+  const aisAge = feedAge(vesselsFeed, vesselsReceivedAt, now);
+  const vesState = vesselsFeed.state;
   const ages = useFeedAges({
     aircraft,
     vessels,
@@ -231,7 +237,13 @@ export function Header({
             note={acState === "live" ? "airborne" : `${FEED_WORD[acState]}${aircraftFeed.reason ? ` · ${aircraftFeed.reason}` : ""}`}
             dim={acState === "stale"}
           />
-          <Count Icon={Ship} value={vessels.length} unit="VES" />
+          <Count
+            Icon={Ship}
+            value={vesselsFeed.count}
+            unit="VES"
+            note={vesState === "live" ? "AIS positions" : `${FEED_WORD[vesState]}${vesselsFeed.reason ? ` · ${vesselsFeed.reason}` : ""}`}
+            dim={vesState === "stale"}
+          />
           <Count Icon={Satellite} value={tleData.length} unit="SAT" />
         </div>
 
@@ -245,7 +257,13 @@ export function Header({
             state={acState}
             reason={aircraftFeed.reason}
           />
-          <FeedAge label="AIS" age={ages.ais} staleAfter={STALE_AFTER.ais} />
+          <FeedAge
+            label="AIS"
+            age={aisAge}
+            staleAfter={STALE_AFTER.ais}
+            state={vesState}
+            reason={vesselsFeed.reason}
+          />
           <FeedAge label="GNSS" age={ages.gnss} staleAfter={STALE_AFTER.gnss} />
         </div>
 

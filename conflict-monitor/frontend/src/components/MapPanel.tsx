@@ -21,6 +21,8 @@ interface MapPanelProps {
   vesselTracks: TrackHistory;
   /** The aircraft feed's state. Legend counts print "—" unless it can vouch for a number. */
   aircraftFeedState: FeedState;
+  /** The vessel feed's state; a missing AIS key is not an empty sea. */
+  vesselsFeedState: FeedState;
 }
 
 /** A legend count: the number drawn, or "—" plus the state when the feed cannot vouch for it. */
@@ -165,7 +167,7 @@ function PingMarker({
   );
 }
 
-export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState }: MapPanelProps) {
+export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState }: MapPanelProps) {
   const [selected, setSelected] = useState<ConflictEvent | null>(null);
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
@@ -722,13 +724,13 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 </span>
               </div>
             )}
-            {vessels.length > 0 && (
+            {(vessels.length > 0 || vesselsFeedState !== "live") && (
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="#40e0d0">
                   <path d="M12 2 L15 9 L15 16 L19 20 L12 22 L5 20 L9 16 L9 9 Z" />
                 </svg>
                 <span style={{ color: "var(--text-secondary)" }}>
-                  VESSELS ({vessels.length})
+                  VESSELS ({legendCount(vessels.length, vesselsFeedState)})
                 </span>
               </div>
             )}
@@ -839,7 +841,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  VESSELS ({vessels.length})
+                  VESSELS ({legendCount(vessels.length, vesselsFeedState)})
                 </span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>

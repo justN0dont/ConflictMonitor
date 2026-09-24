@@ -35,6 +35,9 @@ interface IndicatorRailProps {
   /** The aircraft feed's state, from the server; ADS-B currency comes from here. */
   aircraftFeed: FeedEnvelope<Aircraft>;
   aircraftReceivedAt: number | null;
+  /** The vessel feed's state, from the server; AIS currency comes from here. */
+  vesselsFeed: FeedEnvelope<Vessel>;
+  vesselsReceivedAt: number | null;
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingStatus: JammingStatus;
@@ -44,22 +47,31 @@ interface IndicatorRailProps {
   demoMode: boolean;
 }
 
+/** A feed as FEED CURRENCY sees it, when the server reports its state. */
+interface ServerFeed {
+  age: number | null;
+  live: boolean;
+  reported: boolean;
+  /** Not configured (e.g. no key): named, and left out of the count - it is not silent. */
+  unconfigured: boolean;
+}
+
 /**
- * ADS-B's entry is the server's verdict: "fresh" only when the aircraft feed
- * is live. The other three are still arrival ages, measured here, until
+ * ADS-B's and AIS's entries are the server's verdict: "fresh" only when the
+ * feed is live. GNSS and TLE are still arrival ages, measured here, until
  * feed_health reaches them - an arrival cannot tell a dead upstream from a
  * backend re-serving its cache, which is how 4/4 WATCH sat over a dead fleet.
  */
-function feedCurrencyRow(
-  ages: FeedAges,
-  adsb: { age: number | null; live: boolean; reported: boolean },
-): Row {
-  const feeds = [
-    { key: "ADS-B", age: adsb.reported ? adsb.age : null, fresh: adsb.live },
-    { key: "AIS", age: ages.ais, fresh: ages.ais != null && ages.ais <= STALE_AFTER.ais },
-    { key: "GNSS", age: ages.gnss, fresh: ages.gnss != null && ages.gnss <= STALE_AFTER.gnss },
-    { key: "TLE", age: ages.tle, fresh: ages.tle != null && ages.tle <= STALE_AFTER.tle },
+function feedCurrencyRow(ages: FeedAges, adsb: ServerFeed, ais: ServerFeed): Row {
+  const all = [
+    { key: "ADS-B", age: adsb.reported ? adsb.age : null, fresh: adsb.live, off: adsb.unconfigured },
+    { key: "AIS", age: ais.reported ? ais.age : null, fresh: ais.live, off: ais.unconfigured },
+    { key: "GNSS", age: ages.gnss, fresh: ages.gnss != null && ages.gnss <= STALE_AFTER.gnss, off: false },
+    { key: "TLE", age: ages.tle, fresh: ages.tle != null && ages.tle <= STALE_AFTER.tle, off: false },
   ];
+  const off = all.filter((f) => f.off);
+  const feeds = all.filter((f) => !f.off);
+  const offNote = off.length ? ` · ${off.map((f) => f.key).join(", ")} not configured` : "";
   const reporting = feeds.filter((f) => f.age != null);
   const fresh = reporting.filter((f) => f.fresh);
   const silent = feeds.length - reporting.length;
@@ -68,16 +80,16 @@ function feedCurrencyRow(
   let note: string;
   if (reporting.length === 0) {
     state = "NOT-OBSERVED";
-    note = "no feed has reported since load";
+    note = `no feed has reported since load${offNote}`;
   } else if (silent > 0) {
     state = "DEGRADED";
-    note = `${silent} of ${feeds.length} feeds silent since load`;
+    note = `${silent} of ${feeds.length} feeds silent since load${offNote}`;
   } else if (fresh.length < reporting.length) {
     state = "STALE";
-    note = `${reporting.length - fresh.length} feed(s) not current`;
+    note = `${reporting.length - fresh.length} feed(s) not current${offNote}`;
   } else {
     state = "WATCH";
-    note = "every feed is current";
+    note = `every configured feed is current${offNote}`;
   }
 
   const worst = reporting.length
@@ -90,7 +102,7 @@ function feedCurrencyRow(
     state,
     note,
     age: worst,
-    detail: feeds.map((f) => `${f.key} ${formatAge(f.age)}`).join("  ·  "),
+    detail: all.map((f) => `${f.key} ${f.off ? "off" : formatAge(f.age)}`).join("  ·  "),
   };
 }
 
@@ -193,23 +205,40 @@ function gpsRow(js: JammingStatus, zones: JammingZone[], ages: FeedAges): Row {
   return row("TRIPPED", String(n), `${zoneCount} (${worst}% degraded at worst) · ${coverage}`);
 }
 
-function vesselRow(vessels: Vessel[], ages: FeedAges): Row {
+/**
+ * Same rules as the aircraft row. "Live" is judged by accepted position
+ * reports, not by an open socket, and it is subscription-wide: per-region
+ * coverage is not measured yet, and the Gulf has no free-tier receivers.
+ */
+function vesselRow(feed: FeedEnvelope<Vessel>, age: number | null): Row {
+  const why = feed.reason ? ` — ${feed.reason}` : "";
   let state: RailState;
+  let value = "—";
   let note: string;
-  if (ages.ais == null) {
-    state = "NOT-OBSERVED";
-    note = "AIS has not reported since load";
-  } else if (vessels.length === 0) {
-    state = "DEGRADED";
-    note = "feed returned no vessels — coverage unknown";
-  } else if (ages.ais > STALE_AFTER.ais) {
-    state = "STALE";
-    note = "count is from a missed poll";
-  } else {
-    state = "WATCH";
-    note = "AIS positions in view";
+  switch (feed.state) {
+    case "live":
+      state = feed.count === 0 ? "DEGRADED" : "WATCH";
+      value = String(feed.count ?? 0);
+      note =
+        feed.count === 0
+          ? "feed is live and returned no vessels — coverage unknown"
+          : "AIS feed live · per-region coverage not measured";
+      break;
+    case "stale":
+      state = "STALE";
+      value = String(feed.count ?? 0);
+      note = `count is real but old${why}`;
+      break;
+    case "pending":
+      state = "NOT-OBSERVED";
+      note = `${FEED_WORD.pending.toLowerCase()}${why}`;
+      break;
+    default:
+      // retrying, unavailable, auth_failed, dead, unconfigured
+      state = "DEGRADED";
+      note = `${FEED_WORD[feed.state].toLowerCase()}${why}`;
   }
-  return { name: "VESSELS TRACKED", value: String(vessels.length), state, note, age: ages.ais };
+  return { name: "VESSELS TRACKED", value, state, note, age };
 }
 
 function eventVolumeRow(
@@ -241,6 +270,8 @@ export function IndicatorRail({
   aircraft,
   aircraftFeed,
   aircraftReceivedAt,
+  vesselsFeed,
+  vesselsReceivedAt,
   vessels,
   tleData,
   jammingStatus,
@@ -250,6 +281,7 @@ export function IndicatorRail({
 }: IndicatorRailProps) {
   const now = useNow(1000);
   const adsbAge = feedAge(aircraftFeed, aircraftReceivedAt, now);
+  const aisAge = feedAge(vesselsFeed, vesselsReceivedAt, now);
   const ages = useFeedAges({
     aircraft,
     vessels,
@@ -263,10 +295,16 @@ export function IndicatorRail({
       age: adsbAge,
       live: aircraftFeed.state === "live",
       reported: aircraftReceivedAt != null && aircraftFeed.state !== "pending",
+      unconfigured: aircraftFeed.state === "unconfigured",
+    }, {
+      age: aisAge,
+      live: vesselsFeed.state === "live",
+      reported: vesselsReceivedAt != null && vesselsFeed.state !== "pending",
+      unconfigured: vesselsFeed.state === "unconfigured",
     }),
     aircraftRow(aircraftFeed, adsbAge),
     gpsRow(jammingStatus, jammingZones, ages),
-    vesselRow(vessels, ages),
+    vesselRow(vesselsFeed, aisAge),
     eventVolumeRow(events, isConnected, ages),
   ];
 
@@ -290,8 +328,8 @@ export function IndicatorRail({
       <div className="border-t border-[var(--border)] px-3 py-[6px] text-[9px] leading-[1.4] text-[var(--text-muted)]">
         DEGRADED = coverage insufficient to evaluate. It is not a calm reading.
         <br />
-        Row 0: ADS-B is judged by the server from the upstream's own clock; the other
-        feeds still measure arrival, not content.
+        Row 0: ADS-B and AIS are judged by the server from the upstream's own clock;
+        GNSS and TLE still measure arrival, not content.
         <br />
         Colour marks the exception only. An unlit row is nominal.
       </div>

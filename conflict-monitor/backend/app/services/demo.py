@@ -696,9 +696,11 @@ def _init_demo_vessels():
 
 async def start_demo_vessel_poller():
     """Background task that updates synthetic vessel positions."""
+    from app import feeds
     from app.services.maritime import _cache as maritime_cache
 
     _init_demo_vessels()
+    tracker = feeds.tracker("vessels")
 
     while True:
         for v in _demo_vessels:
@@ -711,6 +713,9 @@ async def start_demo_vessel_poller():
 
         maritime_cache["vessels"] = vessel_dict
         maritime_cache["last_update"] = time.time()
+        now = time.time()
+        tracker.succeeded(now, count=len(vessel_dict), source="demo", source_epoch=now,
+                          synthetic=True)
 
         logger.debug("Demo vessels: %d tracked", len(vessel_dict))
         await asyncio.sleep(10)
