@@ -111,8 +111,13 @@ Runs in the backend container against a throwaway `conflict_monitor_test`
 database, created and dropped by the suite; the dev database is never opened.
 `-e LLM_BACKEND=none` and the network ban in `backend/tests/conftest.py` mean
 no test can reach Ollama, Anthropic or Nominatim — an attempt is a failure with
-a stack trace, not a skip. Seconds, not minutes. There is no CI: this runs when
-someone types it.
+a stack trace, not a skip. Seconds, not minutes.
+
+CI (`.github/workflows/ci.yml`, at the repository root) runs the same suite on
+every push and pull request against a `postgis/postgis:16-3.4` service
+container, and type-checks and builds the frontend (`npm run build`). The
+suite needs Postgres even for `tests/unit`: the session fixture builds the test
+database for every test.
 
 ## Environment Variables
 
