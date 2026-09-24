@@ -1356,6 +1356,110 @@ above, but it is where the denominator idea is furthest along: a per-sensor `una
 trailing baselines reported separately, and agreement between independent sensors as the confidence
 signal. See Measured facts.
 
+#### `feed_health` — schema decisions, settled 2026-09-24
+
+Written down before any code, because the audit in [`GODS-EYE-VIEW.md`](GODS-EYE-VIEW.md) found seven
+competing state vocabularies across its own candidates and CM already has a fourth (the rail's
+NOT-OBSERVED / WATCH / PARTIAL / TRIPPED / STALE / DEGRADED). One vocabulary, decided once. Each
+decision says what it rules out. Numbers marked *unmeasured* are starting points to be re-set from
+the first week of heartbeat rows (decision 3), not findings.
+
+**1. One feed-state vocabulary, one reason vocabulary, and provenance as fields.**
+
+`FeedState`, declared once in the backend and mirrored as a TypeScript union, members in severity
+order, worst first. Rank is declaration order; a roll-up over an unknown value raises rather than
+skipping it (the gap GEV has with its unranked `partial`, `GODS-EYE-VIEW.md` §4 "Do not take").
+
+| state | meaning | three-state reading |
+|---|---|---|
+| `dead` | the poller task has exited | 2, I wasn't looking |
+| `auth_failed` | the upstream refused our credentials | 2 |
+| `unavailable` | no successful poll for longer than `max_stale` | 2 |
+| `retrying` | the last attempt failed; the last good data is still inside `max_stale` | 2, becoming |
+| `stale` | polls succeed, but the upstream's own clock is older than `stale_after`, or it gave no clock | 3, I looked and can't vouch for currency |
+| `pending` | configured, no success yet since boot | 2 |
+| `live` | the last success is current by the upstream's clock | 1 is now sayable, never implied |
+| `unconfigured` | a required key is not set | outside the roll-up; listed by name under `not_collected` |
+
+Ruled out: `partial` and `degraded` as *feed* states (they are verdict words and stay with jamming
+and connectivity, which keep their own `measurement_status`); `down` from the audit's list (nothing
+would produce it until a backoff ladder exists, and a state no code path can reach is a lie in the
+enum — a test asserts every member is reachable); `rate_limited` and `fallback` as states (see below).
+
+`error_kind`, closed: `ok`, `empty`, `http_error`, `rate_limited`, `auth_failed`, `timeout`,
+`fetch_error`, `parse_error`. A malformed 200 is `parse_error`, a failure. A well-formed empty reply is
+`empty`, a success, and OpenSky's `"states": null` is `empty`. Free text lives only in `error_detail`,
+query strings stripped, capped at 300 characters. Adding a member is a recorded decision, not an edit.
+
+Provenance is explicit, never parsed out of a source string: `fallback_from` (set by the aircraft
+poller when it drops to OpenSky), `synthetic` (set by every demo writer), and `next_attempt_at` for
+rate limits. The rail's current words are re-derived from `FeedState` when it switches to `/health`;
+TRIPPED stays, because it is a detection, not a feed state.
+
+**2. Facts are stored; state is derived at read time, on the server.**
+
+Each poller reports to an in-memory registry synchronously on every attempt, success or failure —
+no await, no database call — and `GET /health` reads the registry, so it answers while Postgres is
+down. Per feed the registry keeps three clocks: `last_attempt_at`, `last_success_at` (data accepted),
+and `source_epoch` (the upstream's own time for the newest data: adsb.lol `now`, OpenSky `time`, the
+newest AIS `time_utc`, the newest TLE epoch). A failure never advances `last_success_at` or
+`source_epoch`. A missing or unparseable upstream time makes `source_epoch` NULL and freshness
+`unknown`, never the receipt time. State is computed from those timestamps against the server's own
+clock whenever it is read; the stored `state` column is a cache of the last computation and no
+reader trusts it. The browser's clock never enters: responses carry `age_s`.
+
+Per-feed thresholds live in one registry with a one-line rationale each. Starting points, all
+*unmeasured*: aircraft `stale_after` 45 s (three 15 s polls), `max_stale` 5 min; vessels 120 s and
+10 min (the existing 600 s filter); TLE `max_stale` 48 h since fetch, with element-set epoch age shown
+separately, since days-old epochs are normal.
+
+Ruled out: a status string written on each iteration, which reads "ok" forever once the poller hangs
+(the reason `/health` also reports `task.done()` for every lifespan task); freshness computed in the
+browser from arrival times, which is how 4/4 WATCH came to sit over a dead fleet.
+
+**3. History is transition rows plus heartbeat rows, not per-attempt rows.**
+
+The audit left this to the owner. Decided: one `feed_transition` row whenever the derived state
+changes (and a `process_start` row per feed at boot), plus one `feed_heartbeat` row per feed every
+60 s carrying the counts for that minute — attempts, successes, and failures by `error_kind`. A gap
+of more than 120 s between heartbeats reads as **unknown**, which is what lets the Phase 3
+feed-liveness lane draw the monitor's own outages as holes rather than extending the last "ok"
+across them. Retention 30 days, *unmeasured*.
+
+Why not per-attempt rows: the aircraft poller alone would write 5,760 a day, and RSS polls each feed
+separately. Heartbeats keep the one thing per-attempt rows add — failure rates by kind, which is the
+"week of rows" that re-sets the thresholds above and measures the AIS silence budget — at about one
+row per feed per minute. Why not transitions alone: between the backend dying and the next
+`process_start`, a transition log draws the last state straight across the gap.
+
+**4. One envelope on `/tracking/aircraft`, `/vessels` and `/tle`.**
+
+The bare arrays go (FINDINGS.md "Surfaced during the audit": bare-array tracking routes). One
+serializer builds, for all three:
+
+`{schema_version: 1, feed, state, reason, source, fallback_from, synthetic, source_epoch,
+last_success_at, server_now, age_s, freshness, count, verdict, items}`
+
+- `count` is NULL unless `state` is `live` or `stale`. The UI renders NULL as "—" plus the state
+  word ("VES — not configured"), a measured zero as "0", never "none" or "clear".
+- `verdict` is `present` or `unproven`. A zero is `unproven` whenever the feed is not live and
+  current. `absent` is reserved and not emitted until the control ring can earn it.
+- Rows are kept through `retrying` and `stale` (stale counts shown dimmed with their age), and not
+  drawn once the feed is `unavailable`. That is the interim rule; Phase 3 decides hide versus ghost.
+- `/tracking/jamming` and `/tracking/connectivity` keep their current shapes for now: they already
+  carry `as_of` and their own status vocabularies.
+- Backend and frontend change in the same commit, checked by running the app in demo and live
+  modes, since the frontend has no tests yet.
+
+Ruled out: state in HTTP headers (GEV keeps OpenSky's cache state in headers its own client never
+reads); a 503 for a missing key (GEV's `/api/ais-live` does this, which makes "not configured" look
+like an outage); `/health` returning non-200 — it always answers 200 and says what is wrong in the
+body, so a future container healthcheck cannot restart the backend because adsb.lol went down.
+
+**Still open, and not blocking the first slice:** the absence vocabulary for the control ring
+(`GODS-EYE-VIEW.md` PHASE2-16), and whether imported OSINT rows get NULL or `'city'` precision
+(SAFETY-11). The aircraft slice needs neither.
+
 ### Phase 3 — The display
 
 - [ ] Mark geometry = evidence geometry, driven by `geo_precision`; unresolved rows go to a tray, never the map
@@ -1458,4 +1562,5 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-21 | `e2a8ee0` | The first tests in this repo: 103 of them, 8.35s, one documented command. Every one is a regression test for a defect that actually occurred and names the commit it protects in its docstring — the merge that moved a death toll between events, the geometry guard, `reject_boolean`, the geocoder's word anchors, `"think": False`, the ingest guard's `(channel, message_id)` key, the sentinel retirement and the first-report backfill. The suite was shown to FAIL before it was believed: nine defects re-introduced into the source, nine caught by the test that names them. The dev database held 159 events before the run and 159 after. One production change, a pure move: the migration block lifted out of `lifespan` into `run_startup_migrations(engine)`, because entering `lifespan` also starts five network pollers and the alternative was to test a COPY of the SQL. Narrows `C66` to medium — what stays open is that there is still no CI, and that a suite whose schema comes from `create_all` cannot see the drift `C63` describes |
 | 2026-09-21 | `f64bbb2` | **Phase 1 closed.** `evidence_span`: the words in a row's own `raw_text` that spell its own `location_name`, so a location becomes checkable in one second the way `killed_reported` is. Three values, three statements — a quote, `''` for "looked, and there is nothing here to quote", NULL for "nothing looked" — and a repair pass that empties the NULL set. `''` carries two of those cases and `location_name` is what separates them: a place was named and this text does not spell it (10,131 archive rows), or no place was named at all (38,319). That second case is the one the first implementation got wrong, and got wrong in this project's own bug class: with no notion of `_NOT_A_PLACE` it answered `"unknown"` for a row whose `location_name` is the classifier's could-not-tell sentinel, writing state 3 into the field a reader reads as state 1 — 60 archive rows, and 104 of the live 201 are exposed to it. It now applies the same list `geocode()` applies at its front door, imported and not copied. It is a SEARCH, never an argument: nothing can pass a span in, so a model naming a plausible town that appears nowhere gets `''` and has no fabricated span to offer. Deliberately not a provenance tag (`geo_method` already owns that question) and deliberately not a boolean (the evidence costs one column and cannot be wrong about itself). Measured first, and the measurement changed the design twice: the markdown-boundary and apostrophe-folding rules bought 33 events out of 45,619 and were dropped, and `'İ'.lower()` being two characters made searching a lowered copy a real slicing bug rather than a hypothetical one. A third variant — a name whose first or last character is non-word, which `\b` can never match — is 7 events and is recorded rather than fixed, on the same arithmetic. The headline split is **77.8% / 22.2% over the 45,619 place-naming rows**, and both halves of that sentence are load-bearing: the first replay said 77.5% because it matched against the dump's COPY escape form, where the letter n of ` ` is a word character (134 events), and the column is written on all 83,938 rows, not on the 45,619 the percentage is over. The startup repair pass now walks a cursor on `id`: its only exit used to be `WHERE evidence_span IS NULL`, so termination rested on `evidence_span()` never returning `None`, and removing that property hung pytest instead of failing it. **Gazetteer**: 11 places / 17 keys off the top of `tools/gazetteer_gaps.py`'s volume ranking, eight coordinates resolved through `_query_nominatim` and checked against an anchor already in the table, three reused from an alias already in the table and now saying so with the measured distance that justifies the reuse (0.683 / 0.493 / 2.126 km) instead of a derivation that did not happen — killing errors of 2,011 km (`Al-Khiyam`, in Yemen), 3,096 km (`Karaj`, in Slovakia), 9,124 km (`Galilee`, on Long Island) and 1,010 km (`Anbar`, in Turkey), plus two partial-match hijacks. Four candidates left out because Nominatim answered `[]`, confirmed with four extra requests rather than assumed from four consecutive failures; `Taybeh` left out because it is two villages. 89 strings change across the archive, 472 events, no key capturing a name it did not mean. `Anbar` keeps its 352 km bound but stops claiming to be a country: the tier is the word the UI prints, so a per-key `_KEY_UNCERTAINTY_M` of **measured** extents now carries the number wherever the tier estimate errs narrow (Anbar, and Ben Gurion Airport at 3,265 m against the facility tier's 500 m). 51 new tests (103 → 154), six of them shown to fail against the defect they name — the four from the first pass, plus the sentinel rule and the loop's bound. The live dev database held 200 events before and after; all 200 got a span in one pass and the six reloads after it printed nothing, and a re-read at 201 rows found no sentinel row carrying a quote |
 | 2026-09-24 | `20ac881` | CI: `.github/workflows/ci.yml` runs the backend suite against PostGIS and type-checks and builds the frontend on every push and pull request. Rehearsed first: 154/154, then shown to fail on an unreachable database and on a re-introduced defect. Closes the CI half of `C66`; the schema-drift half stays open |
-| 2026-09-24 | *this commit* | Tests for the two things feed_health must not break or must fix. `test_connectivity.py` (15): the connectivity layer's "I don't know" vocabulary (`fetch_failed`, `no_series`, `bad_values`, `all_null`, `stale_series`, `unconfigured`, degraded-for-lack-of-coverage, `worst_deviation` None not 0.0) and the agreement rule, deliberately not robust-z values or thresholds, which the baseline work will change. `test_aircraft_poll.py` (7): `_detect_jamming`'s three states and the FL200 floor, the real poll loop driven through scripted fetchers, and `C31` as a strict xfail. Shown to bite: six defects re-introduced one at a time (the floor of two in `_agree`, `isfinite` in `_clean`, degraded-to-nominal, the Radar token early return, the FL200 floor, and a simulated C31 fix), six catches, sources restored from copies. 175 passed, 1 xfailed |
+| 2026-09-24 | `2b60071` | Tests for the two things feed_health must not break or must fix. `test_connectivity.py` (15): the connectivity layer's "I don't know" vocabulary (`fetch_failed`, `no_series`, `bad_values`, `all_null`, `stale_series`, `unconfigured`, degraded-for-lack-of-coverage, `worst_deviation` None not 0.0) and the agreement rule, deliberately not robust-z values or thresholds, which the baseline work will change. `test_aircraft_poll.py` (7): `_detect_jamming`'s three states and the FL200 floor, the real poll loop driven through scripted fetchers, and `C31` as a strict xfail. Shown to bite: six defects re-introduced one at a time (the floor of two in `_agree`, `isfinite` in `_clean`, degraded-to-nominal, the Radar token early return, the FL200 floor, and a simulated C31 fix), six catches, sources restored from copies. 175 passed, 1 xfailed |
+| 2026-09-24 | *this commit* | `feed_health` schema decisions written before any code (Roadmap, Phase 2): one worst-first `FeedState` vocabulary with `unconfigured` outside the roll-up and no `partial`/`degraded`/`down`; a closed `error_kind`; `fallback_from` and `synthetic` as fields; facts stored and state derived at read time from three clocks and the server's clock; transition plus per-minute heartbeat rows rather than per-attempt rows; one envelope with a nullable count on the three tracking routes. Thresholds marked unmeasured. Two decisions left open, neither blocking the aircraft slice |
