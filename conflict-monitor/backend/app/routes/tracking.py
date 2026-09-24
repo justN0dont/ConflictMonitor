@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from app.services.connectivity import get_connectivity
 from app.services.maritime import get_vessels_envelope
 from app.services.opensky import get_aircraft_envelope, get_jamming_zones
-from app.services.satellites import get_tles
+from app.services.satellites import get_tles_envelope
 from app.services.track_history import get_aircraft_tracks, get_vessel_tracks
 
 router = APIRouter(prefix="/tracking", tags=["tracking"])
@@ -22,8 +22,14 @@ async def aircraft():
 
 @router.get("/tle")
 async def tle():
-    """Return cached TLE records from CelesTrak."""
-    return get_tles()
+    """TLE records, wrapped in the feed envelope.
+
+    `source_epoch` is the newest element-set epoch, and each record carries its
+    own `epoch_utc`: a fresh fetch can still carry old orbits. The state goes
+    `stale` when the newest epoch is older than 14 days and `unavailable` when
+    nothing has been fetched for 48 h. See app/services/satellites.py.
+    """
+    return get_tles_envelope()
 
 
 @router.get("/jamming")

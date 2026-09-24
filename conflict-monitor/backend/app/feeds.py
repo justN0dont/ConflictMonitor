@@ -116,6 +116,21 @@ REGISTRY: dict[str, FeedSpec] = {
         silence_means="zero vessels in the Gulf is state 2: AISStream's free tier has no "
                       "receivers there (FINDINGS.md, Blocked: no AIS coverage in the Gulf)",
     ),
+    "satellites": FeedSpec(
+        id="satellites",
+        cadence_s=6 * 3600,
+        # The upstream clock here is the newest element-set EPOCH, not a fetch
+        # time. Fourteen days is a choice, not a measurement (GEV uses the same
+        # number): military element sets are refreshed irregularly and some
+        # legitimately carry epochs days old, while two weeks of drift puts a LEO
+        # position off by far more than the map can show honestly.
+        stale_after_s=14 * 86400,
+        # No successful fetch (network or verified disk cache) for 48 h.
+        max_stale_s=48 * 3600,
+        requires_env=(),
+        silence_means="zero satellites is state 2 unless the feed is live: CelesTrak "
+                      "IP-blocks clients that fetch too often (FINDINGS.md, C20)",
+    ),
 }
 
 

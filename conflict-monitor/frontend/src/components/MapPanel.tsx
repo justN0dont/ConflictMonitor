@@ -23,6 +23,7 @@ interface MapPanelProps {
   aircraftFeedState: FeedState;
   /** The vessel feed's state; a missing AIS key is not an empty sea. */
   vesselsFeedState: FeedState;
+  tleFeedState: FeedState;
 }
 
 /** A legend count: the number drawn, or "—" plus the state when the feed cannot vouch for it. */
@@ -167,7 +168,7 @@ function PingMarker({
   );
 }
 
-export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState }: MapPanelProps) {
+export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState, tleFeedState }: MapPanelProps) {
   const [selected, setSelected] = useState<ConflictEvent | null>(null);
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
@@ -854,7 +855,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  SATELLITES ({tleData.length})
+                  SATELLITES ({legendCount(tleData.length, tleFeedState)})
                 </span>
               </div>
             </div>

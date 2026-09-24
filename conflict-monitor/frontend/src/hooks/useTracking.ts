@@ -18,6 +18,8 @@ export interface TLERecord {
   name: string;
   line1: string;
   line2: string;
+  /** The element set's own epoch (epoch seconds), checksum-verified on the server. */
+  epoch_utc: number | null;
 }
 
 export interface JammingZone {
@@ -219,16 +221,20 @@ const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:800
 const AIRCRAFT_POLL_MS = 15_000;
 const JAMMING_POLL_MS = 15_000;
 const VESSEL_POLL_MS = 10_000;
-const TLE_POLL_MS = 6 * 3600 * 1000;
+// The backend fetches CelesTrak every 6 h; this polls the BACKEND, so the feed's
+// state (a recovery, a block) reaches the page in minutes, not hours.
+const TLE_POLL_MS = 5 * 60 * 1000;
 const TRACK_POLL_MS = 15_000;
 const CONNECTIVITY_POLL_MS = 60_000;
 const NO_AIRCRAFT: Aircraft[] = [];
 const NO_VESSELS: Vessel[] = [];
+const NO_TLES: TLERecord[] = [];
 
 export function useTracking() {
   const [aircraftFeed, setAircraftFeed] = useState<FeedEnvelope<Aircraft>>(() => emptyEnvelope("aircraft"));
   const [aircraftReceivedAt, setAircraftReceivedAt] = useState<number | null>(null);
-  const [tleData, setTleData] = useState<TLERecord[]>([]);
+  const [tleFeed, setTleFeed] = useState<FeedEnvelope<TLERecord>>(() => emptyEnvelope("satellites"));
+  const [tleReceivedAt, setTleReceivedAt] = useState<number | null>(null);
   const [jammingZones, setJammingZones] = useState<JammingZone[]>([]);
   const [jammingStatus, setJammingStatus] = useState<JammingStatus>({
     status: "no_integrity_data",
@@ -367,7 +373,10 @@ export function useTracking() {
     const fetchTLE = async () => {
       try {
         const res = await fetch(`${API_BASE}/tracking/tle`);
-        if (res.ok) setTleData(await res.json());
+        if (res.ok) {
+          setTleFeed(await res.json());
+          setTleReceivedAt(Date.now());
+        }
       } catch { /* backend unavailable */ }
     };
     fetchTLE();
@@ -396,6 +405,7 @@ export function useTracking() {
   // envelope itself goes to the header and rail, which say what it is worth.
   const aircraft = FEED_DRAWN[aircraftFeed.state] ? aircraftFeed.items : NO_AIRCRAFT;
   const vessels = FEED_DRAWN[vesselsFeed.state] ? vesselsFeed.items : NO_VESSELS;
+  const tleData = FEED_DRAWN[tleFeed.state] ? tleFeed.items : NO_TLES;
 
-  return { aircraft, aircraftFeed, aircraftReceivedAt, vesselsFeed, vesselsReceivedAt, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus };
+  return { aircraft, aircraftFeed, aircraftReceivedAt, vesselsFeed, vesselsReceivedAt, tleFeed, tleReceivedAt, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus };
 }

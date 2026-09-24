@@ -365,6 +365,7 @@ async def lifespan(app: FastAPI):
 
         # CelesTrak is free, still use real satellite data
         tasks.append(asyncio.create_task(start_tle_fetcher()))
+        feeds.tracker("satellites").task = tasks[-1]
         logger.info("CelesTrak TLE fetcher started (real data)")
 
         # IODA is free, still use real internet-disruption data
@@ -391,6 +392,7 @@ async def lifespan(app: FastAPI):
 
         # Satellite TLEs
         tasks.append(asyncio.create_task(start_tle_fetcher()))
+        feeds.tracker("satellites").task = tasks[-1]
         logger.info("CelesTrak TLE fetcher started")
 
         # Internet-disruption sensors
@@ -447,7 +449,7 @@ async def health():
 
     Always HTTP 200: what is wrong is said in the body. A non-200 would let a
     container healthcheck restart the backend because adsb.lol went down.
-    Aircraft and vessels report so far; the others join as feed_health
+    Aircraft, vessels and satellites report so far; the others join as feed_health
     reaches them (docs/FINDINGS.md, Phase 2).
     """
     return feeds.health(time.time(), _PROCESS_STARTED_AT)

@@ -25,6 +25,7 @@ interface HeaderProps {
   aircraftReceivedAt: number | null;
   vesselsFeed: FeedEnvelope<Vessel>;
   vesselsReceivedAt: number | null;
+  tleFeed: FeedEnvelope<TLERecord>;
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingStatus: JammingStatus;
@@ -153,6 +154,7 @@ export function Header({
   aircraftReceivedAt,
   vesselsFeed,
   vesselsReceivedAt,
+  tleFeed,
   vessels,
   tleData,
   jammingStatus,
@@ -244,7 +246,17 @@ export function Header({
             note={vesState === "live" ? "AIS positions" : `${FEED_WORD[vesState]}${vesselsFeed.reason ? ` · ${vesselsFeed.reason}` : ""}`}
             dim={vesState === "stale"}
           />
-          <Count Icon={Satellite} value={tleData.length} unit="SAT" />
+          <Count
+            Icon={Satellite}
+            value={tleFeed.count}
+            unit="SAT"
+            note={
+              tleFeed.state === "live"
+                ? "CelesTrak military group"
+                : `${FEED_WORD[tleFeed.state]}${tleFeed.reason ? ` · ${tleFeed.reason}` : ""}`
+            }
+            dim={tleFeed.state === "stale"}
+          />
         </div>
 
         <span className="h-4 w-px bg-[var(--border)]" aria-hidden="true" />
