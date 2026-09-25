@@ -13,7 +13,8 @@ from app.config import settings
 from app.db import async_session, engine
 from app.models import Base
 from app.routes.channels import router as channels_router
-from app.routes.events import router as events_router
+from app.routes.events import admin_router, router as events_router
+from app.security import allowed_origins
 from app.routes.tracking import router as tracking_router
 from app.routes.ws import router as ws_router
 from app.services.classifier import evidence_span
@@ -438,13 +439,17 @@ app = FastAPI(title="Conflict Monitor", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Not "*": with credentials on, Starlette reflected ANY origin, so any page
+    # the operator had open could call DELETE /events/admin/purge-old (C60).
+    # The frontend only ever GETs, and sends no cookie.
+    allow_origins=allowed_origins(),
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=[],
 )
 
 app.include_router(channels_router)
+app.include_router(admin_router)  # before /events/{event_id}, so nothing can shadow it
 app.include_router(events_router)
 app.include_router(tracking_router)
 app.include_router(ws_router)
