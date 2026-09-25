@@ -97,14 +97,18 @@ LOCATIONS = [
 # =========================================================================
 # SUMMARY TEMPLATES
 # =========================================================================
+# No template puts words in a real actor's mouth. Confirmations, statements,
+# threats, requests and offers are reported in the passive, because every
+# one of these rows is invented and a screenshot of it travels without this
+# file (C69).
 
 MILITARY_SUMMARIES = [
     "IRGC launches ballistic missiles toward {loc}",
-    "IDF confirms airstrikes on weapons depot near {loc}",
+    "Airstrikes reported on weapons depot near {loc}",
     "Houthi anti-ship missile fired toward commercial vessel near {loc}",
     "Explosion reported at military installation near {loc}",
     "SAM battery activation detected near {loc}",
-    "CENTCOM confirms strike on Iran-backed militia position near {loc}",
+    "Strike reported on militia position near {loc}",
     "Drone swarm detected approaching {loc}",
     "Artillery exchanges reported along border near {loc}",
     "Naval assets repositioning near {loc}",
@@ -133,15 +137,15 @@ MILITARY_SUMMARIES = [
 
 DIPLOMATIC_SUMMARIES = [
     "Emergency UNSC session called regarding {loc} escalation",
-    "Iran foreign minister issues statement on {loc} situation",
-    "{country} recalls ambassador following {loc} incident",
+    "Foreign ministry statement issued on {loc} situation",
+    "Ambassador recalled following {loc} incident",
     "Ceasefire negotiations underway for {loc} region",
     "UN envoy arrives in {loc} for emergency mediation talks",
-    "Joint statement from Gulf states condemning strikes on {loc}",
+    "Joint regional statement condemns strikes on {loc}",
     "G7 emergency call scheduled regarding {loc} crisis",
-    "Red Cross requests humanitarian corridor access to {loc}",
-    "Russia calls for restraint following {loc} strikes",
-    "China offers to mediate {loc} conflict",
+    "Humanitarian corridor access requested for {loc}",
+    "Calls for restraint follow {loc} strikes",
+    "Third-party mediation offered for {loc} conflict",
 ]
 
 ECONOMIC_SUMMARIES = [
@@ -150,7 +154,7 @@ ECONOMIC_SUMMARIES = [
     "Commercial vessels rerouting away from {loc}",
     "Port operations suspended at {loc}",
     "Energy markets react to {loc} escalation",
-    "Iran threatens to close {loc} to commercial traffic",
+    "Threat to close {loc} to commercial traffic reported",
     "LNG shipments delayed due to {loc} security concerns",
     "Brent crude hits $120/barrel on {loc} fears",
     "Major shipping line suspends {loc} routes indefinitely",
@@ -168,11 +172,15 @@ CYBER_SUMMARIES = [
     "Critical infrastructure alert issued for {loc}",
 ]
 
-CHANNELS = [
-    "Aurora Intel", "OSINTdefender", "MidEast Spectator",
-    "Sentdefender", "Intel Slava Z", "Israel Radar", "CIG",
-    "MilitaryOSINT", "IranIntl", "QudsAlert", "WarMonitor",
-]
+# Fictional on purpose (C69). These rows are invented, so no real outlet's
+# name may sit beside them: nine of the eleven names this list used to hold
+# match channels in app/seed_channels.py, the monitor's own channel registry.
+# tests/unit/test_demo.py fails if any name here matches that registry.
+CHANNELS = [f"DEMO-CH-{i:02d}" for i in range(1, 12)]
+
+# Every demo summary and raw_text starts with this, so each row says what it
+# is on every surface that shows it, including one row cut out of a screenshot.
+SYNTHETIC_MARKER = "SYNTHETIC · "
 
 # =========================================================================
 # AIRCRAFT DEFINITIONS
@@ -288,7 +296,9 @@ def _gen_event(ts: datetime.datetime | None = None) -> dict:
 
     loc = _pick(LOCATIONS)
     template = _pick(templates)
-    summary = template.replace("{loc}", loc["name"]).replace("{country}", loc.get("country") or "the region")
+    summary = SYNTHETIC_MARKER + template.replace("{loc}", loc["name"]).replace(
+        "{country}", loc.get("country") or "the region"
+    )
 
     return {
         "source": "demo",
