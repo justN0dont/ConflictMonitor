@@ -111,8 +111,13 @@ Runs in the backend container against a throwaway `conflict_monitor_test`
 database, created and dropped by the suite; the dev database is never opened.
 `-e LLM_BACKEND=none` and the network ban in `backend/tests/conftest.py` mean
 no test can reach Ollama, Anthropic or Nominatim — an attempt is a failure with
-a stack trace, not a skip. Seconds, not minutes. There is no CI: this runs when
-someone types it.
+a stack trace, not a skip. Seconds, not minutes.
+
+CI (`.github/workflows/ci.yml`, at the repository root) runs the same suite on
+every push and pull request against a `postgis/postgis:16-3.4` service
+container, and type-checks and builds the frontend (`npm run build`). The
+suite needs Postgres even for `tests/unit`: the session fixture builds the test
+database for every test.
 
 ## Environment Variables
 
@@ -130,6 +135,27 @@ someone types it.
 | `OPENSKY_PASSWORD` | Optional | OpenSky Network credentials |
 | `DEMO_MODE` | Optional | Set `true` for synthetic data (no keys needed) |
 | `VITE_API_URL` | Optional | Frontend API URL (default: http://localhost:8000) |
+| `ADMIN_TOKEN` | For admin routes | Shared secret for `/events/admin/*`, sent as `X-Admin-Token`. Unset means those routes answer 503 |
+| `CORS_ORIGINS` | Optional | Comma-separated browser origins allowed to read the API and open the websocket (default: `http://localhost:5173,http://127.0.0.1:5173`) |
+
+### Security
+
+All three ports (5173, 8000, 5432) are published on **127.0.0.1 only**, so
+nothing is reachable from another machine by default. To serve the monitor
+beyond this host, put a reverse proxy with TLS in front of it and add its
+public origin to `CORS_ORIGINS`; do not re-publish the ports on `0.0.0.0`.
+
+The admin routes can delete the archive. They need the token:
+
+```bash
+curl -X DELETE -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost:8000/events/admin/dedup
+```
+
+Everything else is a public read API with no authentication: anyone who can
+reach port 8000 can read the events and the live feed. That is a choice for a
+single-operator install on loopback, not a property that survives exposing it.
+The `VITE_*` tokens are compiled into the browser bundle and are public by
+design — restrict them by URL in each provider's console.
 
 ## Data Sources
 

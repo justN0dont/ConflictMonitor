@@ -41,6 +41,7 @@ NOTE ON BIAS (applies to ALL sources equally):
 import asyncio
 import hashlib
 import logging
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree
@@ -50,7 +51,9 @@ from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 from sqlalchemy import select
 
+from app import feeds
 from app.db import async_session
+from app.feeds import ErrorKind
 from app.models import Event, EventReport
 from app.services.broadcaster import broadcaster
 from app.schemas import EventRead, EventWS
@@ -257,14 +260,19 @@ def _already_seen(url: str) -> bool:
 
 # ── RSS PARSER ─────────────────────────────────────────────────────────────────
 
-def _parse_rss(xml_text: str) -> list[dict]:
-    """Parse RSS/Atom feed XML and return list of article dicts."""
+def _parse_rss(xml_text: str) -> list[dict] | None:
+    """Parse RSS/Atom feed XML and return list of article dicts.
+
+    None means the reply was not a feed at all (malformed XML, or an HTML
+    error page); [] means a well-formed feed with no items. Each article's
+    `dated` says whether its time came from the feed or is receipt time.
+    """
     articles = []
     try:
         root = ElementTree.fromstring(xml_text)
     except ElementTree.ParseError as e:
         logger.error("RSS parse error: %s", e)
-        return articles
+        return None
 
     # Handle both RSS 2.0 (channel/item) and Atom (feed/entry)
     ns = {"atom": "http://www.w3.org/2005/Atom"}
@@ -277,13 +285,23 @@ def _parse_rss(xml_text: str) -> list[dict]:
             desc = (item.findtext("description") or "").strip()
             url = (item.findtext("link") or "").strip()
             pub_date_str = item.findtext("pubDate")
+            dated = False
             try:
-                pub_date = parsedate_to_datetime(pub_date_str) if pub_date_str else datetime.now(timezone.utc)
+                pub_date = parsedate_to_datetime(pub_date_str) if pub_date_str else None
+                dated = pub_date is not None
             except Exception:
+                pub_date = None
+            if pub_date is None:
                 pub_date = datetime.now(timezone.utc)
+            elif pub_date.tzinfo is None:
+                pub_date = pub_date.replace(tzinfo=timezone.utc)
             if url:
-                articles.append({"title": title, "description": desc, "url": url, "published": pub_date})
+                articles.append({"title": title, "description": desc, "url": url,
+                                 "published": pub_date, "dated": dated})
         return articles
+
+    if root.tag != "{http://www.w3.org/2005/Atom}feed":
+        return None
 
     # Atom
     for entry in root.findall("atom:entry", ns):
@@ -292,12 +310,19 @@ def _parse_rss(xml_text: str) -> list[dict]:
         link_el = entry.find("atom:link", ns)
         url = (link_el.get("href") if link_el is not None else "") or ""
         published_str = entry.findtext("atom:published", namespaces=ns) or entry.findtext("atom:updated", namespaces=ns)
+        dated = False
         try:
-            pub_date = datetime.fromisoformat(published_str.replace("Z", "+00:00")) if published_str else datetime.now(timezone.utc)
+            pub_date = datetime.fromisoformat(published_str.replace("Z", "+00:00")) if published_str else None
+            dated = pub_date is not None
         except Exception:
+            pub_date = None
+        if pub_date is None:
             pub_date = datetime.now(timezone.utc)
+        elif pub_date.tzinfo is None:
+            pub_date = pub_date.replace(tzinfo=timezone.utc)
         if url:
-            articles.append({"title": title, "description": summary, "url": url, "published": pub_date})
+            articles.append({"title": title, "description": summary, "url": url,
+                             "published": pub_date, "dated": dated})
 
     return articles
 
@@ -468,26 +493,60 @@ async def _process_article(
 
 # ── FEED POLLER ────────────────────────────────────────────────────────────────
 
-async def _poll_feed(feed: dict, http_client: httpx.AsyncClient):
-    """Fetch and process one RSS feed."""
-    url = feed["url"]
-    source = feed["source"]
-    reliability = feed["reliability"]
+async def _fetch_feed(feed: dict, http_client) -> tuple[list[dict] | None, ErrorKind, str | None]:
+    """Fetch and parse one RSS feed. Returns (articles or None, outcome, detail).
 
+    A well-formed feed with no items is EMPTY, a success; a 200 that is not a
+    feed is PARSE_ERROR, never "no articles".
+    """
+    source = feed["source"]
     try:
-        resp = await http_client.get(url, timeout=15, follow_redirects=True)
-        if resp.status_code != 200:
-            logger.warning("RSS %s returned HTTP %d", source, resp.status_code)
-            return
+        resp = await http_client.get(feed["url"], timeout=15, follow_redirects=True)
+    except httpx.TimeoutException as e:
+        logger.warning("RSS fetch timed out for %s: %s", source, e)
+        return None, ErrorKind.TIMEOUT, type(e).__name__
     except Exception as e:
         logger.warning("RSS fetch failed for %s: %s", source, e)
-        return
-
+        return None, ErrorKind.FETCH_ERROR, f"{type(e).__name__}: {e}"
+    if resp.status_code != 200:
+        logger.warning("RSS %s returned HTTP %d", source, resp.status_code)
+        kind = ErrorKind.RATE_LIMITED if resp.status_code == 429 else ErrorKind.HTTP_ERROR
+        return None, kind, f"HTTP {resp.status_code}"
     articles = _parse_rss(resp.text)
+    if articles is None:
+        return None, ErrorKind.PARSE_ERROR, "reply is not an RSS or Atom feed"
     if not articles:
         logger.debug("RSS %s: no articles parsed", source)
-        return
+        return articles, ErrorKind.EMPTY, None
+    return articles, ErrorKind.OK, None
 
+
+def report_cycle(now: float, outcomes: dict[str, tuple[list[dict] | None, ErrorKind, str | None]]) -> None:
+    """One fetch pass over every feed to the "rss" tracker. Any feed answering
+    is a success - there is no partial state - and `parts` names each feed's
+    outcome so a dead feed URL stays visible behind a live roll-up."""
+    tracker = feeds.tracker("rss")
+    parts = {src: (kind.value if detail is None else f"{kind.value}: {detail}")
+             for src, (_, kind, detail) in outcomes.items()}
+    answered = [arts for arts, kind, _ in outcomes.values() if kind in feeds.SUCCESS_KINDS]
+    if answered:
+        epochs = [a["published"].timestamp() for arts in answered for a in arts if a.get("dated")]
+        tracker.succeeded(now, count=len(answered), source="rss",
+                          source_epoch=max(epochs) if epochs else None,
+                          kind=ErrorKind.OK if any(answered) else ErrorKind.EMPTY,
+                          parts=parts)
+        return
+    kinds = [kind for _, kind, _ in outcomes.values()]
+    # All failed: name the most common way they failed.
+    kind = max(sorted(set(kinds)), key=kinds.count) if kinds else ErrorKind.FETCH_ERROR
+    failed = "; ".join(f"{src} {p}" for src, p in parts.items())
+    tracker.failed(now, kind, f"all {len(outcomes)} feeds failed: {failed}", parts=parts)
+
+
+async def _process_articles(feed: dict, articles: list[dict]):
+    """Filter and classify one feed's articles."""
+    source = feed["source"]
+    reliability = feed["reliability"]
     new_count = 0
     for article in articles:
         art_url = article["url"]
@@ -513,8 +572,13 @@ async def _poll_feed(feed: dict, http_client: httpx.AsyncClient):
 
 # ── BACKGROUND TASK ENTRYPOINT ─────────────────────────────────────────────────
 
-async def start_news_feed_poller():
-    """Continuously poll all RSS feeds. Runs forever as a background task."""
+async def start_news_feed_poller(sleep=asyncio.sleep, clock=time.time, client=None):
+    """Continuously poll all RSS feeds. Runs forever as a background task.
+
+    Each cycle fetches every feed first, reports that pass to the "rss"
+    tracker, then classifies: the feed's health is whether the outlets
+    answered, not how long the classifier took over what they said.
+    """
     logger.info("News feed poller starting — monitoring %d feeds", len(FEEDS))
 
     headers = {
@@ -522,15 +586,27 @@ async def start_news_feed_poller():
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
     }
 
-    async with httpx.AsyncClient(headers=headers) as http_client:
+    async with (client or httpx.AsyncClient(headers=headers)) as http_client:
         while True:
+            outcomes = {}
             for feed in FEEDS:
                 try:
-                    await _poll_feed(feed, http_client)
+                    outcomes[feed["source"]] = await _fetch_feed(feed, http_client)
                 except Exception as e:
-                    logger.exception("Unhandled error polling %s: %s", feed["source"], e)
+                    logger.exception("Unhandled error fetching %s: %s", feed["source"], e)
+                    outcomes[feed["source"]] = (None, ErrorKind.FETCH_ERROR, f"{type(e).__name__}: {e}")
                 # Small gap between feeds
-                await asyncio.sleep(2)
+                await sleep(2)
+            report_cycle(clock(), outcomes)
+
+            for feed in FEEDS:
+                articles = outcomes[feed["source"]][0]
+                if not articles:
+                    continue
+                try:
+                    await _process_articles(feed, articles)
+                except Exception as e:
+                    logger.exception("Unhandled error processing %s: %s", feed["source"], e)
 
             logger.debug("News feed poll cycle complete — sleeping %ds", POLL_INTERVAL)
-            await asyncio.sleep(POLL_INTERVAL)
+            await sleep(POLL_INTERVAL)

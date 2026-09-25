@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FEED_WORD, type FeedState } from "../lib/feed";
 import Map, { Marker, Popup, Source, Layer } from "react-map-gl";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingStatus, JammingZone, TLERecord, TrackHistory, Vessel } from "../hooks/useTracking";
@@ -18,6 +19,16 @@ interface MapPanelProps {
   jammingStatus: JammingStatus;
   aircraftTracks: TrackHistory;
   vesselTracks: TrackHistory;
+  /** The aircraft feed's state. Legend counts print "—" unless it can vouch for a number. */
+  aircraftFeedState: FeedState;
+  /** The vessel feed's state; a missing AIS key is not an empty sea. */
+  vesselsFeedState: FeedState;
+  tleFeedState: FeedState;
+}
+
+/** A legend count: the number drawn, or "—" plus the state when the feed cannot vouch for it. */
+function legendCount(n: number, state: FeedState): string {
+  return state === "live" || state === "stale" ? String(n) : `— ${FEED_WORD[state].toLowerCase()}`;
 }
 
 /**
@@ -157,7 +168,7 @@ function PingMarker({
   );
 }
 
-export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks }: MapPanelProps) {
+export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState, tleFeedState }: MapPanelProps) {
   const [selected, setSelected] = useState<ConflictEvent | null>(null);
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
@@ -710,17 +721,17 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   <path d="M12 2 L14 8 L21 10 L14 11 L14 18 L17 20 L17 21 L12 19 L7 21 L7 20 L10 18 L10 11 L3 10 L10 8 Z" />
                 </svg>
                 <span style={{ color: "var(--text-secondary)" }}>
-                  AIRCRAFT ({airborneAircraft.length})
+                  AIRCRAFT ({legendCount(airborneAircraft.length, aircraftFeedState)})
                 </span>
               </div>
             )}
-            {vessels.length > 0 && (
+            {(vessels.length > 0 || vesselsFeedState !== "live") && (
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="#40e0d0">
                   <path d="M12 2 L15 9 L15 16 L19 20 L12 22 L5 20 L9 16 L9 9 Z" />
                 </svg>
                 <span style={{ color: "var(--text-secondary)" }}>
-                  VESSELS ({vessels.length})
+                  VESSELS ({legendCount(vessels.length, vesselsFeedState)})
                 </span>
               </div>
             )}
@@ -754,7 +765,9 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 <span style={{ color: "#d29922" }}>
                   {jammingStatus.status === "no_integrity_data"
                     ? "GPS: NO INTEGRITY DATA"
-                    : "GPS: INSUFFICIENT COVERAGE"}
+                    : jammingStatus.status === "feed_not_live"
+                      ? "GPS: AIRCRAFT FEED NOT LIVE"
+                      : "GPS: INSUFFICIENT COVERAGE"}
                 </span>
               </div>
             )}
@@ -815,7 +828,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  AIRCRAFT ({aircraft.filter((a) => !a.on_ground).length})
+                  AIRCRAFT ({legendCount(aircraft.filter((a) => !a.on_ground).length, aircraftFeedState)})
                 </span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -829,7 +842,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  VESSELS ({vessels.length})
+                  VESSELS ({legendCount(vessels.length, vesselsFeedState)})
                 </span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -842,7 +855,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  SATELLITES ({tleData.length})
+                  SATELLITES ({legendCount(tleData.length, tleFeedState)})
                 </span>
               </div>
             </div>

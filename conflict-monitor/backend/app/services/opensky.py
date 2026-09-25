@@ -10,10 +10,13 @@ import logging
 import math
 import time
 from collections import defaultdict
+from typing import NamedTuple
 
 import httpx
 
+from app import feeds
 from app.config import settings
+from app.feeds import ErrorKind
 from app.services.track_history import record_aircraft_position
 
 logger = logging.getLogger(__name__)
@@ -83,6 +86,46 @@ _cache: dict = {
     "cells_evaluated": 0,
     "aircraft_evaluable": 0,
 }
+
+
+class FetchResult(NamedTuple):
+    """One upstream attempt. `states` is None exactly when the attempt failed;
+    an empty list is a successful answer with nothing in it."""
+
+    states: list[dict] | None
+    kind: ErrorKind
+    source_epoch: float | None = None
+    detail: str | None = None
+
+
+def _classify_status(code: int) -> ErrorKind:
+    if code == 429:
+        return ErrorKind.RATE_LIMITED
+    if code in (401, 403):
+        # adsb.lol's 403 is a policy refusal (a generic User-Agent), OpenSky's
+        # 401 is bad credentials: either way retrying unchanged will not help.
+        return ErrorKind.AUTH_FAILED
+    return ErrorKind.HTTP_ERROR
+
+
+def _classify_exception(e: Exception) -> ErrorKind:
+    if isinstance(e, httpx.TimeoutException):
+        return ErrorKind.TIMEOUT
+    if isinstance(e, httpx.HTTPError):
+        return ErrorKind.FETCH_ERROR
+    # json.JSONDecodeError is a ValueError; so is a malformed payload below.
+    if isinstance(e, (ValueError, TypeError, KeyError, IndexError)):
+        return ErrorKind.PARSE_ERROR
+    return ErrorKind.FETCH_ERROR
+
+
+def _epoch_seconds(value) -> float | None:
+    """An upstream timestamp as epoch seconds, or None. adsb.lol's `now` is in
+    milliseconds and OpenSky's `time` in seconds; anything past 1e11 is read as
+    milliseconds. Receipt time is never substituted for a missing value."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return value / 1000.0 if value > 1e11 else float(value)
 
 
 def _detect_jamming(states: list[dict]) -> dict:
@@ -166,7 +209,7 @@ def _detect_jamming(states: list[dict]) -> dict:
     }
 
 
-async def _poll_adsb_lol(client: httpx.AsyncClient) -> list[dict] | None:
+async def _poll_adsb_lol(client: httpx.AsyncClient) -> FetchResult:
     """Fetch aircraft from adsb.lol (free, no auth)."""
     try:
         resp = await client.get(
@@ -174,6 +217,8 @@ async def _poll_adsb_lol(client: httpx.AsyncClient) -> list[dict] | None:
         )
         if resp.status_code == 200:
             data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("ac", []), list):
+                raise ValueError("adsb.lol body is not {ac: [...]}")
             ac_list = data.get("ac") or []
             states = []
             for a in ac_list:
@@ -195,15 +240,17 @@ async def _poll_adsb_lol(client: httpx.AsyncClient) -> list[dict] | None:
                     "nac_p": a.get("nac_p"),
                     "nic": a.get("nic"),
                 })
-            return states
-        else:
-            logger.warning("adsb.lol returned %d", resp.status_code)
+            kind = ErrorKind.OK if states else ErrorKind.EMPTY
+            return FetchResult(states, kind, _epoch_seconds(data.get("now")))
+        logger.warning("adsb.lol returned %d", resp.status_code)
+        return FetchResult(None, _classify_status(resp.status_code),
+                           detail=f"adsb.lol HTTP {resp.status_code}")
     except Exception as e:
         logger.error("adsb.lol poll error: %s", e)
-    return None
+        return FetchResult(None, _classify_exception(e), detail=f"adsb.lol {type(e).__name__}: {e}")
 
 
-async def _poll_opensky(client: httpx.AsyncClient, auth: tuple | None) -> list[dict] | None:
+async def _poll_opensky(client: httpx.AsyncClient, auth: tuple | None) -> FetchResult:
     """Fetch aircraft from OpenSky Network (fallback)."""
     bbox = _opensky_bbox()
     try:
@@ -213,6 +260,9 @@ async def _poll_opensky(client: httpx.AsyncClient, auth: tuple | None) -> list[d
         )
         if resp.status_code == 200:
             data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError("OpenSky body is not an object")
+            # "states": null is OpenSky's answer for an empty box: a success.
             states_raw = data.get("states") or []
             states = [
                 {
@@ -231,14 +281,14 @@ async def _poll_opensky(client: httpx.AsyncClient, auth: tuple | None) -> list[d
                 if s[5] is not None and s[6] is not None
                 and _nm_from_centre(s[6], s[5]) <= RADIUS_NM
             ]
-            return states
-        elif resp.status_code in (429, 401):
-            logger.warning("OpenSky %d — skipping", resp.status_code)
-        else:
-            logger.warning("OpenSky API returned %d", resp.status_code)
+            kind = ErrorKind.OK if states else ErrorKind.EMPTY
+            return FetchResult(states, kind, _epoch_seconds(data.get("time")))
+        logger.warning("OpenSky API returned %d", resp.status_code)
+        return FetchResult(None, _classify_status(resp.status_code),
+                           detail=f"OpenSky HTTP {resp.status_code}")
     except Exception as e:
         logger.error("OpenSky poll error: %s", e)
-    return None
+        return FetchResult(None, _classify_exception(e), detail=f"OpenSky {type(e).__name__}: {e}")
 
 
 async def start_opensky_poller():
@@ -252,15 +302,30 @@ async def start_opensky_poller():
 
     async with httpx.AsyncClient(timeout=30, auth=opensky_auth) as opensky_client, \
                httpx.AsyncClient(timeout=30, headers={"User-Agent": ADSB_USER_AGENT}) as adsb_client:
+        tracker = feeds.tracker("aircraft")
         while True:
             # Try adsb.lol first (free, no auth, no rate limits)
-            states = await _poll_adsb_lol(adsb_client)
-            source = "adsb.lol"
+            result = await _poll_adsb_lol(adsb_client)
+            source, fallback_from = "adsb.lol", None
+            primary = result
 
-            # Fall back to OpenSky if adsb.lol failed
+            # Fall back to OpenSky if adsb.lol failed. The switch is recorded as
+            # a field, never left for a reader to infer from the source string.
+            if result.states is None:
+                result = await _poll_opensky(opensky_client, opensky_auth)
+                source, fallback_from = "opensky", "adsb.lol"
+
+            states = result.states
+            now = time.time()
             if states is None:
-                states = await _poll_opensky(opensky_client, opensky_auth)
-                source = "opensky"
+                # C31: nothing is written to the cache, so the last fleet stays
+                # available as last-good — but the tracker now says the feed is
+                # not live, and every reader asks it before trusting the cache.
+                tracker.failed(now, result.kind, f"{primary.detail}; {result.detail}")
+            else:
+                tracker.succeeded(now, count=len(states), source=source,
+                                  source_epoch=result.source_epoch, kind=result.kind,
+                                  fallback_from=fallback_from)
 
             if states is not None:
                 interference = _detect_jamming(states)
@@ -289,13 +354,35 @@ def get_aircraft() -> list[dict]:
     return _cache["states"]
 
 
+def get_aircraft_envelope() -> dict:
+    """/tracking/aircraft: the last good fleet, with the feed's state beside it.
+
+    Rows are kept while the feed is retrying or stale, as last-good; the state
+    says what they are worth. The UI stops drawing them once it reads
+    `unavailable` (FINDINGS.md, feed_health decision 4).
+    """
+    return feeds.envelope("aircraft", _cache["states"], time.time())
+
+
+# The interference verdict is only as current as the feed it was measured on.
+_VERDICT_STATES = (feeds.FeedState.LIVE, feeds.FeedState.STALE)
+
+
 def get_jamming_zones() -> dict:
-    """Return the current interference measurement plus its provenance."""
+    """Return the current interference measurement plus its provenance.
+
+    When the aircraft feed is not live or stale, the last verdict is withheld:
+    status becomes "feed_not_live" and no zones are served. A dead feed must
+    not keep reporting "ok" (C31). `as_of` stays the time of the measurement.
+    """
+    feed_state = feeds.tracker("aircraft").state(time.time())
+    measured = feed_state in _VERDICT_STATES
     return {
-        "status": _cache.get("jamming_status", "no_integrity_data"),
+        "status": _cache.get("jamming_status", "no_integrity_data") if measured else "feed_not_live",
+        "feed_state": feed_state.value,
         "source": _cache.get("source"),
         "as_of": _cache.get("timestamp", 0),
         "cells_evaluated": _cache.get("cells_evaluated", 0),
         "aircraft_evaluable": _cache.get("aircraft_evaluable", 0),
-        "zones": _cache.get("jamming", []),
+        "zones": _cache.get("jamming", []) if measured else [],
     }

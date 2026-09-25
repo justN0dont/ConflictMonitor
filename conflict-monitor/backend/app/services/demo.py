@@ -545,9 +545,11 @@ def _init_demo_aircraft():
 
 async def start_demo_aircraft_poller():
     """Background task that updates synthetic aircraft positions."""
+    from app import feeds
     from app.services.opensky import _cache as opensky_cache
 
     _init_demo_aircraft()
+    tracker = feeds.tracker("aircraft")
 
     while True:
         for ac in _demo_aircraft:
@@ -562,6 +564,11 @@ async def start_demo_aircraft_poller():
         opensky_cache["jamming_status"] = "ok" if zones else "insufficient_coverage"
         opensky_cache["cells_evaluated"] = len(zones)
         opensky_cache["aircraft_evaluable"] = len(states)
+        # Synthetic, and said so in a field: the fleet is fabricated, so its
+        # "upstream clock" is ours by construction.
+        now = time.time()
+        tracker.succeeded(now, count=len(states), source="demo", source_epoch=now,
+                          synthetic=True)
 
         logger.debug("Demo aircraft: %d tracked", len(states))
         await asyncio.sleep(15)
@@ -689,9 +696,11 @@ def _init_demo_vessels():
 
 async def start_demo_vessel_poller():
     """Background task that updates synthetic vessel positions."""
+    from app import feeds
     from app.services.maritime import _cache as maritime_cache
 
     _init_demo_vessels()
+    tracker = feeds.tracker("vessels")
 
     while True:
         for v in _demo_vessels:
@@ -704,6 +713,9 @@ async def start_demo_vessel_poller():
 
         maritime_cache["vessels"] = vessel_dict
         maritime_cache["last_update"] = time.time()
+        now = time.time()
+        tracker.succeeded(now, count=len(vessel_dict), source="demo", source_epoch=now,
+                          synthetic=True)
 
         logger.debug("Demo vessels: %d tracked", len(vessel_dict))
         await asyncio.sleep(10)

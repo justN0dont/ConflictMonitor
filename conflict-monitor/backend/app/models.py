@@ -1,7 +1,8 @@
 import datetime
 
 from geoalchemy2 import Geometry
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -269,3 +270,70 @@ class ChannelCheckpoint(Base):
     last_processed_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+# ── feed_health (docs/FINDINGS.md, Roadmap > Phase 2 > feed_health decisions) ──
+# Facts are stored; state is derived at read time from the timestamps. The
+# `state` columns below are a cache of the last computation, written so a human
+# reading the table can see it, and no reader trusts them over the clocks.
+
+
+class FeedHealth(Base):
+    """One row per feed: the tracker's facts at the last flush."""
+
+    __tablename__ = "feed_health"
+
+    feed: Mapped[str] = mapped_column(String(64), primary_key=True)
+    configured: Mapped[bool] = mapped_column(Boolean, default=True)
+    state: Mapped[str] = mapped_column(String(32))
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fallback_from: Mapped[str | None] = mapped_column(Text, nullable=True)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_attempt_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_epoch: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    error_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class FeedTransition(Base):
+    """A change of derived state, and one `process_start` row per feed at boot.
+
+    `process_start` is what lets a reader see the monitor's OWN downtime: the
+    last state before it is not extended across the gap.
+    """
+
+    __tablename__ = "feed_transition"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    feed: Mapped[str] = mapped_column(String(64))
+    at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True))
+    from_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    to_state: Mapped[str] = mapped_column(String(32))
+    error_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("ix_feed_transition_feed_at", "feed", "at"),)
+
+
+class FeedHeartbeat(Base):
+    """One row per feed per flush (every 60 s): the state then, and what the
+    collector did in that minute. A gap of more than 120 s between two rows
+    reads as UNKNOWN - the monitor was not recording, so nothing may be drawn
+    across it."""
+
+    __tablename__ = "feed_heartbeat"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    feed: Mapped[str] = mapped_column(String(64))
+    at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(String(32))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    successes: Mapped[int] = mapped_column(Integer, default=0)
+    # {"timeout": 2, "fetch_error": 1}: failures in this minute by error_kind.
+    failures: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    __table_args__ = (Index("ix_feed_heartbeat_feed_at", "feed", "at"),)
+

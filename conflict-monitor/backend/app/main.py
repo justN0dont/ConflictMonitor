@@ -1,16 +1,20 @@
 import asyncio
+import datetime
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app import feeds
 from app.config import settings
-from app.db import engine
+from app.db import async_session, engine
 from app.models import Base
 from app.routes.channels import router as channels_router
-from app.routes.events import router as events_router
+from app.routes.events import admin_router, router as events_router
+from app.security import allowed_origins
 from app.routes.tracking import router as tracking_router
 from app.routes.ws import router as ws_router
 from app.services.classifier import evidence_span
@@ -357,15 +361,24 @@ async def lifespan(app: FastAPI):
         # Start synthetic generators
         tasks.append(asyncio.create_task(start_demo_event_generator()))
         tasks.append(asyncio.create_task(start_demo_aircraft_poller()))
+        feeds.tracker("aircraft").task = tasks[-1]
         tasks.append(asyncio.create_task(start_demo_vessel_poller()))
+        feeds.tracker("vessels").task = tasks[-1]
 
         # CelesTrak is free, still use real satellite data
         tasks.append(asyncio.create_task(start_tle_fetcher()))
+        feeds.tracker("satellites").task = tasks[-1]
         logger.info("CelesTrak TLE fetcher started (real data)")
 
         # IODA is free, still use real internet-disruption data
         tasks.append(asyncio.create_task(start_connectivity_poller()))
+        feeds.tracker("connectivity").task = tasks[-1]
         logger.info("IODA connectivity poller started (real data)")
+
+        # Not run in demo mode: say so, rather than leave them pending forever.
+        for fid in ("rss", "telegram"):
+            feeds.tracker(fid).configured = False
+            feeds.tracker(fid).off_reason = "not run in demo mode"
 
     else:
         # ── PRODUCTION MODE ────────────────────────────────────────
@@ -376,30 +389,42 @@ async def lifespan(app: FastAPI):
         # Telegram listener
         if settings.telegram_api_id and settings.telegram_api_hash:
             tasks.append(asyncio.create_task(start_telegram_listener()))
+            feeds.tracker("telegram").task = tasks[-1]
             logger.info("Telegram listener started")
         else:
+            feeds.tracker("telegram").configured = False
             logger.warning("Telegram credentials not set — listener disabled")
 
         # Aircraft tracking
         tasks.append(asyncio.create_task(start_opensky_poller()))
+        feeds.tracker("aircraft").task = tasks[-1]
         logger.info("Aircraft poller started")
 
         # Satellite TLEs
         tasks.append(asyncio.create_task(start_tle_fetcher()))
+        feeds.tracker("satellites").task = tasks[-1]
         logger.info("CelesTrak TLE fetcher started")
 
         # Internet-disruption sensors
         tasks.append(asyncio.create_task(start_connectivity_poller()))
+        feeds.tracker("connectivity").task = tasks[-1]
         logger.info("IODA connectivity poller started")
 
         # Maritime vessels
         tasks.append(asyncio.create_task(start_maritime_poller()))
+        feeds.tracker("vessels").task = tasks[-1]
         logger.info("Maritime poller started")
 
         # News feed ingestion (RSS from Reuters, BBC, Al Jazeera, Times of Israel, etc.)
         from app.services.news_feeds import start_news_feed_poller
         tasks.append(asyncio.create_task(start_news_feed_poller()))
+        feeds.tracker("rss").task = tasks[-1]
         logger.info("News feed poller started (RSS: Reuters, BBC, Al Jazeera, Times of Israel, Iran International, RFI, MEE)")
+
+    # feed_health persistence: the only writer of feed_health, feed_transition
+    # and feed_heartbeat. Runs in both modes; demo rows are marked synthetic.
+    from app.feed_store import start_feed_flusher
+    tasks.append(asyncio.create_task(start_feed_flusher(async_session)))
 
     for task in tasks:
         task.add_done_callback(_log_task_exception)
@@ -414,21 +439,82 @@ app = FastAPI(title="Conflict Monitor", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Not "*": with credentials on, Starlette reflected ANY origin, so any page
+    # the operator had open could call DELETE /events/admin/purge-old (C60).
+    # The frontend only ever GETs, and sends no cookie.
+    allow_origins=allowed_origins(),
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=[],
 )
 
 app.include_router(channels_router)
+app.include_router(admin_router)  # before /events/{event_id}, so nothing can shadow it
 app.include_router(events_router)
 app.include_router(tracking_router)
 app.include_router(ws_router)
 
 
+_PROCESS_STARTED_AT = time.time()
+
+
 @app.get("/")
-async def health():
+async def root():
+    """Process liveness only: it says the process answers, nothing about feeds."""
     return {"status": "ok"}
+
+
+@app.get("/health")
+async def health():
+    """Feed health, read from memory so it answers with the database down.
+
+    Always HTTP 200: what is wrong is said in the body. A non-200 would let a
+    container healthcheck restart the backend because adsb.lol went down.
+    Aircraft, vessels and satellites report so far; the others join as feed_health
+    reaches them (docs/FINDINGS.md, Phase 2).
+    """
+    return feeds.health(time.time(), _PROCESS_STARTED_AT)
+
+
+@app.get("/health/history")
+async def health_history(feed: str, hours: float = 24):
+    """One feed's liveness over the last `hours`, from the heartbeat rows.
+
+    `segments` cover the whole window; a gap of more than 120 s between
+    heartbeats is an explicit `unknown` segment, never the last state stretched
+    across it. `transitions` include a `process_start` row per boot. Unlike
+    /health this reads the database, so it fails if Postgres is down.
+    """
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    from app.feed_store import liveness_timeline
+    from app.models import FeedTransition
+
+    if feed not in feeds.TRACKERS:
+        raise HTTPException(status_code=404, detail=f"unknown feed {feed!r}")
+    hours = min(max(hours, 0.1), 24 * 30)
+    until = time.time()
+    since = until - hours * 3600
+    async with async_session() as session:
+        segments = await liveness_timeline(session, feed, since, until)
+        rows = (await session.execute(
+            select(FeedTransition)
+            .where(FeedTransition.feed == feed,
+                   FeedTransition.at >= datetime.datetime.fromtimestamp(since, tz=datetime.timezone.utc))
+            .order_by(FeedTransition.at)
+        )).scalars().all()
+    return {
+        "feed": feed,
+        "since": since,
+        "until": until,
+        "segments": segments,
+        "transitions": [
+            {"at": r.at.timestamp(), "from": r.from_state, "to": r.to_state,
+             "error_kind": r.error_kind, "detail": r.detail}
+            for r in rows
+        ],
+    }
 
 
 @app.get("/config")
