@@ -208,5 +208,6 @@ def test_health_rolls_up_configured_feeds_and_lists_the_unconfigured(monkeypatch
     monkeypatch.setattr(feeds, "TRACKERS", {"aircraft": live, "ais": keyed})
     h = feeds.health(T0 + 1, T0 - 60)
     assert h["worst"] == "live"          # the unconfigured feed does not make worst "down"
-    assert h["not_collected"] == [{"feed": "ais", "missing_env": ["AISSTREAM_API_KEY"]}]
+    assert h["not_collected"] == [{"feed": "ais", "missing_env": ["AISSTREAM_API_KEY"],
+                                   "reason": "set AISSTREAM_API_KEY"}]
     assert h["feeds"]["ais"]["state"] == "unconfigured"

@@ -131,6 +131,44 @@ REGISTRY: dict[str, FeedSpec] = {
         silence_means="zero satellites is state 2 unless the feed is live: CelesTrak "
                       "IP-blocks clients that fetch too often (FINDINGS.md, C20)",
     ),
+    "connectivity": FeedSpec(
+        id="connectivity",
+        cadence_s=300,
+        # The upstream clock is the newest real IODA measurement across every
+        # watched country and sensor. IODA publishes with a lag of its own; an
+        # hour matches the per-sensor STALE_FLOOR in services/connectivity.py.
+        stale_after_s=3600,
+        max_stale_s=1800,     # six missed cycles
+        requires_env=(),      # IODA is keyless; Cloudflare Radar is reported separately
+        silence_means="no disruption shown is state 2 unless the feed is live: IODA "
+                      "not answering looks exactly like a country with nothing wrong",
+    ),
+    "rss": FeedSpec(
+        id="rss",
+        # One cycle fetches every feed (2 s apart), THEN classifies, so health
+        # reflects the fetch and not how long the classifier took.
+        cadence_s=300,
+        # The upstream clock is the newest dated article across all feeds. Nine
+        # outlets with nothing new in six hours means the feeds are frozen, not
+        # that the world is quiet. Unmeasured.
+        stale_after_s=6 * 3600,
+        max_stale_s=1800,
+        requires_env=(),
+        silence_means="no new RSS events is state 2 unless the feed is live: a feed URL "
+                      "can die and keep answering nothing",
+    ),
+    "telegram": FeedSpec(
+        id="telegram",
+        # Event-driven: there is no poll. A watchdog reports the connection once
+        # a minute, and the upstream clock is the newest message seen, so a
+        # connected listener on quiet channels reads stale, not live.
+        cadence_s=60,
+        stale_after_s=3 * 3600,
+        max_stale_s=600,
+        requires_env=("TELEGRAM_API_ID", "TELEGRAM_API_HASH"),
+        silence_means="no Telegram events is state 2 unless the feed is live: a dropped "
+                      "session or unresolved channels read the same as a quiet war",
+    ),
 }
 
 
@@ -149,6 +187,12 @@ class FeedTracker:
     fallback_from: str | None = None
     synthetic: bool = False
     count: int | None = None
+    # Why an unconfigured feed is off, when it is not a missing key (demo mode).
+    off_reason: str | None = None
+    # Per-source outcome of the last cycle, for feeds that fan out (RSS). A
+    # cycle is one success if any source answered - there is no partial state -
+    # so the sources that did not answer are named here instead of hidden.
+    parts: dict | None = None
     task: asyncio.Task | None = field(default=None, repr=False)
     # What the collector did since the last heartbeat; drained by the flusher.
     window_attempts: int = 0
@@ -169,7 +213,8 @@ class FeedTracker:
 
     def succeeded(self, now: float, *, count: int, source: str,
                   source_epoch: float | None, kind: ErrorKind = ErrorKind.OK,
-                  fallback_from: str | None = None, synthetic: bool = False) -> None:
+                  fallback_from: str | None = None, synthetic: bool = False,
+                  parts: dict | None = None) -> None:
         if kind not in SUCCESS_KINDS:
             raise ValueError(f"{kind} is not a success")
         self._attempt(now)
@@ -184,8 +229,10 @@ class FeedTracker:
         self.fallback_from = fallback_from
         self.synthetic = synthetic
         self.count = count
+        self.parts = parts
 
-    def failed(self, now: float, kind: ErrorKind, detail: str | None = None) -> None:
+    def failed(self, now: float, kind: ErrorKind, detail: str | None = None,
+               parts: dict | None = None) -> None:
         if kind in SUCCESS_KINDS:
             raise ValueError(f"{kind} is not a failure")
         self._attempt(now)
@@ -193,6 +240,7 @@ class FeedTracker:
         self.consecutive_failures += 1
         self.error_kind = kind
         self.error_detail = clean_detail(detail)
+        self.parts = parts
 
     def freshness(self, now: float) -> str:
         """'current' / 'old' / 'unknown', by the upstream's clock only."""
@@ -226,8 +274,12 @@ class FeedTracker:
         if st is FeedState.LIVE:
             return None
         if st is FeedState.UNCONFIGURED:
-            return "set " + ", ".join(self.spec.requires_env)
+            return self.off_reason or "set " + ", ".join(self.spec.requires_env)
         if st is FeedState.DEAD:
+            if self.consecutive_failures and self.error_kind:
+                # Why it exited, when the collector said so before it did.
+                last = f"{self.error_kind.value}: {self.error_detail}" if self.error_detail else self.error_kind.value
+                return f"collector task exited · {last}"
             return "collector task exited"
         if st is FeedState.PENDING:
             if self.last_attempt_at is None:
@@ -267,6 +319,7 @@ class FeedTracker:
             # The count from the last SUCCESS, named so: /health reports what
             # happened, and a bare "count" here would read as a current reading.
             "last_success_count": self.count,
+            "parts": self.parts,
         }
 
 
@@ -319,7 +372,8 @@ def health(now: float, process_started_at: float) -> dict:
         "worst": w.value if w else None,
         "feeds": feeds,
         "not_collected": [
-            {"feed": t.spec.id, "missing_env": list(t.spec.requires_env)}
+            {"feed": t.spec.id, "missing_env": [] if t.off_reason else list(t.spec.requires_env),
+             "reason": t.reason(now)}
             for t in TRACKERS.values() if not t.configured
         ],
     }

@@ -371,7 +371,13 @@ async def lifespan(app: FastAPI):
 
         # IODA is free, still use real internet-disruption data
         tasks.append(asyncio.create_task(start_connectivity_poller()))
+        feeds.tracker("connectivity").task = tasks[-1]
         logger.info("IODA connectivity poller started (real data)")
+
+        # Not run in demo mode: say so, rather than leave them pending forever.
+        for fid in ("rss", "telegram"):
+            feeds.tracker(fid).configured = False
+            feeds.tracker(fid).off_reason = "not run in demo mode"
 
     else:
         # ── PRODUCTION MODE ────────────────────────────────────────
@@ -382,8 +388,10 @@ async def lifespan(app: FastAPI):
         # Telegram listener
         if settings.telegram_api_id and settings.telegram_api_hash:
             tasks.append(asyncio.create_task(start_telegram_listener()))
+            feeds.tracker("telegram").task = tasks[-1]
             logger.info("Telegram listener started")
         else:
+            feeds.tracker("telegram").configured = False
             logger.warning("Telegram credentials not set — listener disabled")
 
         # Aircraft tracking
@@ -398,6 +406,7 @@ async def lifespan(app: FastAPI):
 
         # Internet-disruption sensors
         tasks.append(asyncio.create_task(start_connectivity_poller()))
+        feeds.tracker("connectivity").task = tasks[-1]
         logger.info("IODA connectivity poller started")
 
         # Maritime vessels
@@ -408,6 +417,7 @@ async def lifespan(app: FastAPI):
         # News feed ingestion (RSS from Reuters, BBC, Al Jazeera, Times of Israel, etc.)
         from app.services.news_feeds import start_news_feed_poller
         tasks.append(asyncio.create_task(start_news_feed_poller()))
+        feeds.tracker("rss").task = tasks[-1]
         logger.info("News feed poller started (RSS: Reuters, BBC, Al Jazeera, Times of Israel, Iran International, RFI, MEE)")
 
     # feed_health persistence: the only writer of feed_health, feed_transition
