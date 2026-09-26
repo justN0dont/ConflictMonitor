@@ -16,6 +16,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  policy:
+    # Source-text rules no test can see, each named for the finding it guards
+    # (tools/check_policy.py). Fails closed: a check that cannot run fails.
+    name: Policy checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 conflict-monitor/tools/check_policy.py
+
   backend:
     name: Backend tests (PostGIS)
     runs-on: ubuntu-latest

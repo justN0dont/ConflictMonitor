@@ -195,6 +195,9 @@ export function CesiumView({
   jammingZones,
 }: CesiumViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Attribution is shown, not hidden: Cesium ion, Bing and Google require it on
+  // screen (FINDINGS C52). It had gone to a detached div since 0f4ad05.
+  const creditRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Cesium.Viewer | null>(null);
   const [filterMode, setFilterMode] = useState<FilterMode>("normal");
   const postProcessRef = useRef<Cesium.PostProcessStage | null>(null);
@@ -231,7 +234,7 @@ export function CesiumView({
       vrButton: false,
       selectionIndicator: true,
       infoBox: true,
-      creditContainer: document.createElement("div"), // Hide credits
+      creditContainer: creditRef.current ?? undefined,
     });
 
     viewerRef.current = viewer;
@@ -247,9 +250,11 @@ export function CesiumView({
     // Try Google 3D Tiles
     const googleKey = (import.meta as any).env?.VITE_GOOGLE_MAPS_KEY;
     if (googleKey) {
-      Cesium.Cesium3DTileset.fromUrl(
-        `https://tile.googleapis.com/v1/3dtiles/root.json?key=${googleKey}`,
-      )
+      // Cesium's own loader for this tileset puts Google's required credits on
+      // screen; a raw fromUrl(root.json) did not.
+      // The viewer has no geocoder at all (geocoder: false), so no non-Google
+      // geocoder is ever used with these tiles, which Google's terms forbid.
+      Cesium.createGooglePhotorealistic3DTileset({ key: googleKey, onlyUsingWithGoogleGeocoder: true })
         .then((tileset) => {
           viewer.scene.primitives.add(tileset);
         })
@@ -708,6 +713,21 @@ export function CesiumView({
       <div
         ref={containerRef}
         style={{ width: "100%", height: "100%" }}
+      />
+      <div
+        ref={creditRef}
+        className="cm-cesium-credits"
+        aria-label="Imagery and terrain attribution"
+        style={{
+          position: "absolute",
+          left: 8,
+          bottom: 4,
+          zIndex: 10,
+          maxWidth: "70%",
+          fontSize: 9,
+          color: "var(--text-muted)",
+          opacity: 0.8,
+        }}
       />
 
       {/* Filter mode buttons */}

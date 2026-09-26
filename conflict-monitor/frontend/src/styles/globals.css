@@ -332,3 +332,11 @@ body::before {
     display: none;
   }
 }
+
+/* Cesium credits (C52). Tailwind's preflight gives every img max-width: 100%;
+   inside Cesium's auto-width, absolutely positioned credit box that resolves
+   against nothing and collapses each provider logo to 0x0 - on screen, and
+   invisible. */
+.cm-cesium-credits img {
+  max-width: none;
+}

@@ -10,6 +10,22 @@ import { EVENT_TYPES, eventVisual, formatUncertainty, geoPrecision } from "../li
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
 
+/**
+ * What each view needs before it can show anything, or null. A view that cannot
+ * render is still offered - focusable, aria-disabled - and says which variable
+ * is missing, rather than opening a blank panel. TERRAIN is Cesium: with neither
+ * an ion token nor a Google key it has no terrain and no imagery of its own
+ * (FINDINGS C52 and the untriaged "terrain view renders no basemap").
+ */
+const VIEW_NEEDS: Record<"2d" | "globe" | "terrain", string | null> = {
+  "2d": MAPBOX_TOKEN ? null : "2D map: needs VITE_MAPBOX_TOKEN",
+  globe: null,
+  terrain:
+    import.meta.env.VITE_CESIUM_ION_TOKEN || import.meta.env.VITE_GOOGLE_MAPS_KEY
+      ? null
+      : "TERRAIN: needs VITE_CESIUM_ION_TOKEN or VITE_GOOGLE_MAPS_KEY",
+};
+
 interface MapPanelProps {
   events: ConflictEvent[];
   aircraft: Aircraft[];
@@ -299,7 +315,11 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
         {(["2d", "globe", "terrain"] as const).map((mode, idx, arr) => (
           <button
             key={mode}
-            onClick={() => setViewMode(mode)}
+            onClick={() => {
+              if (!VIEW_NEEDS[mode]) setViewMode(mode);
+            }}
+            aria-disabled={VIEW_NEEDS[mode] != null}
+            title={VIEW_NEEDS[mode] ?? undefined}
             style={{
               padding: "4px 10px",
               background:
@@ -310,8 +330,10 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
               color:
                 viewMode === mode
                   ? "var(--accent-blue)"
-                  : "var(--text-secondary)",
-              cursor: "pointer",
+                  : VIEW_NEEDS[mode]
+                    ? "var(--text-muted)"
+                    : "var(--text-secondary)",
+              cursor: VIEW_NEEDS[mode] ? "not-allowed" : "pointer",
               fontFamily: "inherit",
               fontSize: "inherit",
               letterSpacing: "inherit",
