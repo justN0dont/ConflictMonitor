@@ -74,7 +74,7 @@ jobs:
       - run: pytest -q
 
   frontend:
-    name: Frontend type-check and build
+    name: Frontend tests, type-check and build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -90,5 +90,7 @@ jobs:
           cache: npm
           cache-dependency-path: conflict-monitor/frontend/package-lock.json
       - run: npm ci
+      # vitest: pure functions the display depends on (lib/*.test.ts).
+      - run: npm test
       # `build` is `tsc -b && vite build`: the type-check fails the job.
       - run: npm run build

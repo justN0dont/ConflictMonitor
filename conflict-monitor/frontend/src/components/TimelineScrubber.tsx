@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConflictEvent } from "../types/event";
 import { eventVisual } from "../lib/tokens";
-
-const SPEEDS = [1, 2, 5, 10, 30];
+import { SPEEDS, windowAt } from "../lib/playback";
 
 function formatTimeLabel(d: Date): string {
   const months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
@@ -33,9 +32,9 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
   const trackRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState<"left" | "right" | "window" | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1);
+  // Data milliseconds per wall millisecond (lib/playback.ts, C44).
+  const [speed, setSpeed] = useState(SPEEDS[0].rate);
   const dragStartRef = useRef({ x: 0, startMs: 0, endMs: 0 });
-  const playIntervalRef = useRef<number | null>(null);
 
   // Derived range values
   const rangeStart = timeRange?.earliest?.getTime() ?? (Date.now() - 7 * 86400000);
@@ -54,36 +53,58 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
   const widthPct = ((winEnd - winStart) / fullSpan) * 100;
 
   // ── Playback ──────────────────────────────────────────────
+  // C44: where the window is follows from wall time elapsed since playback was
+  // anchored, so a throttled or busy tab plays at the labelled rate, only less
+  // smoothly. The tick only redraws. The effect restarts on play/pause and on a
+  // speed change - not on every window it produces - and reads the window it
+  // starts from through a ref.
+  const windowRef = useRef({ start: winStart, end: winEnd });
+  windowRef.current = { start: winStart, end: winEnd };
+  const anchorRef = useRef<{ wall: number; start: number; size: number } | null>(null);
+
+  /** Move the window; while playing, playback continues from the new place. */
+  const seek = useCallback((range: { start: Date; end: Date } | null) => {
+    if (range && anchorRef.current) {
+      anchorRef.current = {
+        wall: performance.now(),
+        start: range.start.getTime(),
+        size: range.end.getTime() - range.start.getTime(),
+      };
+    }
+    onRangeChange(range);
+  }, [onRangeChange]);
+
   useEffect(() => {
-    if (!isPlaying || !activeRange) {
-      if (playIntervalRef.current) {
-        clearInterval(playIntervalRef.current);
-        playIntervalRef.current = null;
-      }
+    if (!isPlaying) {
+      anchorRef.current = null;
       return;
     }
-
-    playIntervalRef.current = window.setInterval(() => {
-      const windowSize = winEnd - winStart;
-      // Advance by (speed * 1 second of real time per tick) — tick every 100ms
-      const advance = speed * 1000;
-      const newStart = winStart + advance;
-      const newEnd = winEnd + advance;
-
-      if (newEnd >= Date.now()) {
-        // Reached live — stop playing and go to LIVE mode
+    const w = windowRef.current;
+    anchorRef.current = { wall: performance.now(), start: w.start, size: w.end - w.start };
+    let cancelled = false;
+    const id = window.setInterval(() => {
+      const a = anchorRef.current;
+      if (cancelled || !a) return;
+      const next = windowAt(a.wall, a.start, a.size, speed, performance.now(), Date.now());
+      if (next === null) {
+        // Reached live - stop playing and go to LIVE mode
         setIsPlaying(false);
         onRangeChange(null);
         return;
       }
-
-      onRangeChange({ start: new Date(newStart), end: new Date(newEnd) });
+      onRangeChange({ start: new Date(next.start), end: new Date(next.end) });
     }, 100);
-
-    return () => {
-      if (playIntervalRef.current) clearInterval(playIntervalRef.current);
+    // A hidden tab pauses rather than playing on unseen; press play to resume.
+    const onVisibility = () => {
+      if (document.hidden) setIsPlaying(false);
     };
-  }, [isPlaying, speed, winStart, winEnd, activeRange, onRangeChange]);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [isPlaying, speed, onRangeChange]);
 
   // ── Keyboard shortcuts ────────────────────────────────────
   useEffect(() => {
@@ -99,21 +120,22 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
       } else if (e.code === "ArrowLeft" && activeRange) {
         e.preventDefault();
         const step = (winEnd - winStart) * 0.1;
-        onRangeChange({ start: new Date(winStart - step), end: new Date(winEnd - step) });
+        seek({ start: new Date(winStart - step), end: new Date(winEnd - step) });
       } else if (e.code === "ArrowRight" && activeRange) {
         e.preventDefault();
         const step = (winEnd - winStart) * 0.1;
         const newEnd = winEnd + step;
         if (newEnd >= Date.now()) {
+          setIsPlaying(false);
           onRangeChange(null); // snap to live
         } else {
-          onRangeChange({ start: new Date(winStart + step), end: new Date(newEnd) });
+          seek({ start: new Date(winStart + step), end: new Date(newEnd) });
         }
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeRange, winStart, winEnd, onRangeChange]);
+  }, [activeRange, winStart, winEnd, onRangeChange, seek]);
 
   // ── Mouse drag handling ───────────────────────────────────
   const getTimeFromX = useCallback((clientX: number): number => {
@@ -230,11 +252,12 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
             padding: "3px 4px", fontFamily: "var(--font-mono, monospace)", fontSize: 9,
             background: "rgba(10,14,20,0.9)", border: "1px solid var(--border, #1a2332)",
             borderRadius: 3, color: "var(--text, #c8d6e5)", cursor: "pointer", outline: "none",
-            width: 46,
+            width: 66,
           }}
+          title="Playback rate: data time played per second"
         >
           {SPEEDS.map((s) => (
-            <option key={s} value={s}>{s}x</option>
+            <option key={s.rate} value={s.rate}>{s.label}</option>
           ))}
         </select>
 
