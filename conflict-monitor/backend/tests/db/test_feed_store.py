@@ -51,6 +51,44 @@ async def _count(factory, model, **where):
         return (await s.execute(q)).scalar_one()
 
 
+@pytest.fixture
+def vessels_and_regions(monkeypatch):
+    t = FeedTracker(feeds.REGISTRY["vessels"])
+    monkeypatch.setattr(feeds, "TRACKERS", {"vessels": t})
+    regions = {rid: feeds.RegionTracker(spec) for rid, spec in feeds.REGIONS.items()}
+    monkeypatch.setattr(feeds, "REGION_TRACKERS", regions)
+    return t, regions
+
+
+async def test_regions_get_their_own_heartbeats_and_transitions(factory, vessels_and_regions):
+    """Per-region currency is persisted by the same flusher under ids like
+    `vessels:gulf`, so a week of heartbeat rows measures each region's silence."""
+    t, regions = vessels_and_regions
+    for r in regions.values():
+        r.arm(T0)
+    regions["vessels:wc_med"].saw(T0, T0 - 2)
+    regions["vessels:wc_med"].saw(T0 + 1, T0 - 1)
+    t.succeeded(T0 + 1, count=2, source="aisstream", source_epoch=T0 - 1)
+    states = await feed_store.flush(factory, T0 + 2, {})
+
+    assert states["vessels"] == "live"
+    assert states["vessels:wc_med"] == "live"
+    assert states["vessels:gulf"] == "pending"
+    assert await _count(factory, FeedHeartbeat) == 1 + len(regions)
+    async with factory() as s:
+        hb = (await s.execute(select(FeedHeartbeat).where(FeedHeartbeat.feed == "vessels:wc_med"))).scalar_one()
+    assert (hb.state, hb.successes) == ("live", 2)
+
+
+async def test_a_region_row_says_unconfigured_when_its_feed_is(factory, vessels_and_regions):
+    t, _ = vessels_and_regions
+    t.configured = False
+    await feed_store.flush(factory, T0, {})
+    async with factory() as s:
+        row = (await s.execute(select(FeedHealth).where(FeedHealth.feed == "vessels:gulf"))).scalar_one()
+    assert (row.state, row.configured) == ("unconfigured", False)
+
+
 async def test_boot_writes_one_process_start_per_feed(factory, one_feed):
     await feed_store.record_boot(factory, T0)
     async with factory() as s:

@@ -9,7 +9,7 @@
 import { Plane, Radio, Satellite, Ship, FlaskConical } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Aircraft, JammingStatus, TLERecord, Vessel } from "../hooks/useTracking";
-import { FEED_WORD, feedAge, type FeedEnvelope, type FeedState } from "../lib/feed";
+import { FEED_WORD, aoSummary, feedAge, type FeedEnvelope, type FeedState } from "../lib/feed";
 import { STATUS, formatAge } from "../lib/tokens";
 import { STALE_AFTER, useFeedAges, useNow } from "../lib/useFeedAges";
 import type { ConflictEvent } from "../types/event";
@@ -171,6 +171,8 @@ export function Header({
     aircraftFeed.count == null ? null : aircraft.filter((a) => !a.on_ground).length;
   const aisAge = feedAge(vesselsFeed, vesselsReceivedAt, now);
   const vesState = vesselsFeed.state;
+  // AO waters only; the rest of the subscription is named in the note (C29).
+  const ves = aoSummary(vesselsFeed);
   const ages = useFeedAges({
     aircraft,
     vessels,
@@ -241,9 +243,13 @@ export function Header({
           />
           <Count
             Icon={Ship}
-            value={vesselsFeed.count}
+            value={ves.count}
             unit="VES"
-            note={vesState === "live" ? "AIS positions" : `${FEED_WORD[vesState]}${vesselsFeed.reason ? ` · ${vesselsFeed.reason}` : ""}`}
+            note={
+              vesState === "live"
+                ? `in AO waters${ves.outside ? ` · ${ves.outside} outside` : ""}${ves.dark.length ? ` · not seen: ${ves.dark.map((r) => r.name).join(", ")}` : ""}`
+                : `${FEED_WORD[vesState]}${vesselsFeed.reason ? ` · ${vesselsFeed.reason}` : ""}`
+            }
             dim={vesState === "stale"}
           />
           <Count

@@ -43,6 +43,54 @@ export interface FeedEnvelope<T> {
   verdict: "present" | "unproven";
   /** The last good items. Whether to DRAW them is decided by FEED_DRAWN. */
   items: T[];
+  /** Present on a feed whose currency is kept per region (vessels). */
+  regions?: RegionCurrency[];
+}
+
+/**
+ * One region of a feed, mirrored from feeds.RegionTracker. Its state is never
+ * better than the feed's: a live socket says nothing about waters it is not
+ * delivering.
+ */
+export interface RegionCurrency {
+  id: string;
+  key: string;
+  name: string;
+  /** lat_min, lat_max, lon_min, lon_max */
+  bbox: [number, number, number, number];
+  /** "ao" is counted in the headline; "control" is outside the AO, kept to show the socket delivering. */
+  role: "ao" | "control" | "outside";
+  state: FeedState;
+  reason: string | null;
+  last_success_at: number | null;
+  source_epoch: number | null;
+  age_s: number | null;
+  freshness: "current" | "old" | "unknown";
+  /** null unless the region is live or stale, like the feed's own count. */
+  count: number | null;
+  /** A measured reason this region cannot be seen, e.g. no receivers. */
+  known_gap: string | null;
+}
+
+/**
+ * The vessel headline counts AO waters only. `count` sums the AO regions that
+ * can vouch for a number and is null when none can; `dark` names the AO
+ * regions that are not live, so the sum is never read as the whole AO;
+ * `outside` is every other row the feed served.
+ */
+export function aoSummary(env: FeedEnvelope<unknown>): {
+  count: number | null;
+  dark: RegionCurrency[];
+  outside: number | null;
+} {
+  const ao = (env.regions ?? []).filter((r) => r.role === "ao");
+  const vouched = ao.filter((r) => r.count != null);
+  const count = vouched.length ? vouched.reduce((n, r) => n + (r.count ?? 0), 0) : null;
+  return {
+    count,
+    dark: ao.filter((r) => r.state !== "live"),
+    outside: env.count == null ? null : env.count - (count ?? 0),
+  };
 }
 
 /** One word per state, for rails and tooltips. */

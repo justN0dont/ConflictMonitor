@@ -15,6 +15,9 @@ Feed health (docs/FINDINGS.md, Roadmap > Phase 2 > feed_health decisions):
 - Reconnects back off on a ladder instead of a fixed 10 s forever; a refused
   key waits an hour. The ladder resets only when data arrives. This closes the
   untriaged "maritime reconnect" item (FINDINGS.md, Collection).
+- Currency is also kept PER REGION (feeds.REGIONS): each accepted position is
+  assigned to the region holding it and moves only that region's clocks, so a
+  live socket delivering the Mediterranean no longer vouches for the Gulf.
 """
 
 import asyncio
@@ -31,10 +34,14 @@ from app.services.track_history import record_vessel_position
 
 logger = logging.getLogger(__name__)
 
-# Bounding box covering Middle East + Eastern Mediterranean + Red Sea + Persian Gulf
+# The subscription. It REQUESTS the Gulf and the Red Sea; the free tier has no
+# receivers there (FINDINGS.md, C30), which feeds.REGIONS makes visible.
 BOUNDING_BOXES = [
-    [[10, 25], [45, 65]],  # Main Middle East
-    [[25, -5], [45, 25]],  # Eastern Mediterranean
+    [[10, 25], [45, 65]],  # Middle East: Levant, Red Sea, Gulf, Arabian Sea, Aegean, Black Sea, Caspian
+    # Western and central Mediterranean: outside the AO (C29), and most of the
+    # traffic. Kept as the control: it shows the socket delivering while an AO
+    # region is silent in the same connection.
+    [[25, -5], [45, 25]],
 ]
 
 AISSTREAM_URL = "wss://stream.aisstream.io/v0/stream"
@@ -103,8 +110,8 @@ def handle_message(msg: dict, now: float) -> str:
 
     Returns what it was: "accepted" (a usable position, cached), "static",
     "ignored" (recognised but unusable) or "error:<text>". Pure apart from the
-    cache and the track history; the caller decides what each outcome means
-    for the feed.
+    cache, the track history and the clocks of the region an accepted position
+    falls in; the caller decides what each outcome means for the feed.
     """
     if "error" in msg:
         return f"error:{msg['error']}"
@@ -137,9 +144,13 @@ def handle_message(msg: dict, now: float) -> str:
             # last_seen (receipt) until the parse is checked on real frames.
             "observed_at": _parse_time_utc(meta.get("time_utc")),
         })
+        region = feeds.region_of("vessels", lat, lon)
+        vessel["region"] = region
         _cache["vessels"][mmsi] = vessel
         _cache["last_update"] = now
         record_vessel_position(mmsi, lon, lat)
+        if region is not None:
+            feeds.REGION_TRACKERS[f"vessels:{region}"].saw(now, vessel["observed_at"])
         return "accepted"
 
     if msg_type == "ShipStaticData":
@@ -189,6 +200,8 @@ async def _run_websocket(connect, tracker: feeds.FeedTracker, clock=time.time) -
     async with connect(AISSTREAM_URL, open_timeout=30, ping_interval=20, ping_timeout=20) as ws:
         await ws.send(subscribe_msg)
         logger.info("AISStream: subscribed to %d bounding boxes", len(BOUNDING_BOXES))
+        for region in feeds.regions("vessels"):
+            region.arm(clock())
         while True:
             try:
                 raw = await asyncio.wait_for(ws.recv(), RECV_DEADLINE_S)

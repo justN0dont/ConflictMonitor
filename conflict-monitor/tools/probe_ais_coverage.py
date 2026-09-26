@@ -1,16 +1,17 @@
 import asyncio, json, time, collections
 import websockets
 import os
+import sys
+
+# One definition of the regions: the backend's, which production uses.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
+from app.feeds import region_of  # noqa: E402
 
 KEY = os.environ["AISSTREAM_API_KEY"]
 print("key present:", bool(KEY), flush=True)
 
 def region(lat, lon):
-    if 23 <= lat <= 31 and 47 <= lon <= 57: return "GULF"
-    if 29 <= lat <= 38 and 25 <= lon <= 36: return "E-MED"
-    if 30 <= lat <= 45 and -6 <= lon < 25: return "W/C-MED"
-    if 10 <= lat <= 30 and 32 <= lon <= 45: return "RED-SEA/ARABIAN"
-    return "OTHER"
+    return region_of("vessels", lat, lon) or "OTHER"
 
 async def probe(label, boxes, seconds):
     seen = collections.Counter()

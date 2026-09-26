@@ -711,19 +711,26 @@ async def start_demo_vessel_poller():
 
     _init_demo_vessels()
     tracker = feeds.tracker("vessels")
+    for region in feeds.regions("vessels"):
+        region.arm(time.time())
 
     while True:
         for v in _demo_vessels:
             v.step(dt_seconds=10.0)
 
+        now = time.time()
         vessel_dict = {}
         for v in _demo_vessels:
             d = v.to_dict()
+            # Regions move with the synthetic positions exactly as with real
+            # ones; the envelope's `synthetic` says what they are.
+            d["region"] = feeds.region_of("vessels", d["lat"], d["lon"])
+            if d["region"] is not None:
+                feeds.REGION_TRACKERS[f"vessels:{d['region']}"].saw(now, now)
             vessel_dict[d["mmsi"]] = d
 
         maritime_cache["vessels"] = vessel_dict
-        maritime_cache["last_update"] = time.time()
-        now = time.time()
+        maritime_cache["last_update"] = now
         tracker.succeeded(now, count=len(vessel_dict), source="demo", source_epoch=now,
                           synthetic=True)
 

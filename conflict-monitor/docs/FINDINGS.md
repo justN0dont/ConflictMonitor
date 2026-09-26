@@ -430,6 +430,48 @@ absence signal was structurally zero. It reported the absence of a sensor, not t
 
 Reproduce: `scratchpad/ais_probe.py` (25 min Gulf + 2 min control).
 
+### AIS by region — measured 2026-09-26
+
+One 30-minute recording of the production subscription — both `BOUNDING_BOXES`, the production key,
+one connection, no disconnects, 16:47–17:17 UTC — with every position logged beside its receipt time and
+its own `time_utc` (all 16,170 parsed), then bucketed by the regions that now live in `feeds.REGIONS`.
+
+| Region | Role | Positions | Share | Vessels | Per min | Longest silence |
+|---|---|---|---|---|---|---|
+| Persian Gulf & Hormuz | ao | **0** | 0% | 0 | 0 | all 30 min |
+| Gulf of Oman & Arabian Sea | ao | **0** | 0% | 0 | 0 | all 30 min |
+| Red Sea & Gulf of Aden | ao | **1** | 0.01% | 1 | 0.03 | 28.7 min, before it |
+| Levant | ao | 1,106 | 6.8% | 180 | 36.9 | 13.9 s |
+| Aegean & E. Mediterranean (25–32°E) | outside | 643 | 4.0% | 105 | 21.4 | 16.4 s |
+| Black Sea | outside | 439 | 2.7% | 67 | 14.6 | 21.4 s |
+| Caspian | outside | **0** | 0% | 0 | 0 | all 30 min |
+| W. & C. Mediterranean | control | 13,981 | **86.5%** | 2,116 | 465.8 | 2.6 s |
+
+Upstream lag, receipt minus `time_utc`: median 2.3 s, p99 11.5 s, max 13.8 s, none negative.
+
+- **`C30` re-derived with a concurrent control, and it holds.** The 2026-09-18 probe ran the Gulf and its
+  control four minutes apart, which PHASE2-13 (`GODS-EYE-VIEW.md`) rightly called a confound. Here the
+  Gulf sat at zero for 30 minutes on the same socket that was delivering the western Mediterranean at 466
+  positions a minute, so the zero belongs to the Gulf and not to the connection: `MEASURED_EMPTY` in
+  PHASE2-13's vocabulary. The Gulf of Oman and the Arabian Sea are empty the same way, which this
+  register had never measured.
+- **The Red Sea is thin, not empty.** One position in 30 minutes: a Danish-flagged vessel at 11.9°N
+  43.7°E, off Djibouti at the Bab el-Mandeb approach. The audit's "zero in the Red Sea" came from one
+  live capture and is refined rather than overturned — there is a receiver at the southern mouth and
+  nothing north of it. Apart from that one fix and the eastern Black Sea, nothing arrived east of 34.5°E.
+- **`C29`'s 85% was right a week later:** 86.5% of all positions came from the second box, which lies
+  wholly outside the AO. The AO's waters supplied 6.8% of positions, every one of them in the Levant.
+- **The region bounds.** The slowest region that delivered anything (Black Sea) went 21.4 s without a
+  position, and upstream lag peaked at 13.8 s, so a delivering region's newest fix was never more than
+  about 35 s old. The vessels feed's own 120 s / 600 s fit every region with a 5.6× margin on silence,
+  and are what each region starts on.
+
+Caveat kept deliberately: 30 minutes on one weekday afternoon, UTC. Night traffic and weekly cycles are
+not in it; the per-region heartbeat rows are the instrument for those.
+
+Reproduce: `tools/ais_regions.py record 1800 OUT`, then `tools/ais_regions.py analyse OUT`. It buckets
+with the backend's own `feeds.region_of`, so the regions measured are the regions served.
+
 ### Internet connectivity — measured from 2026-09-19
 
 Four IODA sensors per country (`bgp` 300 s, `ping-slash24` 600 s, `merit-nt` 300 s, `gtr` 1800 s),
@@ -757,7 +799,7 @@ scripts — `scp` it to `/tmp/`, then `ssh truthevades 'python3 /tmp/archive_sen
 
 ## Findings ledger
 
-60 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **25 open**, 32 fixed, 3 invalid or external. Of the open ones, **none is critical** and 8 are high. (Recounted from the rows by script on 2026-09-26, when `C69` was rebased onto `0f6e1ea`: the two branches closed `C69` and `C60`/`C61`/`C62` in parallel, each recounted correctly against a base without the other's move, and the merge left both sentences one side short. Earlier recount, kept: on 2026-09-25, when `C60`, `C61` and `C62` moved to Fixed: 29 open and 11 high before, and the tables agreed. Earlier recount, kept: on 2026-09-24, when `C31` moved to Fixed: before the move the tables already held 30 open and 12 high against the 31 and 13 this line claimed, so it had drifted by one again. Earlier note, kept: `8523961` closes `C10`, narrows `C11` and `C74`, and opens `C78` and `C79`. It also corrects the line itself: the previous text said "57 / 29 open / 14 high" while the tables held 58 rows and 30 open — the note claimed `ce5d994` opened `C76` when it opened `C76` **and** `C77`, and the tally was incremented once. The same drift, in the same sentence, two commits running. Counted from the rows with a script, not carried forward.)
+60 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **24 open**, 33 fixed, 3 invalid or external. Of the open ones, **none is critical** and 8 are high. (Recounted from the rows by script on 2026-09-26, when `C29` moved to Fixed: 25 open before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C69` was rebased onto `0f6e1ea`: the two branches closed `C69` and `C60`/`C61`/`C62` in parallel, each recounted correctly against a base without the other's move, and the merge left both sentences one side short. Earlier recount, kept: on 2026-09-25, when `C60`, `C61` and `C62` moved to Fixed: 29 open and 11 high before, and the tables agreed. Earlier recount, kept: on 2026-09-24, when `C31` moved to Fixed: before the move the tables already held 30 open and 12 high against the 31 and 13 this line claimed, so it had drifted by one again. Earlier note, kept: `8523961` closes `C10`, narrows `C11` and `C74`, and opens `C78` and `C79`. It also corrects the line itself: the previous text said "57 / 29 open / 14 high" while the tables held 58 rows and 30 open — the note claimed `ce5d994` opened `C76` when it opened `C76` **and** `C77`, and the tally was incremented once. The same drift, in the same sentence, two commits running. Counted from the rows with a script, not carried forward.)
 
 Claims that no longer hold are kept with status `INVALID` rather than deleted.
 
@@ -777,7 +819,6 @@ Ordered by severity, then area.
 | `C6` | high | 1 | Ingest | Country names resolve to national centroids via Nominatim and are marked is_geolocated=true |
 | `C63` | high | 1 | Platform | Alembic has no versions/; schema comes from create_all plus a hand-kept ALTER list that already crashed startu… |
 | `C66` | medium | — | Platform | **Narrowed in *this commit*.** 103 tests now cover the behaviours the last two days verified by hand, and each one was demonstrated to FAIL against its own defect re-introduced (nine mutations, nine catches). **CI half closed 2026-09-24:** `.github/workflows/ci.yml` runs the suite (176 tests at 2026-09-24, one of them the C31 strict xfail) against a PostGIS service container and builds the frontend on every push. What stays open: the suite cannot see schema drift, because the test database comes from `create_all` while production's comes from the hand-kept ALTER list (`C63`). The counter-test is named in `tests/conftest.py` and deliberately not written yet |
-| `C29` | medium | 2 | Collection | Second AIS box is mislabelled "Eastern Mediterranean" and supplies 85% of the vessel feed from outside any AO |
 | `C32` | medium | 1 | Collection | altitude mixes feet (adsb.lol) and metres (OpenSky) in one field, and the UI labels it both ways |
 | `C48` | medium | 3 | Frontend | Event type is encoded by hue alone on map, globe, terrain and timeline; only the feed carries a text label |
 | `C49` | medium | 3 | Frontend | No prefers-reduced-motion guard anywhere: 6 keyframe animations, an 8s scan line and an audio blip |
@@ -789,7 +830,7 @@ Ordered by severity, then area.
 | `C79` | medium | 4 | Ingest | **Opened by *this commit*, which created it.** `event_reports.event_id` is `ON DELETE CASCADE` — it has to be, or the two raw-SQL deletes in `events.py` fail on the FK the first time any report row exists. But `/admin/dedup` keeps `MIN(id)` per `(source, raw_text)` and deletes the twin, and the cascade now takes that twin's report rows with it — including the only stored copy of a report the survivor never had. That is `C10` reappearing in a new place. Re-pointing the reports at the survivor is the fix, and it is a decision rather than a mechanical port |
 | `C68` | medium | — | Platform | Vite HMR is blind across the Windows bind mount; the backend only reloads because watchfiles polls |
 | `C70` | medium | 0 | Platform | Demo path bypasses classifier, geocoder, dedup and track_history, so the zero-config run exercises none of the… |
-| `C71` | medium | 3 | Platform | Demo rows ARE tagged source='demo' in the DB and API; it is the UI that discards the distinction. **Narrowed by `C69`'s fix (*this commit*):** every demo row generated from that commit on starts its summary and raw_text with `SYNTHETIC · `, so the distinction reaches every surface that prints the text. Still open: the UI does not read `source`, and an instance in either mode serves any demo rows already in its table, including rows written before that commit, which carry no marker (`GODS-EYE-VIEW.md` SAFETY-10 item 4) |
+| `C71` | medium | 3 | Platform | Demo rows ARE tagged source='demo' in the DB and API; it is the UI that discards the distinction. **Narrowed by `C69`'s fix (`b3388bd`):** every demo row generated from that commit on starts its summary and raw_text with `SYNTHETIC · `, so the distinction reaches every surface that prints the text. Still open: the UI does not read `source`, and an instance in either mode serves any demo rows already in its table, including rows written before that commit, which carry no marker (`GODS-EYE-VIEW.md` SAFETY-10 item 4) |
 | `C78` | low | 4 | Ingest | **Surfaced by *this commit*, not fixed by it.** `dedup.py`'s channel append tests `if new_channel not in channels` against the joined *string*, so it is a substring match, not set membership: a genuinely distinct channel whose name is a substring of one already listed is silently never appended. The archive holds exactly this pair — `osint613` inside `x_osint613` — and two more that only a case difference saves (`OSINTWarfare`/`x_osintwarfare`, `GeoConfirmed`/`x_geoconfirmed`). Display string only: `event_reports` stores rows, so the distinct-channel count `C11` now uses is right even where the string is not. Fixing the string needs either string surgery or an overwrite that destroys the archive's only record of those names |
 | `C65` | low | — | Platform | Shutdown calls task.cancel() without awaiting, so no client-close path is guaranteed to run |
 | `C67` | low | — | Platform | No .dockerignore; frontend COPY . . does overlay host node_modules, but the linux binaries survive |
@@ -822,7 +863,8 @@ Verified fixed in the current tree. Each row names the commit that closed it.
 | `C4` | high | 1 | Ingest | Sentinel deleted. An unresolvable location persists as NULL lat/lon/geometry with is_geolocated=false, and the three predicates that read -25.0 went with it (`89c6f54`) |
 | `C7` | high | 1 | Ingest | Actor acronyms removed from KNOWN_LOCATIONS and added to `_NOT_A_PLACE`, so a bare "IDF" no longer falls through to Nominatim (which answered with a point in Armenia). A named HQ building may stay; a command or a fleet may not (`075ce6f`) |
 | `C9` | high | 1 | Ingest | Deterministic `order_by(timestamp DESC, id DESC)` before the limit (`075ce6f`); the cap later split into 20 located / 200 unlocated, sized on the densest observed window (`89c6f54`) |
-| `C69` | high | — | Platform | Demo bylines are fictional (`DEMO-CH-01` to `DEMO-CH-11`) and every demo row generated from *this commit* on starts its summary and raw_text with `SYNTHETIC · `, so one row cut out of a screenshot still says what it is. The nine templates that put confirmations, statements, threats, requests and offers in real actors' mouths now report them in the passive (*this commit*). `tests/unit/test_demo.py` fails if a byline is not in the `DEMO-CH-NN` form, matches a `CHANNEL_REGISTRY` key or display name, or a generated row lacks the marker. Residual, not in this fix: demo rows already stored keep their real bylines and old wording, with no marker, until cleared (`DELETE FROM events WHERE source = 'demo'`; their report rows go by cascade); demo rows still write no `event_reports` rows; and nothing hides demo rows from a live-mode instance (`C71`; SAFETY-10 items 3 and 4) |
+| `C69` | high | — | Platform | Demo bylines are fictional (`DEMO-CH-01` to `DEMO-CH-11`) and every demo row generated from `b3388bd` on starts its summary and raw_text with `SYNTHETIC · `, so one row cut out of a screenshot still says what it is. The nine templates that put confirmations, statements, threats, requests and offers in real actors' mouths now report them in the passive (`b3388bd`). `tests/unit/test_demo.py` fails if a byline is not in the `DEMO-CH-NN` form, matches a `CHANNEL_REGISTRY` key or display name, or a generated row lacks the marker. Residual, not in this fix: demo rows already stored keep their real bylines and old wording, with no marker, until cleared (`DELETE FROM events WHERE source = 'demo'`; their report rows go by cascade); demo rows still write no `event_reports` rows; and nothing hides demo rows from a live-mode instance (`C71`; SAFETY-10 items 3 and 4) |
+| `C29` | medium | 2 | Collection | The second box is relabelled for what it is — the western and central Mediterranean — and kept as the `control` region, outside the AO. The headline VES and VESSELS TRACKED count AO waters only, so its 86.5% of all positions (re-measured 2026-09-26, Measured facts "AIS by region") no longer inflates the vessel count; it appears as "N outside the AO". Its traffic on the same socket is what makes a silent AO region readable as a coverage gap rather than a dead connection (*this commit*) |
 | `C22` | medium | 2 | Collection | Aircraft cache timestamp is now wall-clock, but /tracking/aircraft still exposes no timestamp at all |
 | `C23` | medium | 0 | Collection | Poll log hard-coded "adsb.lol" - now reports the source actually used |
 | `C40` | medium | 3 | Frontend | app-grid row minimum: already minmax(0,1fr), fixed earlier today in 716ffec |
@@ -846,7 +888,7 @@ Real, but not a code defect.
 
 | ID | Sev | Phase | Area | Finding |
 |---|---|---|---|---|
-| `C30` | high | 2 | Collection | AISStream genuinely has no Persian Gulf receiver coverage - not a bounding-box bug |
+| `C30` | high | 2 | Collection | AISStream genuinely has no Persian Gulf receiver coverage - not a bounding-box bug. **Re-derived 2026-09-26 with a concurrent control:** zero Gulf positions in 30 minutes on a socket delivering 466 a minute from the western Mediterranean, and the Gulf of Oman and Arabian Sea empty the same way (Measured facts, "AIS by region"). The Gulf region now says so beside its silence (`known_gap`) |
 | `C72` | high | — | Platform | Anthropic key returns 400 organization_on_hold, so that backend cannot run. It no longer stops classification: `de146f6` made a local Ollama backend the default. It still stops any measurement *of Haiku*, the model that produced the archive |
 
 ### Invalid
@@ -1193,7 +1235,7 @@ Every test is a regression test for a defect that actually occurred, and each do
 
 **Fix:** Replace the real handles in CHANNELS with obviously fictional ones (`DEMO Channel Alpha`, …) — a one-line change that costs the demo nothing.
 
-**Fixed 2026-09-25 (*this commit*), and more than the one line above.** The fictional bylines alone do not survive a screenshot cropped to the summary, so every demo row generated from here on also starts its summary and raw_text with `SYNTHETIC · `, set once in `_gen_event`, the builder all three demo writers use. It is set at generation and repairs nothing already stored: a database that ran demo mode before this commit still serves those rows, with real bylines and no marker, until they are cleared with `DELETE FROM events WHERE source = 'demo'`. Deleting them at startup was left out on purpose, because SAFETY-10 prescribes hiding demo rows rather than deleting them and a boot-time delete is a decision, not a repair. Nine templates that put words in real actors' mouths ("IDF confirms", "CENTCOM confirms", "Iran threatens", "Russia calls for", "China offers" and four more) are now reported in the passive; templates naming a real actor's *action* at a real place stay, because the marker now travels with them. Measured rather than recalled: 9 of the 11 old bylines match a `CHANNEL_REGISTRY` key or display name once case and punctuation are ignored, six exactly and three by one name containing the other (`CIG` in `CIG_telegram`, `IranIntl` in `IranIntl_En`, `WarMonitor` in `War Monitors`), which is the rule the test applies. The other two, `MidEast Spectator` and `QudsAlert`, match nothing there and are still real outlets' names, which is why the test requires the `DEMO-CH-NN` form and does not settle for a registry miss. Shown to fail before it was believed: the old bylines, one real name disguised as `DEMO-CH-WarMonitors`, the marker removed, and the marker kept on summary but dropped from raw_text, re-introduced one at a time; four mutations, four catches. `evidence_span` is unchanged on demo rows: the writers pass an empty `location_name`, for which it returns `''` before reading the text.
+**Fixed 2026-09-25 (`b3388bd`), and more than the one line above.** The fictional bylines alone do not survive a screenshot cropped to the summary, so every demo row generated from here on also starts its summary and raw_text with `SYNTHETIC · `, set once in `_gen_event`, the builder all three demo writers use. It is set at generation and repairs nothing already stored: a database that ran demo mode before this commit still serves those rows, with real bylines and no marker, until they are cleared with `DELETE FROM events WHERE source = 'demo'`. Deleting them at startup was left out on purpose, because SAFETY-10 prescribes hiding demo rows rather than deleting them and a boot-time delete is a decision, not a repair. Nine templates that put words in real actors' mouths ("IDF confirms", "CENTCOM confirms", "Iran threatens", "Russia calls for", "China offers" and four more) are now reported in the passive; templates naming a real actor's *action* at a real place stay, because the marker now travels with them. Measured rather than recalled: 9 of the 11 old bylines match a `CHANNEL_REGISTRY` key or display name once case and punctuation are ignored, six exactly and three by one name containing the other (`CIG` in `CIG_telegram`, `IranIntl` in `IranIntl_En`, `WarMonitor` in `War Monitors`), which is the rule the test applies. The other two, `MidEast Spectator` and `QudsAlert`, match nothing there and are still real outlets' names, which is why the test requires the `DEMO-CH-NN` form and does not settle for a registry miss. Shown to fail before it was believed: the old bylines, one real name disguised as `DEMO-CH-WarMonitors`, the marker removed, and the marker kept on summary but dropped from raw_text, re-introduced one at a time; four mutations, four catches. `evidence_span` is unchanged on demo rows: the writers pass an empty `location_name`, for which it returns `''` before reading the text.
 
 
 ### Surfaced during the audit, not yet triaged
@@ -1356,8 +1398,10 @@ Where "a dead feed and a quiet night look identical" actually dies.
 
 - [x] Interference layer: real AO, real test, real denominator, three honest states (`64b690a`)
 - [x] `feed_health` table written from each poller's existing loop; `/health` exposing it — **done, 2026-09-25.** All six collectors report to an in-memory tracker (`app/feeds.py`): aircraft, AIS and satellites since 2026-09-24, and now the IODA connectivity poller, the RSS lane and the Telegram listener. The three tracking routes return the envelope; `GET /health` reads the trackers from memory; and a single flusher (`app/feed_store.py`) writes `feed_health` (current facts per feed), `feed_transition` (state changes, plus a `process_start` row per feed at boot) and `feed_heartbeat` (one row per feed per minute with attempts, successes and failures by kind) — decision 3 above. `GET /health/history?feed=` returns the liveness timeline with any heartbeat gap over 120 s as an explicit `unknown` segment; checked against a real 3-minute backend stop, which read as 185 s of `unknown` between two `process_start` rows. How the last three read: **connectivity**'s upstream clock is the newest real IODA measurement across every country and sensor, and a cycle with zero answers is a failure (before, it set a status string and the country list read as calm). **RSS** fetches every feed, reports, *then* classifies, so its health is whether the outlets answered and not how long the classifier took; one feed answering is a success (no partial state, decision 1), and a new `parts` field on the tracker names every feed's own outcome so a dead URL stays visible behind a live roll-up. Its clock is the newest article carrying a real `pubDate` — an undated item was stamped with receipt time and now says so (`dated: false`) instead of passing for the feed's time. **Telegram** is event-driven, so a watchdog reports the connection once a minute and the clock is the newest message seen: connected-but-quiet reads `stale`, a drop reads `retrying` then `unavailable`, and a listener that exited reads `dead` *with* its last error (a session that wants a login code is `auth_failed`, not a network error). In demo mode RSS and Telegram are not run and read `unconfigured` with the reason "not run in demo mode" rather than pending forever. Nothing in the frontend reads `/health` yet; that is Phase 3. The thresholds for the three new feeds are as unmeasured as the first three. The three tables come from `create_all` (whole new tables, which it can create), so they add nothing to the hand-kept ALTER list `C63` describes — but a column added to them later would.
-- [ ] Per-tile currency, not per-feed — a live socket delivering the wrong ocean still reads GREEN
-- [ ] Concurrent spatial control ring so absence claims work without waiting 28 days for a baseline
+- ~~Per-tile currency, not per-feed — a live socket delivering the wrong ocean still reads GREEN~~ — **split, not ticked: AIS is done per region, ADS-B is not, and the grid moved to the control ring (decisions below):**
+- [x] **Per-region currency for AIS — 2026-09-26** (*this commit*). Each accepted position moves only the clocks of the region holding it; a region is never shown better than its feed; the Gulf, the Gulf of Oman and the Red Sea read `pending` then `unavailable` beside their measured gaps while the socket stays `live` on the western Mediterranean. The headline counts AO waters only. Checked live against AISStream: feed `live` with 285 vessels, 18 of them in AO waters (all Levant), three AO regions dark; 609 s after the subscription opened the Gulf moved from `pending` to `unavailable` while the feed stayed `live`, and `/health`'s `worst` did not follow it
+- [ ] **Per-region currency for ADS-B — not done.** The aircraft feed is still judged whole over a 650 nm circle whose centre sat in a receiver hole (Sensor coverage); an Iraq with no aircraft reads the same whether its airspace is closed or unwatched
+- [ ] Concurrent spatial control ring so absence claims work without waiting 28 days for a baseline. **Now also carries the shared grid** (PHASE2-15 step 2): one 0.8° grid for AIS, ADS-B and jamming, with a fixed denominator and a land mask for AIS — the ring is what needs the denominator
 - [ ] Trailing robust baselines with an explicit `regime_id`; never pool across the 2023/2026 regime breaks
 - [ ] Resolve the maritime coverage gap (see Blocked)
 
@@ -1470,6 +1514,64 @@ body, so a future container healthcheck cannot restart the backend because adsb.
 (`GODS-EYE-VIEW.md` PHASE2-16), and whether imported OSINT rows get NULL or `'city'` precision
 (SAFETY-11). The aircraft slice needs neither.
 
+#### Per-region currency — decisions, settled 2026-09-26
+
+Grounded in a measurement taken the same day (Measured facts, "AIS by region"), and decided in the same
+shape as the `feed_health` decisions above. The roadmap line said "per-tile"; what shipped is per
+*region*, for AIS only, and decision 3 says why.
+
+**1. A region is a sub-tracker, not a new vocabulary.** `RegionTracker` (`app/feeds.py`) is a
+`FeedTracker` told of a success only when an accepted position falls inside its box. Its upstream clock
+is that position's own `time_utc`; a position without one leaves the previous upstream time in place
+and never lends it the receipt time. It derives `live` / `stale` / `pending` / `unavailable` with the
+unchanged `state()`, and what it shows is `worst(feed, region)`: never better than its feed, and
+`unconfigured` whenever the feed is. A region is armed when the subscription opens, so one that has
+heard nothing reads `pending`, then `unavailable` once its `max_stale_s` has passed. Ruled out:
+PHASE2-15's `live | silent | never` (`GODS-EYE-VIEW.md`) — a second vocabulary is what decision 1
+above forbids, and those three words map onto `live` / `stale` / `pending → unavailable` without loss.
+
+**2. Regions are coverage facts, not collectors.** `/health` lists them under their feed and keeps them
+out of `worst`: a dark Gulf must not read as a poller that died. The same flusher persists them under
+ids like `vessels:gulf` (`feeds.all_trackers()`), so `/health/history?feed=vessels:gulf` works and a
+week of per-region heartbeat rows is the measurement that re-sets each region's bounds. No schema
+change — the three `feed_health` tables key on a free string, so nothing joins `C63`'s hand-kept ALTER
+list. A region whose feed is not registered is not flushed.
+
+**3. Named regions now; the shared grid moves to the control-ring line.** PHASE2-15's step 2 — one
+0.8° grid for AIS, ADS-B and jamming with a fixed denominator — is not built. For AIS a fixed cell
+denominator means nothing without a land mask (most of the subscription's cells are land), and the
+grid's real consumer is the control ring, which is where a denominator is needed. Eight first-match
+boxes (`feeds.REGIONS`) cover every sea the subscription reaches; a position in none of them (inland)
+counts toward the feed and toward no region.
+
+**4. Roles, and what the headline counts.** `ao`: Persian Gulf & Hormuz, Gulf of Oman & Arabian Sea,
+Red Sea & Gulf of Aden, Levant. `control`: the western and central Mediterranean, the second
+subscription box `C29` found mislabelled "Eastern Mediterranean". It is kept and relabelled, because
+its traffic in the same connection is what turns a silent AO region from "the socket may be dead" into
+"the socket is delivering, just not from here" — PHASE2-13's concurrent control, running all the time.
+`outside`: the Aegean and the Mediterranean between 25° and 32°E, the Black Sea, the Caspian. The
+header VES and the rail's VESSELS TRACKED count AO waters only; everything else is "N outside the AO"
+in the note. Owner decisions, 2026-09-26: keep the box as a labelled control, and count AO waters only.
+
+**5. The rail row is nominal only when every AO region is live.** Otherwise it is DEGRADED — "coverage
+insufficient to evaluate" — with each AO region named beside its state. On the free tier the Gulf never
+is, so the row reads DEGRADED permanently. That is the true reading, and it is why this is not PARTIAL,
+which is a detection word ("two sensors agree"), not a coverage word.
+
+**6. A known gap is stated beside measured silence.** PHASE2-14 in its smallest form: a region carries
+`known_gap` text (the Gulf's is `C30`), appended to its reason whenever it is not live. Gap geometry as
+data and the hatch overlay stay Phase 3.
+
+**7. Demo moves region clocks from its synthetic positions** exactly as live does, and the envelope's
+`synthetic` says what they are. This does **not** close the untriaged "demo mode conceals exactly the two
+collection failures that matter": demo's fabricated Gulf vessels make the Gulf read live, and a known gap
+is only shown for a region that is not live.
+
+**Bounds.** Every region starts on the vessels feed's own 120 s stale / 600 s unavailable. The slowest
+region that delivered anything was silent for 21.4 s at most over 30 minutes, a 5.6× margin; one bound
+taken from the feed is simpler than eight tuned on a sample that cannot justify eight. The Red Sea will
+cycle live → stale → unavailable between its rare fixes: that is its coverage, not flicker to smooth.
+
 ### Phase 3 — The display
 
 - [ ] Mark geometry = evidence geometry, driven by `geo_precision`; unresolved rows go to a tray, never the map
@@ -1580,4 +1682,5 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-09-24 | `b40ca4e` | `feed_health` persistence (decision 3). Three tables — `feed_health`, `feed_transition`, `feed_heartbeat` — written by one flusher every 60 s from the trackers, never by the pollers; a `process_start` transition per feed at boot; per-minute attempt/success/failure-by-kind counters on the tracker, drained only after a successful commit, so a database error loses nothing and never reaches a poller; 30-day heartbeat retention. `GET /health/history?feed=&hours=` returns the liveness timeline, with any heartbeat gap over 120 s as `unknown` rather than the last state stretched across it. Checked on a running backend: 4 aircraft attempts a minute (the 15 s cadence, now measured rather than assumed), and a 3-minute stop read back as 185 s of `unknown` between two `process_start` rows. 234 passed; four defects re-introduced, four catches. The roadmap box stays unticked: connectivity, RSS and Telegram are not registered feeds yet |
 | 2026-09-25 | `b9dab57` | `feed_health`: connectivity, RSS and Telegram registered — all six collectors now report, and the Phase 2 box is ticked. IODA's clock is its newest real measurement and zero answers is a failure; RSS fetches all feeds, reports, then classifies, with per-feed outcomes in a new `parts` field and undated items marked `dated: false` instead of carrying receipt time; Telegram gets a once-a-minute connection watchdog, the newest message as its clock, and login-code prompts classified `auth_failed`. `dead` now carries the last error the collector reported. Demo mode names RSS and Telegram as not run. Checked on a running backend: connectivity and RSS went live on their first cycles against the real upstreams, and RSS's `parts` exposed four dead feeds (untriaged, Collection). 261 passed; fourteen defects re-introduced, fourteen catches |
 | 2026-09-25 | `0f6e1ea` | Security: `C60`, `C61`, `C62` fixed. `/events/admin/*` moved onto one router behind `X-Admin-Token` (`ADMIN_TOKEN`; unset answers 503), with a test that fails on any admin path or write route outside it; CORS narrowed from reflect-any-origin-with-credentials to a `CORS_ORIGINS` allow-list, `GET` only, no credentials; the websocket refuses foreign browser origins; compose publishes all three ports on 127.0.0.1, builds `DATABASE_URL` from `POSTGRES_*`, and stops handing the frontend container every backend secret. Checked live: the finding's attacker preflight now answers 400 with no `allow-origin`, admin calls 401/401/200 for none/wrong/right token, the attacker websocket gets 403 and the frontend's is accepted, and the real frontend still loads its events, aircraft and vessels. 284 passed; eight defects re-introduced, eight catches |
-| 2026-09-25 | *this commit* | Close `C69`: demo bylines become `DEMO-CH-01` to `DEMO-CH-11`, every newly generated demo row starts its summary and raw_text with `SYNTHETIC · `, and nine templates stop putting words in real actors' mouths. Three tests in `tests/unit/test_demo.py`; four defects re-introduced, four catches; 287 passed after rebasing onto `0f6e1ea` (237 on the original base, `b40ca4e`). Narrows `C71` |
+| 2026-09-25 | `b3388bd` | Close `C69`: demo bylines become `DEMO-CH-01` to `DEMO-CH-11`, every newly generated demo row starts its summary and raw_text with `SYNTHETIC · `, and nine templates stop putting words in real actors' mouths. Three tests in `tests/unit/test_demo.py`; four defects re-introduced, four catches; 287 passed after rebasing onto `0f6e1ea` (237 on the original base, `b40ca4e`). Narrows `C71` |
+| 2026-09-26 | *this commit* | Per-region currency for AIS: a live socket delivering the wrong ocean no longer reads GREEN. `RegionTracker` (`app/feeds.py`) is a sub-tracker per sea — moved only by accepted positions inside its box, its upstream clock the position's own `time_utc`, never shown better than its feed — listed under its feed in `/health` and kept out of the roll-up, and persisted by the same flusher as `vessels:<region>` with no schema change. The vessels envelope carries `regions`; the header VES and the rail's VESSELS TRACKED count AO waters only and name every dark AO region beside its measured gap (owner decisions: keep the western Mediterranean as a labelled control, count AO waters only). Measured first — 30 minutes of the production subscription through the new `tools/ais_regions.py`: 86.5% of positions from outside the AO, zero from the Gulf, the Gulf of Oman and the Arabian Sea against 466 a minute from the control on the same socket (`C30` re-derived with a concurrent control), one from the Red Sea. Closes `C29`. The roadmap line is split: ADS-B per region is not done, and the shared grid moves to the control-ring line. Checked live against AISStream and in demo mode. 307 passed (287 before); nine defects re-introduced, nine catches |

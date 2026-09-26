@@ -20,7 +20,7 @@ import type {
   TLERecord,
   Vessel,
 } from "../hooks/useTracking";
-import { FEED_WORD, feedAge, type FeedEnvelope } from "../lib/feed";
+import { FEED_WORD, aoSummary, feedAge, type FeedEnvelope } from "../lib/feed";
 import { formatAge } from "../lib/tokens";
 import { STALE_AFTER, useFeedAges, useNow, type FeedAges } from "../lib/useFeedAges";
 import type { ConflictEvent } from "../types/event";
@@ -211,26 +211,27 @@ function gpsRow(js: JammingStatus, zones: JammingZone[], ages: FeedAges): Row {
 
 /**
  * Same rules as the aircraft row. "Live" is judged by accepted position
- * reports, not by an open socket, and it is subscription-wide: per-region
- * coverage is not measured yet, and the Gulf has no free-tier receivers.
+ * reports, not by an open socket - and a live socket vouches only for the
+ * regions it is delivering. The value counts AO waters; the row is nominal
+ * only when every AO region is itself live, which on AISStream's free tier the
+ * Gulf never is (C30), so DEGRADED here is the true reading, not an alarm.
  */
 function vesselRow(feed: FeedEnvelope<Vessel>, age: number | null): Row {
   const why = feed.reason ? ` — ${feed.reason}` : "";
+  const ao = aoSummary(feed);
+  const aoValue = ao.count == null ? "—" : String(ao.count);
   let state: RailState;
   let value = "—";
   let note: string;
   switch (feed.state) {
     case "live":
-      state = feed.count === 0 ? "DEGRADED" : "WATCH";
-      value = String(feed.count ?? 0);
-      note =
-        feed.count === 0
-          ? "feed is live and returned no vessels — coverage unknown"
-          : "AIS feed live · per-region coverage not measured";
+      state = ao.count && ao.dark.length === 0 ? "WATCH" : "DEGRADED";
+      value = aoValue;
+      note = regionNote(feed, ao.outside);
       break;
     case "stale":
       state = "STALE";
-      value = String(feed.count ?? 0);
+      value = aoValue;
       note = `count is real but old${why}`;
       break;
     case "pending":
@@ -243,6 +244,19 @@ function vesselRow(feed: FeedEnvelope<Vessel>, age: number | null): Row {
       note = `${FEED_WORD[feed.state].toLowerCase()}${why}`;
   }
   return { name: "VESSELS TRACKED", value, state, note, age };
+}
+
+/** "Levant 21 · Persian Gulf & Hormuz unavailable — no free-tier receivers (C30…) · 480 outside the AO". */
+function regionNote(feed: FeedEnvelope<Vessel>, outside: number | null): string {
+  const ao = (feed.regions ?? []).filter((r) => r.role === "ao");
+  if (ao.length === 0) return "AIS feed live · per-region coverage not reported";
+  const parts = ao.map((r) => {
+    const word = r.state === "live" ? "" : ` ${FEED_WORD[r.state].toLowerCase()}`;
+    if (r.count != null) return `${r.name} ${r.count}${word}`;
+    return `${r.name}${word}${r.known_gap ? ` — ${r.known_gap}` : ""}`;
+  });
+  if (outside) parts.push(`${outside} outside the AO`);
+  return parts.join(" · ");
 }
 
 /**

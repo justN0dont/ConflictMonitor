@@ -46,9 +46,9 @@ def _ts(epoch: float | None) -> datetime.datetime | None:
 
 
 async def record_boot(session_factory, now: float) -> None:
-    """One process_start transition per registered feed."""
+    """One process_start transition per registered feed and region."""
     async with session_factory() as session:
-        for fid in feeds.TRACKERS:
+        for fid in feeds.all_trackers():
             session.add(FeedTransition(feed=fid, at=_ts(now), from_state=None, to_state=PROCESS_START))
         await session.commit()
 
@@ -65,7 +65,7 @@ async def flush(session_factory, now: float, last_states: dict[str, str]) -> dic
     new_states: dict[str, str] = {}
     drained: list[feeds.FeedTracker] = []
     async with session_factory() as session:
-        for fid, t in feeds.TRACKERS.items():
+        for fid, t in feeds.all_trackers().items():
             state = t.state(now).value
             new_states[fid] = state
             prev = last_states.get(fid)
@@ -82,7 +82,8 @@ async def flush(session_factory, now: float, last_states: dict[str, str]) -> dic
             ))
             row = {
                 "feed": fid,
-                "configured": t.configured,
+                # From the state, not the field: a region is unconfigured when its feed is.
+                "configured": state != feeds.FeedState.UNCONFIGURED.value,
                 "state": state,
                 "source": t.source,
                 "fallback_from": t.fallback_from,
@@ -118,7 +119,7 @@ async def prune(session_factory, now: float) -> int:
 
 async def start_feed_flusher(session_factory, sleep=asyncio.sleep, clock=time.time):
     """The only writer. Boot marker, then a flush every FLUSH_INTERVAL_S."""
-    last_states = {fid: PROCESS_START for fid in feeds.TRACKERS}
+    last_states = {fid: PROCESS_START for fid in feeds.all_trackers()}
     try:
         await record_boot(session_factory, clock())
     except Exception as e:

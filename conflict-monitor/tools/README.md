@@ -7,6 +7,7 @@ Each one re-derives a claim made there; none of them mutate anything.
 |---|---|
 | `probe_adsb_coverage.py` | Is there ADS-B coverage at a point, and do aircraft carry `nic`/`nac_p`? |
 | `probe_ais_coverage.py` | Does AISStream see the Persian Gulf? (Runs a Gulf box, then an eastern-Med control.) |
+| `ais_regions.py` | Where AISStream's positions come from, by the monitor's own regions, each read against a control on the same socket (`record`, then `analyse`) |
 | `archive_source_stats.py` | Per-source event counts and severity-5 rate in the production dump |
 | `archive_locations.py` | Every distinct `location_name` and the coordinate it resolved to |
 | `archive_fallback_rate.py` | The Phase 0 fallback rate, by re-classifying a stratified archive sample with the real `classify_message()` |

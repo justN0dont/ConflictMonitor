@@ -330,6 +330,155 @@ def tracker(feed_id: str) -> FeedTracker:
     return TRACKERS[feed_id]
 
 
+# ── Per-region currency ──────────────────────────────────────────────────────
+#
+# A live feed says the collector is getting data; it does not say from WHERE.
+# One AIS socket delivering the western Mediterranean read LIVE over a Gulf with
+# no receivers (FINDINGS.md, Roadmap > Phase 2 > per-region currency). A region
+# is a sub-tracker with the same clocks and the same vocabulary: it is told of
+# a success only when an accepted position falls inside its box, its upstream
+# clock is that position's own time, and it is never shown better than its feed.
+
+
+@dataclass(frozen=True)
+class RegionSpec(FeedSpec):
+    feed: str = ""
+    key: str = ""
+    name: str = ""
+    # lat_min, lat_max, lon_min, lon_max. First match wins, in registry order.
+    bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    # "ao": counted in the headline. "control": outside the AO, subscribed so a
+    # silent AO region can be read against traffic in the same connection.
+    # "outside": neither.
+    role: str = "outside"
+    # A measured reason this region cannot be seen, stated beside its silence.
+    known_gap: str | None = None
+
+
+def _region(key: str, name: str, bbox, role: str, known_gap: str | None = None) -> RegionSpec:
+    feed = REGISTRY["vessels"]
+    return RegionSpec(
+        id=f"vessels:{key}", cadence_s=feed.cadence_s,
+        # The feed's own bounds. Measured 2026-09-26 over 30 min: the slowest
+        # region that delivered anything was silent for 21.4 s at most (Black
+        # Sea), a 5.6x margin under 120 s. Re-set per region from a week of
+        # per-region heartbeat rows.
+        stale_after_s=feed.stale_after_s, max_stale_s=feed.max_stale_s, requires_env=(),
+        silence_means="no vessels here is state 2 unless the region is live",
+        feed="vessels", key=key, name=name, bbox=bbox, role=role, known_gap=known_gap,
+    )
+
+
+# Every sea the subscription reaches, first match wins. Known gaps are
+# MEASURED (FINDINGS.md, Measured facts, "AIS by region"): zero positions in
+# 30 min while the western Mediterranean delivered 466 a minute on the same socket.
+REGIONS: dict[str, RegionSpec] = {s.id: s for s in (
+    _region("gulf", "Persian Gulf & Hormuz", (23.5, 30.5, 47.5, 57.0), "ao",
+            known_gap="no free-tier receivers (C30; re-measured 2026-09-26)"),
+    _region("oman_arabia", "Gulf of Oman & Arabian Sea", (10.0, 26.0, 51.0, 65.0), "ao",
+            known_gap="no free-tier receivers (measured 2026-09-26)"),
+    _region("red_sea", "Red Sea & Gulf of Aden", (10.0, 30.0, 32.0, 51.0), "ao",
+            known_gap="thin coverage: 1 position in 30 min, off Djibouti (2026-09-26)"),
+    _region("levant", "Levant", (30.0, 37.0, 32.0, 37.0), "ao"),
+    _region("e_med", "Aegean & E. Mediterranean", (30.0, 41.0, 25.0, 32.0), "outside"),
+    _region("black_sea", "Black Sea", (40.5, 45.0, 27.0, 42.0), "outside"),
+    _region("caspian", "Caspian Sea", (36.0, 45.0, 46.0, 55.0), "outside",
+            known_gap="no free-tier receivers (measured 2026-09-26)"),
+    _region("wc_med", "W. & C. Mediterranean", (25.0, 45.0, -5.0, 25.0), "control"),
+)}
+
+
+def region_of(feed_id: str, lat: float, lon: float) -> str | None:
+    """The key of the first region of `feed_id` whose box holds the point, or None."""
+    for spec in REGIONS.values():
+        a, b, c, d = spec.bbox
+        if spec.feed == feed_id and a <= lat <= b and c <= lon <= d:
+            return spec.key
+    return None
+
+
+class RegionTracker(FeedTracker):
+    """One region of a feed. Never better than its feed: if the feed is
+    retrying, every region reads retrying, whatever its own clocks say."""
+
+    def feed(self) -> FeedTracker:
+        return TRACKERS[self.spec.feed]
+
+    def arm(self, now: float) -> None:
+        """The subscription covering this region is open: silence counts from here."""
+        if self.first_attempt_at is None:
+            self.first_attempt_at = now
+
+    def saw(self, now: float, observed_at: float | None) -> None:
+        """One accepted position inside this region. The upstream clock is the
+        newest message's own time; a message without one leaves the last
+        upstream time in place and never lends it the receipt time."""
+        self._attempt(now)
+        self.window_successes += 1
+        self.last_success_at = now
+        if observed_at is not None:
+            self.source_epoch = observed_at
+        self.error_kind = ErrorKind.OK
+
+    def state(self, now: float) -> FeedState:
+        parent = self.feed().state(now)
+        if parent is FeedState.UNCONFIGURED:
+            return parent
+        return worst([parent, super().state(now)])
+
+    def reason(self, now: float) -> str | None:
+        st = self.state(now)
+        if st is FeedState.LIVE:
+            return None
+        parent = self.feed()
+        if st is parent.state(now):
+            why = f"feed {st.value}: {parent.reason(now)}"
+        elif st is FeedState.STALE:
+            why = super().reason(now)
+        elif self.last_success_at is None:
+            armed = "" if self.first_attempt_at is None else f" in {now - self.first_attempt_at:.0f} s"
+            why = f"no position here since the subscription opened{armed}"
+        else:
+            why = f"no position here for {now - self.last_success_at:.0f} s"
+        return f"{why} · known gap: {self.spec.known_gap}" if self.spec.known_gap else why
+
+    def region_snapshot(self, now: float, count: int) -> dict:
+        st = self.state(now)
+        age = None if self.last_success_at is None else max(0.0, now - self.last_success_at)
+        return {
+            "id": self.spec.id,
+            "key": self.spec.key,
+            "name": self.spec.name,
+            "bbox": list(self.spec.bbox),
+            "role": self.spec.role,
+            "state": st.value,
+            "reason": self.reason(now),
+            "last_success_at": self.last_success_at,
+            "source_epoch": self.source_epoch,
+            "age_s": None if age is None else round(age, 1),
+            "freshness": self.freshness(now),
+            # Same rule as the envelope: no number the monitor cannot vouch for.
+            "count": count if st in (FeedState.LIVE, FeedState.STALE) else None,
+            "known_gap": self.spec.known_gap,
+        }
+
+
+REGION_TRACKERS: dict[str, RegionTracker] = {rid: RegionTracker(spec) for rid, spec in REGIONS.items()}
+
+
+def regions(feed_id: str) -> list[RegionTracker]:
+    """The region trackers of `feed_id`, in registry order."""
+    return [t for t in REGION_TRACKERS.values() if t.spec.feed == feed_id]
+
+
+def all_trackers() -> dict[str, FeedTracker]:
+    """Every feed, plus the regions of feeds that are registered: what the
+    flusher writes and what /health/history can be asked about."""
+    out: dict[str, FeedTracker] = dict(TRACKERS)
+    out.update({rid: t for rid, t in REGION_TRACKERS.items() if t.spec.feed in TRACKERS})
+    return out
+
+
 def envelope(feed_id: str, items: list, now: float) -> dict:
     """The one response shape for a tracking route (FINDINGS.md decision 4).
 
@@ -341,7 +490,7 @@ def envelope(feed_id: str, items: list, now: float) -> dict:
     snap = t.snapshot(now)
     state = FeedState(snap["state"])
     count = len(items) if state in (FeedState.LIVE, FeedState.STALE) else None
-    return {
+    out = {
         "schema_version": 1,
         "feed": feed_id,
         "state": snap["state"],
@@ -358,11 +507,28 @@ def envelope(feed_id: str, items: list, now: float) -> dict:
         "verdict": "present" if count else "unproven",
         "items": items,
     }
+    regs = regions(feed_id)
+    if regs:
+        # Counted from the rows actually served, by the region each row was
+        # assigned when its position was accepted.
+        out["regions"] = [
+            r.region_snapshot(now, sum(1 for i in items if i.get("region") == r.spec.key))
+            for r in regs
+        ]
+    return out
 
 
 def health(now: float, process_started_at: float) -> dict:
-    """GET /health. Always answered from memory, so it works with the database down."""
+    """GET /health. Always answered from memory, so it works with the database down.
+    Regions are listed under their feed and stay out of `worst`: a dark region
+    is a coverage fact, not a failing collector."""
     feeds = {fid: t.snapshot(now) for fid, t in TRACKERS.items()}
+    for fid, snap in feeds.items():
+        regs = regions(fid)
+        if regs:
+            snap["regions"] = [
+                {k: v for k, v in r.region_snapshot(now, 0).items() if k != "count"} for r in regs
+            ]
     configured = [FeedState(f["state"]) for f in feeds.values() if f["configured"]]
     w = worst(configured)
     return {

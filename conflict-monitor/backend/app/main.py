@@ -491,7 +491,7 @@ async def health_history(feed: str, hours: float = 24):
     from app.feed_store import liveness_timeline
     from app.models import FeedTransition
 
-    if feed not in feeds.TRACKERS:
+    if feed not in feeds.all_trackers():
         raise HTTPException(status_code=404, detail=f"unknown feed {feed!r}")
     hours = min(max(hours, 0.1), 24 * 30)
     until = time.time()
