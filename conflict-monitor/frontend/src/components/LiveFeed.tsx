@@ -29,6 +29,7 @@ import {
   geoPrecision,
 } from "../lib/tokens";
 import type { ConflictEvent } from "../types/event";
+import { type ArrivalLog, freshIds } from "../lib/events";
 
 function timeAgo(ts: string): string {
   const seconds = (Date.now() - new Date(ts).getTime()) / 1000;
@@ -77,32 +78,30 @@ function playBlip() {
 
 interface LiveFeedProps {
   events: ConflictEvent[];
+  /** When each event arrived over the live stream; only these read NEW (C50). */
+  arrivals: ArrivalLog;
 }
 
-export function LiveFeed({ events }: LiveFeedProps) {
+export function LiveFeed({ events, arrivals }: LiveFeedProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [newIds, setNewIds] = useState<Set<number>>(new Set());
-  const prevCountRef = useRef(0);
   const [soundEnabled, setSoundEnabled] = useState(false);
+  const lastBlipRef = useRef(0);
 
-  // Track newly arrived events for the "NEW" flash
+  // NEW marks what ARRIVED in the last 3 s (C50). Growth in length stood in for
+  // it: silent for good once the store hit its cap, and a scrub that widened the
+  // window flashed old events - with a sound.
   useEffect(() => {
-    if (events.length > prevCountRef.current && prevCountRef.current > 0) {
-      const incoming = new Set(
-        events.slice(0, events.length - prevCountRef.current).map((e) => e.id),
-      );
-      setNewIds(incoming);
-      if (soundEnabled) playBlip();
-      const timer = setTimeout(() => setNewIds(new Set()), 3000);
-      return () => clearTimeout(timer);
-    }
-    prevCountRef.current = events.length;
-  }, [events, soundEnabled]);
-
-  useEffect(() => {
-    prevCountRef.current = events.length;
-  }, [events.length]);
+    const fresh = freshIds(arrivals, events.map((e) => e.id), Date.now(), 3000);
+    setNewIds(fresh);
+    if (fresh.size === 0) return;
+    const newest = Math.max(...[...fresh].map((id) => arrivals.get(id) ?? 0));
+    if (soundEnabled && newest > lastBlipRef.current) playBlip();
+    lastBlipRef.current = Math.max(lastBlipRef.current, newest);
+    const timer = setTimeout(() => setNewIds(new Set()), 3000);
+    return () => clearTimeout(timer);
+  }, [arrivals, events, soundEnabled]);
 
   // Auto-scroll to top on new events
   useEffect(() => {

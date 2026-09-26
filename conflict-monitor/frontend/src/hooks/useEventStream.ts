@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConflictEvent, EventWSMessage } from "../types/event";
+import { type ArrivalLog, logArrival, mergeEvent } from "../lib/events";
 
 const MAX_EVENTS = 200;
 const RECONNECT_DELAY = 3000;
@@ -15,10 +16,19 @@ const WS_URL = API_BASE.replace(/^http/, "ws") + "/ws/events";
 // rendered most of that axis as empty space -- "nothing happened" standing in
 // for "this client asked for 50". The route accepts up to 500
 // (routes/events.py:31); 200 is MAX_EVENTS, so the two now agree.
-const REST_URL = `${API_BASE}/events?limit=${MAX_EVENTS}`;
+//
+// One more than it holds: if the 201st comes back, the store is truncated and
+// every count drawn from it is a floor (lib/events.ts, countIsFloor).
+const REST_URL = `${API_BASE}/events?limit=${MAX_EVENTS + 1}`;
 
 export function useEventStream() {
-  const [events, setEvents] = useState<ConflictEvent[]>([]);
+  const [store, setStore] = useState<{ events: ConflictEvent[]; truncated: boolean }>({
+    events: [],
+    truncated: false,
+  });
+  // When each event arrived over the live stream (C50). Backfill never arrives.
+  const [arrivals, setArrivals] = useState<ArrivalLog>(new Map());
+  const knownIds = useRef<Set<number>>(new Set());
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -48,11 +58,15 @@ export function useEventStream() {
         if (msg.type === "ping") return; // ignore server pings
         if (msg.type === "new_event") {
           const event = msg.event as ConflictEvent;
-          setEvents((prev) =>
-            [event, ...prev]
-              .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-              .slice(0, MAX_EVENTS),
-          );
+          // A merge is re-broadcast under its existing id: replace it, and do
+          // not flash it as an arrival.
+          const known = knownIds.current.has(event.id);
+          knownIds.current.add(event.id);
+          setStore((s) => {
+            const m = mergeEvent(s.events, event, MAX_EVENTS);
+            return { events: m.events, truncated: s.truncated || m.evicted };
+          });
+          if (!known) setArrivals((log) => logArrival(log, event.id, Date.now()));
         }
       } catch {
         console.warn("WS: malformed message", e.data);
@@ -72,7 +86,10 @@ export function useEventStream() {
   useEffect(() => {
     fetch(REST_URL)
       .then((r) => r.json())
-      .then((data: ConflictEvent[]) => setEvents(data))
+      .then((data: ConflictEvent[]) => {
+        for (const e of data) knownIds.current.add(e.id);
+        setStore({ events: data.slice(0, MAX_EVENTS), truncated: data.length > MAX_EVENTS });
+      })
       .catch(() => {});
   }, []);
 
@@ -84,7 +101,8 @@ export function useEventStream() {
     };
   }, [connect]);
 
+  const { events, truncated } = store;
   const latestEvent = events[0] ?? null;
 
-  return { events, isConnected, latestEvent };
+  return { events, truncated, arrivals, isConnected, latestEvent };
 }

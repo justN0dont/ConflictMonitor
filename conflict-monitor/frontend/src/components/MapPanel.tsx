@@ -6,6 +6,7 @@ import type { Aircraft, JammingStatus, JammingZone, TLERecord, TrackHistory, Ves
 import { GlobeView } from "./GlobeView";
 import { CesiumView } from "./CesiumView";
 import { isLocated } from "../lib/located";
+import { type ArrivalLog, freshIds } from "../lib/events";
 import { EVENT_TYPES, eventVisual, formatUncertainty, geoPrecision } from "../lib/tokens";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
@@ -40,6 +41,8 @@ interface MapPanelProps {
   /** The vessel feed's state; a missing AIS key is not an empty sea. */
   vesselsFeedState: FeedState;
   tleFeedState: FeedState;
+  /** When each event arrived over the live stream; only these ping (C50). */
+  arrivals: ArrivalLog;
 }
 
 /** A legend count: the number drawn, or "—" plus the state when the feed cannot vouch for it. */
@@ -184,12 +187,11 @@ function PingMarker({
   );
 }
 
-export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState, tleFeedState }: MapPanelProps) {
+export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState, tleFeedState, arrivals }: MapPanelProps) {
   const [selected, setSelected] = useState<ConflictEvent | null>(null);
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
   const [newEventIds, setNewEventIds] = useState<Set<number>>(new Set());
-  const prevIdsRef = useRef<Set<number>>(new Set());
   // 2D is Mapbox-only: with no token mapbox-gl throws and react-map-gl swallows
   // it, leaving a black panel. The globe needs no key, so keyless installs open
   // on it instead.
@@ -214,21 +216,16 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
     [aircraft],
   );
 
-  // Track which events are new for ping animation
+  // Ping the events that ARRIVED over the stream in the last 2 s (C50) - never
+  // ones a scrub brought into the window, and never the REST backfill, which
+  // pinged the whole map on first load when this diffed ids against an empty set.
   useEffect(() => {
-    const currentIds = new Set(geoEvents.map((e) => e.id));
-    const fresh = new Set<number>();
-    for (const id of currentIds) {
-      if (!prevIdsRef.current.has(id)) fresh.add(id);
-    }
-    if (fresh.size > 0) {
-      setNewEventIds(fresh);
-      const timer = setTimeout(() => setNewEventIds(new Set()), 2000);
-      prevIdsRef.current = currentIds;
-      return () => clearTimeout(timer);
-    }
-    prevIdsRef.current = currentIds;
-  }, [geoEvents]);
+    const fresh = freshIds(arrivals, geoEvents.map((e) => e.id), Date.now(), 2000);
+    setNewEventIds(fresh);
+    if (fresh.size === 0) return;
+    const timer = setTimeout(() => setNewEventIds(new Set()), 2000);
+    return () => clearTimeout(timer);
+  }, [arrivals, geoEvents]);
 
   const handleMarkerClick = useCallback((e: ConflictEvent) => {
     setSelected(e);

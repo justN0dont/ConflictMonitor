@@ -31,6 +31,8 @@ interface HeaderProps {
   jammingStatus: JammingStatus;
   isConnected: boolean;
   demoMode: boolean;
+  /** The event store is capped and this window reaches past it: EVT is a lower bound. */
+  eventCountIsFloor: boolean;
 }
 
 function formatUTCTime(): string {
@@ -59,14 +61,18 @@ function Count({
   unit,
   note,
   dim = false,
+  floor = false,
 }: {
   Icon: typeof Plane;
   value: number | null;
   unit: string;
   note?: string;
   dim?: boolean;
+  /** The value is a lower bound, printed "200+". */
+  floor?: boolean;
 }) {
-  const label = value == null ? `${unit} — ${note ?? "no reading"}` : `${value} ${unit}${note ? ` · ${note}` : ""}`;
+  const shown = value == null ? null : `${value}${floor ? "+" : ""}`;
+  const label = shown == null ? `${unit} — ${note ?? "no reading"}` : `${shown} ${unit}${note ? ` · ${note}` : ""}`;
   return (
     <span className="flex items-baseline gap-1.5" title={label} aria-label={label} style={dim ? { opacity: 0.55 } : undefined}>
       <Icon
@@ -76,7 +82,7 @@ function Count({
         aria-hidden="true"
       />
       <span className="text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">
-        {value ?? "—"}
+        {shown ?? "—"}
       </span>
       <span className="text-[9px] tracking-[0.12em] text-[var(--text-muted)]">{unit}</span>
     </span>
@@ -160,6 +166,7 @@ export function Header({
   jammingStatus,
   isConnected,
   demoMode,
+  eventCountIsFloor,
 }: HeaderProps) {
   const [utcTime, setUtcTime] = useState(formatUTCTime);
   const now = useNow(1000);
@@ -233,7 +240,13 @@ export function Header({
       {/* Counts, feed ages, stream state */}
       <div className="flex shrink-0 items-center gap-4">
         <div className="flex items-baseline gap-3.5">
-          <Count Icon={Radio} value={events.length} unit="EVT" />
+          <Count
+            Icon={Radio}
+            value={events.length}
+            unit="EVT"
+            floor={eventCountIsFloor}
+            note={eventCountIsFloor ? `only the newest ${allEvents.length} are held; older events not loaded` : undefined}
+          />
           <Count
             Icon={Plane}
             value={acCount}

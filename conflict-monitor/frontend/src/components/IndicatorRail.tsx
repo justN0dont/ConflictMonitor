@@ -48,6 +48,8 @@ interface IndicatorRailProps {
   jammingZones: JammingZone[];
   isConnected: boolean;
   demoMode: boolean;
+  /** The event store is capped and the window reaches past it (lib/events.ts). */
+  eventCountIsFloor: boolean;
 }
 
 /** A feed as FEED CURRENCY sees it, when the server reports its state. */
@@ -299,12 +301,17 @@ function eventVolumeRow(
   events: ConflictEvent[],
   isConnected: boolean,
   ages: FeedAges,
+  countIsFloor: boolean,
 ): Row {
   let state: RailState;
   let note: string;
   if (!isConnected) {
     state = "DEGRADED";
     note = "stream disconnected — count is a floor, not a total";
+  } else if (countIsFloor) {
+    // A full store read as WATCH at exactly its cap: 200 looked like a volume.
+    state = "DEGRADED";
+    note = "only the newest events are held — count is a floor, not a total";
   } else if (events.length === 0) {
     state = "NOT-OBSERVED";
     note = "no events in the active window";
@@ -315,7 +322,8 @@ function eventVolumeRow(
     state = "WATCH";
     note = "in active window · volume is not escalation";
   }
-  return { name: "EVENT VOLUME", value: String(events.length), state, note, age: ages.stream };
+  const value = `${events.length}${countIsFloor ? "+" : ""}`;
+  return { name: "EVENT VOLUME", value, state, note, age: ages.stream };
 }
 
 export function IndicatorRail({
@@ -334,6 +342,7 @@ export function IndicatorRail({
   jammingZones,
   isConnected,
   demoMode,
+  eventCountIsFloor,
 }: IndicatorRailProps) {
   const now = useNow(1000);
   const adsbAge = feedAge(aircraftFeed, aircraftReceivedAt, now);
@@ -368,7 +377,7 @@ export function IndicatorRail({
     gpsRow(jammingStatus, jammingZones, ages),
     vesselRow(vesselsFeed, aisAge),
     satelliteRow(tleFeed, tleAge),
-    eventVolumeRow(events, isConnected, ages),
+    eventVolumeRow(events, isConnected, ages, eventCountIsFloor),
   ];
 
   return (

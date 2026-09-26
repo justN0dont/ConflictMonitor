@@ -26,9 +26,11 @@ interface TimelineScrubberProps {
   activeRange: { start: Date; end: Date } | null;
   /** Called when the user changes the time range */
   onRangeChange: (range: { start: Date; end: Date } | null) => void;
+  /** The client holds only the newest events, so LIVE is not "all" of them. */
+  truncated: boolean;
 }
 
-export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeChange }: TimelineScrubberProps) {
+export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeChange, truncated }: TimelineScrubberProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState<"left" | "right" | "window" | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -378,7 +380,7 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
       <div style={{ flexShrink: 0, width: 160, textAlign: "right" }}>
         {isLive ? (
           <div style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 11, color: "var(--accent-green, #3fb950)", fontWeight: 600, letterSpacing: 1 }}>
-            LIVE — ALL EVENTS
+            {truncated ? `LIVE · NEWEST ${allEvents.length}` : "LIVE — ALL EVENTS"}
           </div>
         ) : (
           <>

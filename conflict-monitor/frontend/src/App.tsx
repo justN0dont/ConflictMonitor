@@ -6,12 +6,13 @@ import { LiveFeed } from "./components/LiveFeed";
 import { MapPanel } from "./components/MapPanel";
 import { TimelineScrubber } from "./components/TimelineScrubber";
 import { useEventStream } from "./hooks/useEventStream";
+import { countIsFloor } from "./lib/events";
 import { useTracking } from "./hooks/useTracking";
 
 const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
 
 export default function App() {
-  const { events, isConnected } = useEventStream();
+  const { events, truncated, arrivals, isConnected } = useEventStream();
   const { aircraft, aircraftFeed, aircraftReceivedAt, vesselsFeed, vesselsReceivedAt, tleFeed, tleReceivedAt, tleData, jammingZones, jammingStatus, vessels, aircraftTracks, vesselTracks, connectivity, connectivityStatus } = useTracking();
   const [demoMode, setDemoMode] = useState(false);
   const [timeRange, setTimeRange] = useState<{ earliest: Date; latest: Date } | null>(null);
@@ -56,6 +57,12 @@ export default function App() {
     });
   }, [events, activeRange]);
 
+  // The store holds the newest 200; a count over a range reaching past them is a floor.
+  const eventCountIsFloor = useMemo(
+    () => countIsFloor(truncated, events, activeRange),
+    [truncated, events, activeRange],
+  );
+
   const onRangeChange = useCallback((range: { start: Date; end: Date } | null) => {
     setActiveRange(range);
   }, []);
@@ -76,10 +83,11 @@ export default function App() {
         jammingStatus={jammingStatus}
         isConnected={isConnected}
         demoMode={demoMode}
+        eventCountIsFloor={eventCountIsFloor}
       />
-      <MapPanel events={filteredEvents} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} aircraftFeedState={aircraftFeed.state} vesselsFeedState={vesselsFeed.state} tleFeedState={tleFeed.state} />
+      <MapPanel events={filteredEvents} arrivals={arrivals} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} aircraftFeedState={aircraftFeed.state} vesselsFeedState={vesselsFeed.state} tleFeedState={tleFeed.state} />
       <div className="sidebar">
-        <div className="sidebar-feed"><LiveFeed events={filteredEvents} /></div>
+        <div className="sidebar-feed"><LiveFeed events={filteredEvents} arrivals={arrivals} /></div>
         <div className="sidebar-connectivity">
           <ConnectivityRail countries={connectivity} status={connectivityStatus} />
         </div>
@@ -100,6 +108,7 @@ export default function App() {
             jammingZones={jammingZones}
             isConnected={isConnected}
             demoMode={demoMode}
+            eventCountIsFloor={eventCountIsFloor}
           />
         </div>
       </div>
@@ -108,6 +117,7 @@ export default function App() {
         timeRange={timeRange}
         activeRange={activeRange}
         onRangeChange={onRangeChange}
+        truncated={truncated}
       />
     </div>
   );
