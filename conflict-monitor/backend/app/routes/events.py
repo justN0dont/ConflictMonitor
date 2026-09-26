@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import async_session as make_session, get_session
+from app.security import require_admin_token
 from app.models import Event, EventReport
 from app.schemas import EventRead
 from app.services.classifier import classify_message, evidence_span
@@ -19,6 +20,11 @@ from app.services.geocoder import geocode
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/events", tags=["events"])
+# Every /events/admin/* route is declared on this router and nowhere else, so
+# none can be added without the token check (C62). A test walks the app's
+# routes and fails on any admin path or non-GET route that escapes it.
+admin_router = APIRouter(prefix="/events/admin", tags=["admin"],
+                         dependencies=[Depends(require_admin_token)])
 
 # The unknown-coordinate sentinel constants are gone. "Unlocated" is now a
 # single fact in one place: geometry IS NULL. Float-equality against the old
@@ -173,7 +179,7 @@ async def _fix_null_coords_task():
     logger.info("fix-null-coords complete: fixed %d / %d events", fixed, len(events))
 
 
-@router.post("/admin/fix-null-coords")
+@admin_router.post("/fix-null-coords")
 async def fix_null_coords(background_tasks: BackgroundTasks):
     """Re-geocode all events with null or unknown coordinates (runs in background)."""
     background_tasks.add_task(_fix_null_coords_task)
@@ -183,7 +189,7 @@ async def fix_null_coords(background_tasks: BackgroundTasks):
     }
 
 
-@router.post("/admin/reclassify-locations")
+@admin_router.post("/reclassify-locations")
 async def reclassify_locations(background_tasks: BackgroundTasks):
     """Re-run classifier on all events whose location_name is a country or vague term.
     Extracts sub-city precision (facility/district level) using the improved prompt.
@@ -274,7 +280,7 @@ async def _reclassify_vague_locations_task():
     logger.info("reclassify-locations complete: improved %d / %d events", improved, len(to_fix))
 
 
-@router.post("/admin/backfill")
+@admin_router.post("/backfill")
 async def trigger_backfill(background_tasks: BackgroundTasks):
     """Trigger a full historical backfill from conflict start (2026-02-28) for all
     monitored Telegram channels. Runs in background — check logs for progress.
@@ -292,7 +298,7 @@ async def trigger_backfill(background_tasks: BackgroundTasks):
     }
 
 
-@router.delete("/admin/purge-old")
+@admin_router.delete("/purge-old")
 async def purge_old_events(
     before: datetime | None = Query(None, description="ISO datetime cutoff — defaults to 2026-02-28"),
     session: AsyncSession = Depends(get_session),
@@ -312,7 +318,7 @@ async def purge_old_events(
     }
 
 
-@router.delete("/admin/dedup")
+@admin_router.delete("/dedup")
 async def dedup_events(session: AsyncSession = Depends(get_session)):
     """Remove exact duplicate events — keeps the lowest ID per (source, raw_text) pair.
     Duplicates occur when the same Telegram/RSS message is ingested twice."""
@@ -333,7 +339,7 @@ async def dedup_events(session: AsyncSession = Depends(get_session)):
     }
 
 
-@router.get("/admin/geo-stats")
+@admin_router.get("/geo-stats")
 async def geo_stats(session: AsyncSession = Depends(get_session)):
     """Show counts of geolocated vs unknown-location events.
 
@@ -643,7 +649,7 @@ async def _import_osint_waves_task():
     )
 
 
-@router.post("/admin/import-osint-dataset")
+@admin_router.post("/import-osint-dataset")
 async def import_osint_dataset(background_tasks: BackgroundTasks):
     """
     One-time import of the danielrosehill confirmed OSINT wave dataset

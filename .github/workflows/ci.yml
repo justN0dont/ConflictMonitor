@@ -1,0 +1,82 @@
+name: CI
+
+# The backend suite and the frontend build, on every push and pull request.
+# Closes the "no CI" half of C66 (docs/FINDINGS.md): until this file existed
+# the suite ran only when someone typed the command.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests (PostGIS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # Same image as docker-compose.yml. The role must be a superuser: the
+      # conftest drops and recreates conflict_monitor_test and runs
+      # CREATE EXTENSION postgis, connecting via the `postgres` database.
+      db:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: conflict_monitor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: conflict-monitor/backend
+    env:
+      # The conftest rewrites the database name to conflict_monitor_test, so
+      # this names the maintenance target, never a database the tests write to.
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/conflict_monitor
+      # The GPU guard from the README's test command. The network ban in
+      # tests/conftest.py applies regardless.
+      LLM_BACKEND: none
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # matches backend/Dockerfile
+          cache: pip
+          cache-dependency-path: conflict-monitor/backend/requirements.txt
+      - run: pip install -r requirements.txt
+      # No skips exist in this suite by design (pytest.ini): a missing database
+      # or a blocked network call fails with a stack trace instead of passing.
+      - run: pytest -q
+
+  frontend:
+    name: Frontend type-check and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: conflict-monitor/frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"  # matches frontend/Dockerfile
+          cache: npm
+          cache-dependency-path: conflict-monitor/frontend/package-lock.json
+      - run: npm ci
+      # `build` is `tsc -b && vite build`: the type-check fails the job.
+      - run: npm run build

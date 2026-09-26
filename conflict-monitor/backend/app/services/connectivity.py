@@ -98,7 +98,9 @@ from statistics import median
 
 import httpx
 
+from app import feeds
 from app.config import settings
+from app.feeds import ErrorKind
 
 logger = logging.getLogger(__name__)
 
@@ -979,11 +981,37 @@ def _corroboration(code: str) -> dict:
     }
 
 
-async def start_connectivity_poller():
+def newest_measurement(countries: list[dict], until: int) -> float | None:
+    """The time of the newest real IODA measurement across every country and
+    short sensor, or None. `data_age` is the lag between a sensor's last real
+    point and `until`; a sensor with no data has none and does not count."""
+    ages = [
+        s["data_age"]
+        for c in countries
+        for s in (c.get("sensors") or {}).values()
+        if s.get("data_age") is not None
+    ]
+    return float(until - min(ages)) if ages else None
+
+
+def report_cycle(now: float, countries: list[dict], answers: int, until: int) -> None:
+    """One IODA cycle to the "connectivity" tracker. Cloudflare Radar is not in
+    it: Radar is optional corroboration with its own status vocabulary."""
+    tracker = feeds.tracker("connectivity")
+    requests = len(WATCHED) * len(DATASOURCES)
+    if answers:
+        tracker.succeeded(now, count=len(countries), source="ioda",
+                          source_epoch=newest_measurement(countries, until))
+    else:
+        tracker.failed(now, ErrorKind.FETCH_ERROR, f"IODA answered 0 of {requests} requests")
+
+
+async def start_connectivity_poller(sleep=asyncio.sleep, clock=time.time):
     """Background task that polls IODA every POLL_INTERVAL seconds.
 
     The 7-day baseline and Cloudflare Radar run on their own slower clocks
-    inside the same loop and are served from cache in between.
+    inside the same loop and are served from cache in between. Every cycle is
+    reported to the "connectivity" feed_health tracker.
     """
     logger.info(
         "Connectivity: polling IODA for %d countries x %d sensors every %ds "
@@ -1002,7 +1030,7 @@ async def start_connectivity_poller():
         last_radar = 0.0
         while True:
             try:
-                now = time.time()
+                now = clock()
 
                 if now - last_long >= LONG_POLL_INTERVAL:
                     # Stamped whether or not it succeeded: a failed 7-day refresh
@@ -1028,7 +1056,7 @@ async def start_connectivity_poller():
                             attacks_status="stale" if _radar_cache["attacks_as_of"] else "error",
                         )
 
-                until = int(time.time())
+                until = int(clock())
                 frm = until - WINDOW_SECONDS
                 countries = []
                 answers = 0
@@ -1055,6 +1083,7 @@ async def start_connectivity_poller():
                 _cache["timestamp"] = int(time.time())
                 # Not one answer out of 40 requests means IODA itself is gone.
                 _cache["status"] = "ok" if answers else "unavailable"
+                report_cycle(clock(), countries, answers, until)
 
                 states = [c["state"] for c in countries]
                 logger.info(
@@ -1069,8 +1098,10 @@ async def start_connectivity_poller():
                 )
             except Exception as e:
                 logger.error("Connectivity poll error: %s", e)
+                feeds.tracker("connectivity").failed(
+                    clock(), ErrorKind.FETCH_ERROR, f"cycle failed: {type(e).__name__}: {e}")
 
-            await asyncio.sleep(POLL_INTERVAL)
+            await sleep(POLL_INTERVAL)
 
 
 def get_connectivity() -> dict:

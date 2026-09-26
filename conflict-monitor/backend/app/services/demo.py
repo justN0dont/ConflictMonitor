@@ -97,14 +97,18 @@ LOCATIONS = [
 # =========================================================================
 # SUMMARY TEMPLATES
 # =========================================================================
+# No template puts words in a real actor's mouth. Confirmations, statements,
+# threats, requests and offers are reported in the passive, because every
+# one of these rows is invented and a screenshot of it travels without this
+# file (C69).
 
 MILITARY_SUMMARIES = [
     "IRGC launches ballistic missiles toward {loc}",
-    "IDF confirms airstrikes on weapons depot near {loc}",
+    "Airstrikes reported on weapons depot near {loc}",
     "Houthi anti-ship missile fired toward commercial vessel near {loc}",
     "Explosion reported at military installation near {loc}",
     "SAM battery activation detected near {loc}",
-    "CENTCOM confirms strike on Iran-backed militia position near {loc}",
+    "Strike reported on militia position near {loc}",
     "Drone swarm detected approaching {loc}",
     "Artillery exchanges reported along border near {loc}",
     "Naval assets repositioning near {loc}",
@@ -133,15 +137,15 @@ MILITARY_SUMMARIES = [
 
 DIPLOMATIC_SUMMARIES = [
     "Emergency UNSC session called regarding {loc} escalation",
-    "Iran foreign minister issues statement on {loc} situation",
-    "{country} recalls ambassador following {loc} incident",
+    "Foreign ministry statement issued on {loc} situation",
+    "Ambassador recalled following {loc} incident",
     "Ceasefire negotiations underway for {loc} region",
     "UN envoy arrives in {loc} for emergency mediation talks",
-    "Joint statement from Gulf states condemning strikes on {loc}",
+    "Joint regional statement condemns strikes on {loc}",
     "G7 emergency call scheduled regarding {loc} crisis",
-    "Red Cross requests humanitarian corridor access to {loc}",
-    "Russia calls for restraint following {loc} strikes",
-    "China offers to mediate {loc} conflict",
+    "Humanitarian corridor access requested for {loc}",
+    "Calls for restraint follow {loc} strikes",
+    "Third-party mediation offered for {loc} conflict",
 ]
 
 ECONOMIC_SUMMARIES = [
@@ -150,7 +154,7 @@ ECONOMIC_SUMMARIES = [
     "Commercial vessels rerouting away from {loc}",
     "Port operations suspended at {loc}",
     "Energy markets react to {loc} escalation",
-    "Iran threatens to close {loc} to commercial traffic",
+    "Threat to close {loc} to commercial traffic reported",
     "LNG shipments delayed due to {loc} security concerns",
     "Brent crude hits $120/barrel on {loc} fears",
     "Major shipping line suspends {loc} routes indefinitely",
@@ -168,11 +172,15 @@ CYBER_SUMMARIES = [
     "Critical infrastructure alert issued for {loc}",
 ]
 
-CHANNELS = [
-    "Aurora Intel", "OSINTdefender", "MidEast Spectator",
-    "Sentdefender", "Intel Slava Z", "Israel Radar", "CIG",
-    "MilitaryOSINT", "IranIntl", "QudsAlert", "WarMonitor",
-]
+# Fictional on purpose (C69). These rows are invented, so no real outlet's
+# name may sit beside them: nine of the eleven names this list used to hold
+# match channels in app/seed_channels.py, the monitor's own channel registry.
+# tests/unit/test_demo.py fails if any name here matches that registry.
+CHANNELS = [f"DEMO-CH-{i:02d}" for i in range(1, 12)]
+
+# Every demo summary and raw_text starts with this, so each row says what it
+# is on every surface that shows it, including one row cut out of a screenshot.
+SYNTHETIC_MARKER = "SYNTHETIC · "
 
 # =========================================================================
 # AIRCRAFT DEFINITIONS
@@ -288,7 +296,9 @@ def _gen_event(ts: datetime.datetime | None = None) -> dict:
 
     loc = _pick(LOCATIONS)
     template = _pick(templates)
-    summary = template.replace("{loc}", loc["name"]).replace("{country}", loc.get("country") or "the region")
+    summary = SYNTHETIC_MARKER + template.replace("{loc}", loc["name"]).replace(
+        "{country}", loc.get("country") or "the region"
+    )
 
     return {
         "source": "demo",
@@ -545,9 +555,11 @@ def _init_demo_aircraft():
 
 async def start_demo_aircraft_poller():
     """Background task that updates synthetic aircraft positions."""
+    from app import feeds
     from app.services.opensky import _cache as opensky_cache
 
     _init_demo_aircraft()
+    tracker = feeds.tracker("aircraft")
 
     while True:
         for ac in _demo_aircraft:
@@ -562,6 +574,11 @@ async def start_demo_aircraft_poller():
         opensky_cache["jamming_status"] = "ok" if zones else "insufficient_coverage"
         opensky_cache["cells_evaluated"] = len(zones)
         opensky_cache["aircraft_evaluable"] = len(states)
+        # Synthetic, and said so in a field: the fleet is fabricated, so its
+        # "upstream clock" is ours by construction.
+        now = time.time()
+        tracker.succeeded(now, count=len(states), source="demo", source_epoch=now,
+                          synthetic=True)
 
         logger.debug("Demo aircraft: %d tracked", len(states))
         await asyncio.sleep(15)
@@ -689,9 +706,11 @@ def _init_demo_vessels():
 
 async def start_demo_vessel_poller():
     """Background task that updates synthetic vessel positions."""
+    from app import feeds
     from app.services.maritime import _cache as maritime_cache
 
     _init_demo_vessels()
+    tracker = feeds.tracker("vessels")
 
     while True:
         for v in _demo_vessels:
@@ -704,6 +723,9 @@ async def start_demo_vessel_poller():
 
         maritime_cache["vessels"] = vessel_dict
         maritime_cache["last_update"] = time.time()
+        now = time.time()
+        tracker.succeeded(now, count=len(vessel_dict), source="demo", source_epoch=now,
+                          synthetic=True)
 
         logger.debug("Demo vessels: %d tracked", len(vessel_dict))
         await asyncio.sleep(10)

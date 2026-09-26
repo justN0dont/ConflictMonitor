@@ -1,9 +1,9 @@
 from fastapi import APIRouter
 
 from app.services.connectivity import get_connectivity
-from app.services.maritime import get_vessels
-from app.services.opensky import get_aircraft, get_jamming_zones
-from app.services.satellites import get_tles
+from app.services.maritime import get_vessels_envelope
+from app.services.opensky import get_aircraft_envelope, get_jamming_zones
+from app.services.satellites import get_tles_envelope
 from app.services.track_history import get_aircraft_tracks, get_vessel_tracks
 
 router = APIRouter(prefix="/tracking", tags=["tracking"])
@@ -11,14 +11,25 @@ router = APIRouter(prefix="/tracking", tags=["tracking"])
 
 @router.get("/aircraft")
 async def aircraft():
-    """Return cached aircraft positions from OpenSky."""
-    return get_aircraft()
+    """Aircraft positions, wrapped in the feed envelope.
+
+    `items` is the last good fleet; `state` says what it is worth (live,
+    retrying, stale, unavailable, ...). `count` is null unless the feed is live
+    or stale, so a dead feed cannot print "0 AC". See app/feeds.py.
+    """
+    return get_aircraft_envelope()
 
 
 @router.get("/tle")
 async def tle():
-    """Return cached TLE records from CelesTrak."""
-    return get_tles()
+    """TLE records, wrapped in the feed envelope.
+
+    `source_epoch` is the newest element-set epoch, and each record carries its
+    own `epoch_utc`: a fresh fetch can still carry old orbits. The state goes
+    `stale` when the newest epoch is older than 14 days and `unavailable` when
+    nothing has been fetched for 48 h. See app/services/satellites.py.
+    """
+    return get_tles_envelope()
 
 
 @router.get("/jamming")
@@ -28,8 +39,10 @@ async def jamming():
     Each zone is a 0.8-degree cell where the share of aircraft failing the
     gpsjam.org threshold (nic < 7 or nac_p < 8) reached the reporting minimum.
     `status` distinguishes a real measurement from an unevaluable feed:
-    "ok", "no_integrity_data" (the source carried no nic/nac_p at all) or
-    "insufficient_coverage" (no cell held enough aircraft to form a ratio).
+    "ok", "no_integrity_data" (the source carried no nic/nac_p at all),
+    "insufficient_coverage" (no cell held enough aircraft to form a ratio) or
+    "feed_not_live" (the aircraft feed is not live or stale, so the last verdict
+    is withheld; `feed_state` says why).
     """
     return get_jamming_zones()
 
@@ -80,8 +93,12 @@ async def connectivity():
 
 @router.get("/vessels")
 async def vessels():
-    """Return cached maritime vessel positions from AISStream."""
-    return get_vessels()
+    """Vessel positions, wrapped in the feed envelope.
+
+    With no AISSTREAM_API_KEY the state is `unconfigured` and the count null:
+    a missing key is not an empty sea. See app/feeds.py and app/services/maritime.py.
+    """
+    return get_vessels_envelope()
 
 
 @router.get("/aircraft/tracks")

@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 
 from geoalchemy2.shape import from_shape
@@ -6,9 +8,12 @@ from shapely.geometry import Point
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from telethon import TelegramClient, events
+from telethon.errors import AuthKeyError, UnauthorizedError
 from telethon.sessions import StringSession
 
+from app import feeds
 from app.config import settings
+from app.feeds import ErrorKind
 from app.db import async_session
 from app.models import ChannelCheckpoint, Event, EventReport
 from app.schemas import EventRead, EventWS
@@ -261,6 +266,7 @@ async def _process_message(
     message_date: datetime,
     message_id: int,
 ):
+    _note_message(message_date)
     if not raw_text or not raw_text.strip():
         return
 
@@ -529,6 +535,49 @@ async def trigger_backfill() -> dict:
 
 # ── Main listener ─────────────────────────────────────────────────────────────
 
+# ── Feed health ──────────────────────────────────────────────────────────────
+# The listener is event-driven, so there is no poll to report. A watchdog
+# reports the connection once a minute, and the upstream clock is the newest
+# message seen (live or backfilled): connected-but-quiet channels read STALE,
+# a dropped connection reads RETRYING then UNAVAILABLE, and an exited listener
+# reads DEAD with its last error.
+
+WATCHDOG_INTERVAL_S = 60
+_newest_message_at: float | None = None
+
+
+def _note_message(message_date: datetime) -> None:
+    global _newest_message_at
+    if message_date.tzinfo is None:
+        message_date = message_date.replace(tzinfo=timezone.utc)
+    ts = message_date.timestamp()
+    if _newest_message_at is None or ts > _newest_message_at:
+        _newest_message_at = ts
+
+
+def report_connection(now: float, connected: bool, channels: int) -> None:
+    tracker = feeds.tracker("telegram")
+    if connected:
+        tracker.succeeded(now, count=channels, source="telegram",
+                          source_epoch=_newest_message_at)
+    else:
+        tracker.failed(now, ErrorKind.FETCH_ERROR, "client disconnected")
+
+
+def classify_start_error(e: BaseException) -> ErrorKind:
+    """EOFError is Telethon prompting for a login code with no terminal: the
+    session is not authorised, which is an auth failure, not a network one."""
+    if isinstance(e, (EOFError, UnauthorizedError, AuthKeyError)):
+        return ErrorKind.AUTH_FAILED
+    return ErrorKind.FETCH_ERROR
+
+
+async def _watchdog(client, channels: int, sleep=asyncio.sleep, clock=time.time) -> None:
+    while True:
+        report_connection(clock(), client.is_connected(), channels)
+        await sleep(WATCHDOG_INTERVAL_S)
+
+
 async def start_telegram_listener():
     channels = _get_channels()
     conflict_cutoff = _get_conflict_cutoff()
@@ -553,7 +602,12 @@ async def start_telegram_listener():
         settings.telegram_api_id,
         settings.telegram_api_hash,
     )
-    await client.start(phone=settings.telegram_phone)
+    tracker = feeds.tracker("telegram")
+    try:
+        await client.start(phone=settings.telegram_phone)
+    except Exception as e:
+        tracker.failed(time.time(), classify_start_error(e), f"login failed: {type(e).__name__}: {e}")
+        raise
     _shared_client = client  # expose for on-demand backfill
 
     resolved = []
@@ -567,6 +621,8 @@ async def start_telegram_listener():
 
     if not resolved:
         logger.error("No channels resolved — listener has nothing to monitor")
+        tracker.failed(time.time(), ErrorKind.FETCH_ERROR,
+                       f"none of {len(channels)} channels resolved")
         return
 
     @client.on(events.NewMessage(chats=resolved))
@@ -594,8 +650,13 @@ async def start_telegram_listener():
     # ── Full historical backfill from conflict start ───────────────────────────
     # Uses date-based iteration instead of a fixed message count so we never
     # miss history regardless of how active a channel is.
-    for entity in resolved:
-        await _backfill_entity(client, entity, conflict_cutoff)
+    watchdog = asyncio.create_task(_watchdog(client, len(resolved)))
+    try:
+        for entity in resolved:
+            await _backfill_entity(client, entity, conflict_cutoff)
 
-    logger.info("All backfill complete — live listener active")
-    await client.run_until_disconnected()
+        logger.info("All backfill complete — live listener active")
+        await client.run_until_disconnected()
+        tracker.failed(time.time(), ErrorKind.FETCH_ERROR, "run_until_disconnected returned")
+    finally:
+        watchdog.cancel()

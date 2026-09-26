@@ -3,6 +3,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.security import origin_allowed
 from app.services.broadcaster import broadcaster
 
 logger = logging.getLogger(__name__)
@@ -11,6 +12,12 @@ router = APIRouter()
 
 @router.websocket("/ws/events")
 async def websocket_events(ws: WebSocket):
+    origin = ws.headers.get("origin")
+    if not origin_allowed(origin):
+        # CORS does not cover websockets; this is the check that does (C60).
+        logger.warning("WebSocket refused: origin %s is not in CORS_ORIGINS", origin)
+        await ws.close(code=1008)
+        return
     await broadcaster.connect(ws)
     try:
         while True:
