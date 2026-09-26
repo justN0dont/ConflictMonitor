@@ -42,6 +42,51 @@ def cesium_credits_are_on_screen():
     return None
 
 
+@check
+def tracks_are_drawn_where_they_were_seen():
+    """C46: aircraft and vessels are drawn at their last reported position and
+    move only when the data moves. A 2 s CSS transition on the 2D markers and a
+    per-frame lerp on the globe drew motion nobody observed, against 10-15 s
+    polls. Any tween of a position in the three map views fails here; a future
+    playback interpolates between stored fixes, styled as estimated, and says so
+    in FINDINGS before this rule changes."""
+    views = ["MapPanel.tsx", "GlobeView.tsx", "CesiumView.tsx"]
+    rules = [
+        (r"transition[^;\n}]*transform", "a CSS transition on transform"),
+        (r"\.(lerp|lerpVectors|slerp)\(", "a vector lerp"),
+        (r"SampledPositionProperty", "Cesium position interpolation"),
+    ]
+    for view in views:
+        src = read(f"frontend/src/components/{view}")
+        for pattern, what in rules:
+            m = re.search(pattern, src)
+            if m:
+                line = src.count("\n", 0, m.start()) + 1
+                return f"{view}:{line} tweens a position with {what} (C46)"
+    return None
+
+
+@check
+def reduced_motion_is_honoured():
+    """C49: prefers-reduced-motion stops the app's decorative motion. CSS
+    animations and transitions are collapsed by one global rule (e60c44d); the
+    globe's frame loops, which CSS cannot reach, read the same query through a
+    subscribed hook (2a8be86). Removing either half fails here."""
+    css = read("frontend/src/styles/globals.css")
+    block = re.search(r"@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{(.*?)\n\}", css, re.S)
+    if not block:
+        return "globals.css has no prefers-reduced-motion block (C49)"
+    for prop in ("animation-duration", "transition-duration"):
+        if prop not in block.group(1):
+            return f"the reduced-motion block no longer sets {prop} (C49)"
+    globe = read("frontend/src/components/GlobeView.tsx")
+    if 'matchMedia(query)' not in globe or '"(prefers-reduced-motion: reduce)"' not in globe:
+        return "GlobeView no longer reads prefers-reduced-motion (C49)"
+    if "autoRotate={!reducedMotion}" not in globe:
+        return "the globe's autoRotate ignores reduced motion (C49)"
+    return None
+
+
 def main() -> int:
     failed = 0
     for fn in CHECKS:

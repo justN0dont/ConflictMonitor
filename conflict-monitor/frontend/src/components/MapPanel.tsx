@@ -454,7 +454,6 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 longitude={ac.lon}
                 latitude={ac.lat}
                 anchor="center"
-                style={{ transition: "transform 2s linear" }}
               >
                 <div
                   style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}
@@ -502,7 +501,6 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 longitude={v.lon}
                 latitude={v.lat}
                 anchor="center"
-                style={{ transition: "transform 2s linear" }}
               >
                 <div
                   style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}

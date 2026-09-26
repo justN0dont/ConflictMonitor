@@ -57,9 +57,10 @@ const PRECISION_ARC_PER_SPREAD = 0.0022;
 /**
  * prefers-reduced-motion, read from JS.
  *
- * C49: this scene's motion is frame loops - autoRotate, the severity pulse, the
- * position lerps - and a CSS media query cannot reach a frame loop, so the rule
- * the rest of the app obeys in CSS never applied here at all. matchMedia reads
+ * C49: this scene's motion is frame loops - autoRotate and the severity pulse
+ * (the position lerps were deleted under C46) - and a CSS media query cannot
+ * reach a frame loop, so the rule the rest of the app obeys in CSS never
+ * applied here at all. matchMedia reads
  * the same query from where the loops live. It is subscribed to rather than
  * sampled once at mount, because the setting can change while the page is open
  * and an answer that is only right at mount is the same kind of stale claim
@@ -366,69 +367,26 @@ function EventMarkers({
 }
 
 // ---------------------------------------------------------------------------
-// Aircraft layer with callsign labels and smooth interpolation
+// Aircraft layer with callsign labels
 // ---------------------------------------------------------------------------
 
-interface AircraftDot {
-  current: THREE.Vector3;
-  target: THREE.Vector3;
-}
-
-function AircraftLayer({
-  aircraft,
-  reducedMotion,
-}: {
-  aircraft: Aircraft[];
-  reducedMotion: boolean;
-}) {
-  const dotsRef = useRef<Map<string, AircraftDot>>(new Map());
-  const meshRefs = useRef<Map<string, THREE.Mesh>>(new Map());
-
+/**
+ * Each dot is drawn where the last poll put it and moves only when the data
+ * moves (C46). It used to glide there at a lerp of 0.06 per frame - frame-rate
+ * dependent, with the callsign already at the new fix - which drew motion
+ * nobody observed. The step every poll is the honest picture, not a regression.
+ */
+function AircraftLayer({ aircraft }: { aircraft: Aircraft[] }) {
   const airborne = useMemo(
     () => aircraft.filter((a) => !a.on_ground && a.lat != null && a.lon != null),
     [aircraft],
   );
 
-  // Update target positions
-  useEffect(() => {
-    const dots = dotsRef.current;
-    const seen = new Set<string>();
-    for (const ac of airborne) {
-      seen.add(ac.icao24);
-      const t = new THREE.Vector3(...latLonToVec3(ac.lat, ac.lon, EARTH_RADIUS * 1.012));
-      const existing = dots.get(ac.icao24);
-      if (existing) {
-        existing.target.copy(t);
-      } else {
-        dots.set(ac.icao24, { current: t.clone(), target: t.clone() });
-      }
-    }
-    for (const key of dots.keys()) {
-      if (!seen.has(key)) dots.delete(key);
-    }
-  }, [airborne]);
-
-  // Interpolate each frame. Under reduced motion the factor is 1, which lands on
-  // the new position immediately: the aircraft still moves when the data moves,
-  // it just does not glide there.
-  useFrame(() => {
-    dotsRef.current.forEach((dot, key) => {
-      dot.current.lerp(dot.target, reducedMotion ? 1 : 0.06);
-      const mesh = meshRefs.current.get(key);
-      if (mesh) mesh.position.copy(dot.current);
-    });
-  });
-
   return (
     <group>
       {airborne.map((ac) => (
         <group key={ac.icao24}>
-          <mesh
-            ref={(el) => {
-              if (el) meshRefs.current.set(ac.icao24, el);
-            }}
-            position={latLonToVec3(ac.lat, ac.lon, EARTH_RADIUS * 1.012)}
-          >
+          <mesh position={latLonToVec3(ac.lat, ac.lon, EARTH_RADIUS * 1.012)}>
             <sphereGeometry args={[0.004, 6, 6]} />
             <meshBasicMaterial color="#58d0ff" transparent opacity={0.9} />
           </mesh>
@@ -582,52 +540,13 @@ function SatelliteLayer({ tleData }: { tleData: TLERecord[] }) {
 // Maritime vessel layer
 // ---------------------------------------------------------------------------
 
-function VesselLayer({
-  vessels,
-  reducedMotion,
-}: {
-  vessels: Vessel[];
-  reducedMotion: boolean;
-}) {
-  const dotsRef = useRef<Map<string, { current: THREE.Vector3; target: THREE.Vector3 }>>(new Map());
-  const meshRefs = useRef<Map<string, THREE.Mesh>>(new Map());
-
-  useEffect(() => {
-    const dots = dotsRef.current;
-    const seen = new Set<string>();
-    for (const v of vessels) {
-      seen.add(v.mmsi);
-      const t = new THREE.Vector3(...latLonToVec3(v.lat, v.lon, EARTH_RADIUS * 1.002));
-      const existing = dots.get(v.mmsi);
-      if (existing) {
-        existing.target.copy(t);
-      } else {
-        dots.set(v.mmsi, { current: t.clone(), target: t.clone() });
-      }
-    }
-    for (const key of dots.keys()) {
-      if (!seen.has(key)) dots.delete(key);
-    }
-  }, [vessels]);
-
-  useFrame(() => {
-    dotsRef.current.forEach((dot, key) => {
-      dot.current.lerp(dot.target, reducedMotion ? 1 : 0.06);
-      const mesh = meshRefs.current.get(key);
-      if (mesh) mesh.position.copy(dot.current);
-    });
-  });
-
+/** Drawn at the last reported position, never glided there (C46; see AircraftLayer). */
+function VesselLayer({ vessels }: { vessels: Vessel[] }) {
   return (
     <group>
       {vessels.map((v) => (
         <group key={v.mmsi}>
-          <mesh
-            ref={(el) => {
-              if (el) meshRefs.current.set(v.mmsi, el);
-            }}
-            position={latLonToVec3(v.lat, v.lon, EARTH_RADIUS * 1.002)}
-          >
+          <mesh position={latLonToVec3(v.lat, v.lon, EARTH_RADIUS * 1.002)}>
             <coneGeometry args={[0.004, 0.008, 3]} />
             <meshBasicMaterial color="#40e0d0" transparent opacity={0.85} />
           </mesh>
@@ -763,8 +682,8 @@ function Scene({
 
       {/* Data layers */}
       <EventMarkers located={located} reducedMotion={reducedMotion} />
-      <AircraftLayer aircraft={aircraft} reducedMotion={reducedMotion} />
-      <VesselLayer vessels={vessels} reducedMotion={reducedMotion} />
+      <AircraftLayer aircraft={aircraft} />
+      <VesselLayer vessels={vessels} />
       <SatelliteLayer tleData={tleData} />
       <JammingLayer zones={jammingZones} />
     </>
