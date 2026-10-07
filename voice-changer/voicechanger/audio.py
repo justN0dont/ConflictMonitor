@@ -189,6 +189,7 @@ class LiveEngine:
         self.settings = settings or Settings()
         self.input_channel = input_channel
         self.monitor_enabled = self.monitor_device is not None
+        self.passthrough = False  # True: skip the chain (mic already processed system-wide)
         self.chain = VoiceChain(sample_rate, quality, self.settings)
         self.xruns = 0
         self._streams: list = []
@@ -274,7 +275,14 @@ class LiveEngine:
 
     # ---- callbacks (audio thread) ---------------------------------------
     def _run_chain(self, indata: np.ndarray) -> np.ndarray:
-        y = self.chain.process(indata[:, min(self.input_channel, indata.shape[1] - 1)])
+        x = indata[:, min(self.input_channel, indata.shape[1] - 1)]
+        if self.passthrough:
+            # The mic is already voice-changed by the system effect: just monitor it.
+            y = np.array(x, dtype=np.float32)
+            peak = float(np.max(np.abs(y))) if len(y) else 0.0
+            self.chain.input_peak = self.chain.output_peak = peak
+        else:
+            y = self.chain.process(x)
         if self._monitor_buf is not None and self.monitor_enabled:
             self._monitor_buf.write(y)
         rec = self._recorder

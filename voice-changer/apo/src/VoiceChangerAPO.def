@@ -1,0 +1,4 @@
+LIBRARY VoiceChangerAPO
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

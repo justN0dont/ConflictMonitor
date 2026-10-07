@@ -5,6 +5,9 @@
     python -m voicechanger presets         # list presets
     python -m voicechanger live --preset deeper --output "CABLE Input" --monitor "Headphones"
     python -m voicechanger file in.wav out.wav --preset robot
+    python -m voicechanger apo list                       # Windows: microphones
+    python -m voicechanger apo install --endpoint {id}    # voice-change that mic in every app
+    python -m voicechanger apo uninstall                  # put everything back
 """
 
 from __future__ import annotations
@@ -60,6 +63,12 @@ def main(argv: list[str] | None = None) -> int:
     live.add_argument("--record", help="also record the transformed voice to this WAV")
     _add_voice_args(live)
 
+    apo = sub.add_parser("apo", help="Windows: install the voice changer into a microphone for all apps")
+    apo.add_argument("action", choices=["list", "install", "uninstall", "status"])
+    apo.add_argument("--endpoint", action="append", help="capture endpoint id from `apo list` (repeatable)")
+    apo.add_argument("--dll", help="path to VoiceChangerAPO.dll (default: bundled build)")
+    apo.add_argument("--dry-run", action="store_true", help="show what would change without changing it")
+
     f = sub.add_parser("file", help="transform a WAV file")
     f.add_argument("src")
     f.add_argument("dst")
@@ -72,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
         for name, overrides in PRESETS.items():
             print(f"{name:12s} {overrides or '(no changes)'}")
         return 0
+
+    if cmd == "apo":
+        from .system_mic import cli as apo_cli
+        return apo_cli(args)
 
     if cmd == "file":
         from .fileio import process_file

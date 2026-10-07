@@ -7,6 +7,10 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import sys
+import threading
+
+from . import system_mic
 from .chain import QUALITY, Settings
 from .presets import PRESETS, apply_preset
 
@@ -71,6 +75,9 @@ class App:
         self.engine = None
         self.vars: dict[str, tk.Variable] = {}
         self._suspend = False
+        self.endpoints: list = []
+        self.system_active = False  # voice changer installed on a mic: sliders drive it live
+        self._sys_write_pending = False
         root.title("Voice Changer")
         root.minsize(760, 560)
 
@@ -99,9 +106,10 @@ class App:
         self.out_var = tk.StringVar(value=self._label_for(self._def_out, outs))
         self.mon_var = tk.StringVar(value="(none)")
         self.quality_var = tk.StringVar(value="balanced")
+        self.quality_var.trace_add("write", lambda *_: self._sys_write_later())
         for col, (text, var, values) in enumerate([
             ("Microphone", self.in_var, ins),
-            ("Output (headphones or virtual cable)", self.out_var, outs),
+            ("Output (headphones)", self.out_var, outs),
             ("Monitor (hear yourself)", self.mon_var, ["(none)"] + outs),
         ]):
             ttk.Label(top, text=text).grid(row=0, column=col, sticky="w", padx=4)
@@ -113,6 +121,8 @@ class App:
                      state="readonly").grid(row=1, column=3, padx=4)
         self.start_btn = ttk.Button(top, text="Start", command=self._toggle)
         self.start_btn.grid(row=1, column=4, padx=6)
+
+        self._build_system_frame(pad)
 
         bar = ttk.Frame(self.root)
         bar.pack(fill="x", **pad)
@@ -166,6 +176,110 @@ class App:
         self.status = tk.StringVar(value="Stopped. Use headphones to avoid feedback.")
         ttk.Label(self.root, textvariable=self.status, anchor="w").pack(fill="x", padx=8, pady=(0, 6))
 
+    def _build_system_frame(self, pad) -> None:
+        box = ttk.LabelFrame(self.root, text="Use in all apps (Discord, Zoom, games, OBS…)")
+        box.pack(fill="x", **pad)
+        self.sys_ep_var = tk.StringVar()
+        self.sys_combo = ttk.Combobox(box, textvariable=self.sys_ep_var, width=40, state="readonly")
+        self.sys_combo.grid(row=0, column=0, padx=4, pady=3, sticky="ew")
+        self.sys_install_btn = ttk.Button(box, text="Install", command=self._sys_install)
+        self.sys_install_btn.grid(row=0, column=1, padx=4)
+        self.sys_remove_btn = ttk.Button(box, text="Remove", command=self._sys_remove)
+        self.sys_remove_btn.grid(row=0, column=2, padx=4)
+        self.sys_status = tk.StringVar()
+        ttk.Label(box, textvariable=self.sys_status, anchor="w").grid(row=1, column=0, columnspan=3, sticky="ew", padx=4)
+        box.columnconfigure(0, weight=1)
+        if sys.platform != "win32":
+            for w in (self.sys_combo, self.sys_install_btn, self.sys_remove_btn):
+                w.state(["disabled"])
+            self.sys_status.set("Windows only. Elsewhere, route the output to a virtual device (see README).")
+            return
+        self._sys_refresh()
+
+    def _sys_refresh(self) -> None:
+        try:
+            self.endpoints = system_mic.list_endpoints(system_mic.WinRegistry())
+        except Exception as exc:  # registry unreadable: show why, keep the app usable
+            self.endpoints = []
+            self.sys_status.set(f"Could not read microphones: {exc}")
+            return
+        labels = [("✔ " if e.installed else "") + e.label for e in self.endpoints]
+        self.sys_combo.configure(values=labels)
+        installed = [e for e in self.endpoints if e.installed]
+        if labels and not self.sys_ep_var.get():
+            pick = installed[0] if installed else self.endpoints[0]
+            self.sys_ep_var.set(labels[self.endpoints.index(pick)])
+        elif self.sys_ep_var.get().lstrip("✔ ") in [e.label for e in self.endpoints]:
+            # re-select with the updated check mark
+            name = self.sys_ep_var.get().lstrip("✔ ")
+            self.sys_ep_var.set(labels[[e.label for e in self.endpoints].index(name)])
+        self.system_active = bool(installed)
+        self.start_btn.configure(text=("Stop" if self.engine else ("Monitor" if self.system_active else "Start")))
+        if self.system_active:
+            self._sys_write_now()
+
+    def _sys_selected(self):
+        label = self.sys_ep_var.get().lstrip("✔ ")
+        for e in self.endpoints:
+            if e.label == label:
+                return e
+        return None
+
+    def _sys_run(self, args: list[str], done_msg: str) -> None:
+        self.sys_status.set("Waiting for administrator permission…")
+        for w in (self.sys_install_btn, self.sys_remove_btn):
+            w.state(["disabled"])
+
+        def work():
+            try:
+                code = system_mic.run_elevated(args)
+                msg = done_msg if code == 0 else f"Failed (code {code}); see %ProgramData%\\VoiceChanger\\install.log"
+            except Exception as exc:
+                msg = f"Cancelled: {exc}"
+            self.root.after(0, lambda: self._sys_finished(msg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sys_finished(self, msg: str) -> None:
+        for w in (self.sys_install_btn, self.sys_remove_btn):
+            w.state(["!disabled"])
+        self._sys_refresh()
+        self.sys_status.set(msg)
+
+    def _sys_install(self) -> None:
+        e = self._sys_selected()
+        if not e:
+            return
+        dll = system_mic.find_dll()
+        if dll is None:
+            messagebox.showerror("Voice Changer", "VoiceChangerAPO.dll is missing. Download the Windows build "
+                                 "(see README) and keep the folder intact.")
+            return
+        if self.engine and not self.system_active:
+            self._toggle()  # stop the in-app preview so the voice isn't changed twice
+        self._sys_run(["apo", "install", "--endpoint", e.id, "--dll", str(dll)],
+                      f"Installed on {e.name}. Every app using it now hears the changed voice.")
+
+    def _sys_remove(self) -> None:
+        e = self._sys_selected()
+        args = ["apo", "uninstall"] + (["--endpoint", e.id] if e and e.installed else [])
+        self._sys_run(args, "Removed. Microphone restored to its original settings.")
+
+    def _sys_write_later(self) -> None:
+        """Debounce slider drags into ~12 writes/second."""
+        if self.system_active and not self._sys_write_pending:
+            self._sys_write_pending = True
+            self.root.after(80, self._sys_write_now)
+
+    def _sys_write_now(self) -> None:
+        self._sys_write_pending = False
+        if not self.system_active:
+            return
+        try:
+            system_mic.write_settings(self.settings, self.quality_var.get())
+        except OSError as exc:
+            self.sys_status.set(f"Could not update the system effect: {exc}")
+
     def _slider(self, frame, row, key, label, lo, hi, res, unit) -> None:
         var = tk.DoubleVar(value=getattr(self.settings, key))
         self.vars[key] = var
@@ -201,6 +315,7 @@ class App:
     def _push(self, key: str) -> None:
         if self._suspend:
             return
+        self._sys_write_later()
         var = self.vars[key]
         current = getattr(self.settings, key)
         value = var.get()
@@ -217,6 +332,7 @@ class App:
                 var.set(getattr(self.settings, key))
         finally:
             self._suspend = False
+        self._sys_write_later()
 
     def _load_preset(self, name: str) -> None:
         bypass = self.settings.bypass
@@ -242,7 +358,7 @@ class App:
         if self.engine:
             self.engine.stop()
             self.engine = None
-            self.start_btn.configure(text="Start")
+            self.start_btn.configure(text="Monitor" if self.system_active else "Start")
             self.rec_btn.configure(text="● Record")
             self.status.set("Stopped.")
             return
@@ -252,6 +368,9 @@ class App:
                                      self._index(self.mon_var.get()), 48000, self.quality_var.get(),
                                      self.settings)
             self.engine.monitor_enabled = self.monitor_on.get() and self.engine.monitor_device is not None
+            # Installed system-wide, the mic already arrives voice-changed:
+            # just play it back so you hear what other apps hear.
+            self.engine.passthrough = self.system_active
             self.engine.start()
         except Exception as exc:  # device errors surface here
             self.engine = None
@@ -291,6 +410,16 @@ class App:
         self.status.set(f"Processed {secs:.1f} s → {dst}")
 
     def _tick(self) -> None:
+        self._ticks = getattr(self, "_ticks", 0) + 1
+        if self.system_active and self._ticks % 20 == 0 and not self.sys_status.get().startswith("Waiting"):
+            live = system_mic.read_status()
+            if live:
+                apps = sorted({i.get("host", "?").replace("\\", "/").rsplit("/", 1)[-1] for i in live})
+                lat = max(float(i.get("latency_ms", 0)) for i in live)
+                self.sys_status.set(f"Active · in use by {', '.join(apps)} · added latency ≈ {lat:.0f} ms")
+            else:
+                self.sys_status.set("Installed · no app is recording from this mic right now "
+                                    "(it switches on when one does)")
         e = self.engine
         if e:
             c = e.chain
