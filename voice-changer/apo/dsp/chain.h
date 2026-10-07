@@ -18,6 +18,9 @@ struct Settings {
     double pitch = 0.0, formant = 0.0;
     Mode mode = Mode::Normal;
     double robot_hz = 110.0, mix = 1.0;
+    // character (all neutral by default)
+    double tremor_hz = 5.5, tremor_depth = 0.0, jitter = 0.0, breath = 0.0;
+    double gravel = 0.0, gravel_hz = 50.0;
     double input_gain_db = 0.0;
     bool gate_enabled = true;
     double gate_threshold_db = -50.0;
@@ -63,6 +66,7 @@ private:
     Quality quality_;
     SpectralVoice voice_;
     DelayLine dry_, bypass_delay_;
+    GravelModulator gravel_;
     Biquad rumble_, hp_, lp_, low_, mid_, high_;
     NoiseGate gate_;
     Compressor comp_;

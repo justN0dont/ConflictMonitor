@@ -4,6 +4,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "rng.h"
+
 namespace vc {
 
 namespace {
@@ -37,6 +39,11 @@ SpectralVoice::SpectralVoice(int sample_rate, int fft_size, int overlap, int blo
     latency_ = n_ - hop_ + pad_;
     scale_ = 1.0 / (0.375 * overlap_);
     expct_ = kTwoPi * hop_ / n_;
+    // Jitter glides to each new random target with a 25 ms time constant.
+    jitter_coef_ = std::exp(-hop_ / (0.025 * sample_rate));
+    // Noise frames are mutually incoherent, so overlap-add sums their power,
+    // not their amplitude: coherent 0.375*o vs incoherent sqrt(35/128*o).
+    noise_comp_ = 0.375 * overlap_ / std::sqrt(35.0 / 128.0 * overlap_);
 
     window_.resize(n_);
     for (int i = 0; i < n_; i++) window_[i] = 0.5 - 0.5 * std::cos(kTwoPi * i / n_);
@@ -72,17 +79,32 @@ SpectralVoice::SpectralVoice(int sample_rate, int fft_size, int overlap, int blo
     log_env_.assign(half_, 0.0);
     flat_.assign(half_, 0.0);
     new_phase_.assign(half_, 0.0);
+    // Breath noise is tilted toward the highs like real aspiration
+    // (turbulence at the glottis is weak below ~1.5 kHz).
+    breath_tilt_.assign(half_, 0.0);
+    for (int k = 0; k < half_; k++) {
+        const double fk = (double)k * sample_rate / n_;
+        breath_tilt_[k] = fk * fk / (fk * fk + 1500.0 * 1500.0);
+    }
+    breath_mag_.assign(half_, 0.0);
     spec_out_.assign(half_, cd(0, 0));
     peaks_.reserve(half_);
     peak_amp_.reserve(half_);
     peak_fo_.reserve(half_);
-    peak_ph_.reserve(half_);
+    peak_ph_.reserve(half_);  // shift_peaks keeps at most one entry per bin
     peak_dest_.reserve(half_);
     reset();
 }
 
 void SpectralVoice::set_pitch(double semitones) { pitch_ratio_ = std::pow(2.0, semitones / 12.0); }
 void SpectralVoice::set_formant(double semitones) { formant_ratio_ = std::pow(2.0, semitones / 12.0); }
+
+void SpectralVoice::set_tremor(double hz, double depth_st) {
+    tremor_hz_ = std::min(std::max(hz, 0.5), 15.0);
+    tremor_depth_ = std::min(std::max(depth_st, 0.0), 3.0);
+}
+void SpectralVoice::set_jitter(double amount) { jitter_ = std::min(std::max(amount, 0.0), 1.0); }
+void SpectralVoice::set_breath(double amount) { breath_ = std::min(std::max(amount, 0.0), 1.0); }
 
 void SpectralVoice::reset() {
     std::fill(frame_.begin(), frame_.end(), 0.0);
@@ -93,6 +115,9 @@ void SpectralVoice::reset() {
     pending_count_ = 0;
     ring_read_ = 0;
     ring_count_ = pad_;  // start with `pad_` zeros queued
+    frame_index_ = 0;
+    tremor_phase_ = 0.0;
+    jitter_state_ = 0.0;
 }
 
 void SpectralVoice::process(const double* in, double* out, int m) {
@@ -142,16 +167,29 @@ double SpectralVoice::interp_env(double x) const {
     return log_env_[i0] * (1.0 - t) + log_env_[i0 + 1] * t;
 }
 
-double SpectralVoice::rand_uniform() {
-    // xorshift64*
-    rng_ ^= rng_ >> 12;
-    rng_ ^= rng_ << 25;
-    rng_ ^= rng_ >> 27;
-    return (double)((rng_ * 2685821657736338717ull) >> 11) * (1.0 / 9007199254740992.0);
+double SpectralVoice::character(double& gain) {
+    // Depends only on the frame count, never on the audio. At neutral settings
+    // the factors are 2**0 and 10**0, both exactly 1.0, so the output is
+    // bit-identical to running without them.
+    const uint64_t f = frame_index_;
+    // The tremor rate wanders +/-10% frame to frame so it doesn't sound like a
+    // metronome. Its phase runs even at zero depth, so the wobble depends only
+    // on the frame count, not on when tremor was turned up.
+    const double rate = tremor_hz_ * (1.0 + 0.2 * (hash_uniform(1, f) - 0.5));
+    tremor_phase_ = std::fmod(tremor_phase_ + kTwoPi * rate * hop_ / sr_, kTwoPi);
+    const double s = std::sin(tremor_phase_);
+    const double tremor_st = tremor_depth_ * s;
+    gain = std::pow(10.0, 1.5 * tremor_depth_ * s / 20.0);  // real vibrato swings loudness too
+    const double target = jitter_ * 0.6 * (2.0 * hash_uniform(2, f) - 1.0);
+    jitter_state_ = target + (jitter_state_ - target) * jitter_coef_;
+    return pitch_ratio_ * std::pow(2.0, (tremor_st + jitter_state_) / 12.0);
 }
 
 void SpectralVoice::process_frame(double* out_hop) {
     const int n = n_, half = half_, osamp = overlap_;
+    const uint64_t f = frame_index_;
+    double gain = 1.0;
+    const double r = character(gain);
 
     // ---- analysis: magnitude + true per-bin frequency (in bins) ----
     for (int i = 0; i < n; i++) {
@@ -193,52 +231,80 @@ void SpectralVoice::process_frame(double* out_hop) {
     }
 
     // ---- excitation: shift or replace ----
-    if (mode_ == Mode::Normal && std::fabs(pitch_ratio_ - 1.0) >= 1e-9) {
-        shift_peaks();
-        overlap_add(out_hop);
-        return;
-    }
-    if (mode_ == Mode::Normal) {
-        for (int k = 0; k < half; k++) spec_out_[k] = std::polar(flat_[k], phase_[k]);
-    } else if (mode_ == Mode::Robot) {
-        std::fill(spec_out_.begin(), spec_out_.end(), cd(0, 0));
-        const double f0 = robot_hz_ * pitch_ratio_ * n / sr_;
-        const int count = (int)((half - 1) / f0);
-        // All phases come from the previous frame (numpy evaluates the whole
-        // vector before assigning), so read before any write.
-        for (int h = 1; h <= count; h++) {
-            const double f = h * f0;
-            const int idx = (int)round_even(f);
-            peak_ph_.push_back(wrap(sum_phase_[idx] + kTwoPi * f / osamp));
-        }
-        for (int h = 1; h <= count; h++) {
-            const int idx = (int)round_even(h * f0);
-            spec_out_[idx] = std::polar(1.0, peak_ph_[h - 1]);
-        }
-        peak_ph_.clear();
+    if (mode_ == Mode::Normal && std::fabs(r - 1.0) >= 1e-9) {
+        shift_peaks(r);  // sets sum_phase_
     } else {
-        for (int k = 0; k < half; k++) spec_out_[k] = std::polar(1.0, rand_uniform() * kTwoPi);
+        if (mode_ == Mode::Normal) {
+            for (int k = 0; k < half; k++) spec_out_[k] = std::polar(flat_[k], phase_[k]);
+        } else if (mode_ == Mode::Robot) {
+            std::fill(spec_out_.begin(), spec_out_.end(), cd(0, 0));
+            const double f0 = robot_hz_ * r * n / sr_;
+            const int count = (int)((half - 1) / f0);
+            // Phases come from the previous frame's sum_phase_, which is only
+            // rewritten below, so one pass needs no scratch (and a low f0, with
+            // more harmonics than bins, cannot outgrow one). Where harmonics
+            // share a bin the last one wins, as in numpy's fancy assignment.
+            for (int h = 1; h <= count; h++) {
+                const double fh = h * f0;
+                const int idx = (int)round_even(fh);
+                spec_out_[idx] = std::polar(1.0, wrap(sum_phase_[idx] + kTwoPi * fh / osamp));
+            }
+        } else {
+            const uint64_t first = f * (uint64_t)half;
+            for (int k = 0; k < half; k++) {
+                const double ph = kTwoPi * hash_uniform(4, first + k);
+                spec_out_[k] = cd(std::cos(ph), std::sin(ph));
+            }
+        }
+
+        // ---- re-apply the (optionally shifted) envelope ----
+        for (int k = 0; k < half; k++) spec_out_[k] *= std::exp(interp_env(k / formant_ratio_));
+        if (mode_ != Mode::Normal) {
+            // Replaced excitations carry no loudness of their own; match frame energy.
+            double out_e = 0.0, in_e = 0.0;
+            for (int k = 0; k < half; k++) {
+                out_e += std::norm(spec_out_[k]);
+                in_e += mag_[k] * mag_[k];
+            }
+            double g = out_e > 0 ? std::sqrt(in_e / out_e) : 1.0;
+            if (mode_ == Mode::Whisper) g *= noise_comp_;
+            for (int k = 0; k < half; k++) spec_out_[k] *= g;
+        }
+        for (int k = 0; k < half; k++) sum_phase_[k] = std::arg(spec_out_[k]);
     }
 
-    // ---- re-apply the (optionally shifted) envelope ----
-    for (int k = 0; k < half; k++) spec_out_[k] *= std::exp(interp_env(k / formant_ratio_));
-    if (mode_ != Mode::Normal) {
-        double out_e = 0.0, in_e = 0.0;
-        for (int k = 0; k < half; k++) {
-            out_e += std::norm(spec_out_[k]);
-            in_e += mag_[k] * mag_[k];
-        }
-        double g = out_e > 0 ? std::sqrt(in_e / out_e) : 1.0;
-        if (mode_ == Mode::Whisper) g *= 0.375 * osamp / std::sqrt(35.0 / 128.0 * osamp);
-        for (int k = 0; k < half; k++) spec_out_[k] *= g;
-    }
-    for (int k = 0; k < half; k++) sum_phase_[k] = std::arg(spec_out_[k]);
+    // Breath goes in after the phase memory is updated: noise phases must
+    // never be propagated into the next frame's partials.
+    if (breath_ > 0 && mode_ != Mode::Whisper) add_breath();
+    for (int k = 0; k < half; k++) spec_out_[k] *= gain;
+    frame_index_++;
     overlap_add(out_hop);
 }
 
-void SpectralVoice::shift_peaks() {
+void SpectralVoice::add_breath() {
+    // Trades `breath` of the frame's energy for noise under the (formant-
+    // shifted) envelope, so it whispers the same vowel. Splitting the energy
+    // rather than adding to it changes the texture more than the loudness.
     const int half = half_;
-    const double r = pitch_ratio_;
+    double e_h = 0.0, e_n = 0.0;
+    for (int k = 0; k < half; k++) {
+        const double m = std::exp(interp_env(k / formant_ratio_)) * breath_tilt_[k];
+        breath_mag_[k] = m;
+        e_h += std::norm(spec_out_[k]);
+        e_n += m * m;
+    }
+    if (e_h <= 0 || e_n <= 0) return;
+    const double g = std::sqrt(breath_ * e_h / e_n) * noise_comp_;
+    const double keep = std::sqrt(1.0 - breath_);
+    const uint64_t first = frame_index_ * (uint64_t)half;
+    for (int k = 0; k < half; k++) {
+        const double ph = kTwoPi * hash_uniform(3, first + k);
+        spec_out_[k] = keep * spec_out_[k] + breath_mag_[k] * g * cd(std::cos(ph), std::sin(ph));
+    }
+}
+
+void SpectralVoice::shift_peaks(double r) {
+    const int half = half_;
     std::fill(spec_out_.begin(), spec_out_.end(), cd(0, 0));
 
     double mag_max = 0.0;

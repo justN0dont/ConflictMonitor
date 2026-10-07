@@ -60,6 +60,12 @@ Settings parse_settings(const std::string& text, Settings s) {
         else if (key == "formant") s.formant = clampd(d, -24, 24);
         else if (key == "robot_hz") s.robot_hz = clampd(d, 20, 2000);
         else if (key == "mix") s.mix = clampd(d, 0, 1);
+        else if (key == "tremor_hz") s.tremor_hz = clampd(d, 0.5, 15);
+        else if (key == "tremor_depth") s.tremor_depth = clampd(d, 0, 3);
+        else if (key == "jitter") s.jitter = clampd(d, 0, 1);
+        else if (key == "breath") s.breath = clampd(d, 0, 1);
+        else if (key == "gravel") s.gravel = clampd(d, 0, 1);
+        else if (key == "gravel_hz") s.gravel_hz = clampd(d, 10, 200);
         else if (key == "input_gain_db") s.input_gain_db = clampd(d, -60, 40);
         else if (key == "gate_threshold_db") s.gate_threshold_db = clampd(d, -120, 0);
         else if (key == "highpass_hz") s.highpass_hz = clampd(d, 10, 20000);
@@ -96,6 +102,7 @@ VoiceChain::VoiceChain(int sample_rate, Quality quality, int block_size)
              block_size),
       dry_(voice_.latency()),
       bypass_delay_(voice_.latency()),
+      gravel_(sample_rate),
       rumble_(sample_rate, BiquadKind::Highpass, 80.0),
       hp_(sample_rate, BiquadKind::Highpass, 80.0),
       lp_(sample_rate, BiquadKind::Lowpass, 18000.0),
@@ -114,6 +121,7 @@ void VoiceChain::reset() {
     voice_.reset();
     dry_.reset();
     bypass_delay_.reset();
+    gravel_.reset();
     rumble_.reset(); hp_.reset(); lp_.reset(); low_.reset(); mid_.reset(); high_.reset();
     gate_.reset();
     comp_.reset();
@@ -136,7 +144,10 @@ void VoiceChain::process(const float* in, float* out, int n, const Settings& s) 
 
     // Bypass runs through a matching delay so toggling it is an honest A/B.
     if (s.bypass) {
-        voice_.process(x, wet, n);  // keep shifter state warm
+        // Keep the shifter and gravel state running (output discarded), so
+        // toggling bypass never changes their phase history.
+        voice_.process(x, wet, n);
+        gravel_.process(wet, n, s.gravel, s.gravel_hz);
         dry_.process(x, dry, n);
         bypass_delay_.process(x, wet, n);
         peak = 0.0;
@@ -158,7 +169,11 @@ void VoiceChain::process(const float* in, float* out, int n, const Settings& s) 
     voice_.set_formant(s.formant);
     voice_.set_mode(s.mode);
     voice_.set_robot_pitch(s.robot_hz);
+    voice_.set_tremor(s.tremor_hz, s.tremor_depth);
+    voice_.set_jitter(s.jitter);
+    voice_.set_breath(s.breath);
     voice_.process(x, wet, n);
+    gravel_.process(wet, n, s.gravel, s.gravel_hz);
     dry_.process(x, dry, n);
     for (int i = 0; i < n; i++) x[i] = wet[i] * s.mix + dry[i] * (1.0 - s.mix);
 

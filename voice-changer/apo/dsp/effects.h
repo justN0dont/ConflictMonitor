@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
+
+#include "rng.h"
 
 namespace vc {
 
@@ -265,6 +268,52 @@ inline void drive(double* x, int n, double amount) {
     const double norm = std::tanh(k);
     for (int i = 0; i < n; i++) x[i] = std::tanh(k * x[i]) / norm;
 }
+
+// Vocal fry / gravel: a fast, slightly irregular train of raised-cosine dips
+// in level at `hz`, like vocal folds slapping shut in uneven pulses; `amount`
+// sets the dip depth. The rate wanders +/-25% every 256 samples, keyed on the
+// absolute sample index through hash_uniform, so the result is the same for any
+// block size and matches the Python. The phase advances even at amount 0, so
+// the pulse train depends only on elapsed time, never on when it was switched on.
+class GravelModulator {
+public:
+    static constexpr int kTick = 256;  // samples per random rate step
+
+    explicit GravelModulator(double fs) : fs_(fs) {}
+
+    void process(double* x, int n, double amount, double hz) {
+        // Same ranges as the settings parser (and the Python), whatever the caller passes.
+        amount = std::min(std::max(amount, 0.0), 1.0);
+        hz = std::min(std::max(hz, 10.0), 200.0);
+        const double two_pi = 2.0 * 3.14159265358979323846;
+        for (int i = 0; i < n; i++, count_++) {
+            const uint64_t tick = count_ / kTick;
+            if (tick != tick_) {  // one draw per tick, not per sample
+                tick_ = tick;
+                wobble_ = hash_uniform(5, tick);
+            }
+            const double f = hz * (1.0 + 0.5 * (wobble_ - 0.5));
+            // Python accumulates the block with cumsum and wraps once per
+            // block; wrapping per sample instead only moves the phase by whole
+            // turns, which cos cannot see.
+            phase_ += two_pi * f / fs_;
+            if (phase_ >= two_pi) phase_ -= two_pi;
+            if (amount > 0) {
+                const double m = 0.5 - 0.5 * std::cos(phase_);
+                x[i] *= 1.0 - amount * m * m;
+            }
+        }
+    }
+
+    void reset() { phase_ = 0.0; count_ = 0; tick_ = UINT64_MAX; }
+
+private:
+    double fs_;
+    double phase_ = 0.0;
+    uint64_t count_ = 0;          // absolute sample index
+    uint64_t tick_ = UINT64_MAX;  // tick whose draw is cached in wobble_ (none yet)
+    double wobble_ = 0.0;
+};
 
 // Freeverb-style: 8 damped combs in parallel into 4 allpasses in series.
 class Reverb {
