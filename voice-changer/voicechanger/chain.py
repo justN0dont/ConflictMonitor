@@ -1,6 +1,7 @@
 """The complete voice chain, and the settings that drive it.
 
-    input gain -> rumble HPF -> noise gate -> [pitch/formant shifter + aligned dry mix]
+    input gain -> rumble HPF -> noise gate
+      -> [pitch/formant shifter (+ tremor, jitter, breath) -> gravel, + aligned dry mix]
       -> tone HPF/LPF -> 3-band EQ -> drive -> compressor -> reverb
       -> output gain -> limiter
 
@@ -16,8 +17,8 @@ from dataclasses import asdict, dataclass, fields
 
 import numpy as np
 
-from .dsp.effects import (Biquad, Compressor, DelayLine, Limiter, NoiseGate, Reverb,
-                          db_to_lin, drive)
+from .dsp.effects import (Biquad, Compressor, DelayLine, GravelModulator, Limiter, NoiseGate,
+                          Reverb, db_to_lin, drive)
 from .dsp.spectral import SpectralVoice
 
 QUALITY = {
@@ -38,6 +39,13 @@ class Settings:
     mode: str = "normal"         # normal | robot | whisper
     robot_hz: float = 110.0
     mix: float = 1.0             # 0 = dry, 1 = fully transformed
+    # character (all neutral by default)
+    tremor_hz: float = 5.5       # tremor/vibrato rate, 0.5..15
+    tremor_depth: float = 0.0    # peak pitch swing in semitones, 0..3
+    jitter: float = 0.0          # pitch unsteadiness, 0..1
+    breath: float = 0.0          # 0..1: share of the voice's energy turned into aspiration noise
+    gravel: float = 0.0          # vocal-fry roughness, 0..1
+    gravel_hz: float = 50.0      # fry pulse rate, 10..200
     # cleanup
     input_gain_db: float = 0.0
     gate_enabled: bool = True
@@ -83,6 +91,7 @@ class VoiceChain:
         self.latency = self.voice.latency
         self._dry = DelayLine(self.latency)
         self._bypass_delay = DelayLine(self.latency)
+        self._gravel = GravelModulator(fs)
 
         self._rumble = Biquad(fs, "highpass", 80.0)
         self._gate = NoiseGate(fs)
@@ -115,7 +124,9 @@ class VoiceChain:
         # Bypass still goes through a matching delay, so toggling it is an
         # honest A/B with no jump in timing.
         if s.bypass:
-            self.voice.process(x)  # keep shifter state warm
+            # Keep the shifter and gravel state running, so toggling bypass
+            # never changes their phase history.
+            self._gravel.process(self.voice.process(x), s.gravel, s.gravel_hz)
             y = self._bypass_delay.process(x)
             self._dry.process(x)
             self.output_peak = float(np.max(np.abs(y))) if len(y) else 0.0
@@ -132,7 +143,10 @@ class VoiceChain:
         v.set_formant(s.formant)
         v.set_mode(s.mode)
         v.set_robot_pitch(s.robot_hz)
-        wet = v.process(x)
+        v.set_tremor(s.tremor_hz, s.tremor_depth)
+        v.set_jitter(s.jitter)
+        v.set_breath(s.breath)
+        wet = self._gravel.process(v.process(x), s.gravel, s.gravel_hz)
         dry = self._dry.process(x)
         y = wet * s.mix + dry * (1.0 - s.mix)
 

@@ -13,11 +13,21 @@ lowered or raised voice sounding human, not like a chipmunk or a slowed tape.
 The excitation can also be replaced outright, with a fixed-pitch harmonic comb
 (robot) or flat noise (whisper). Both are still shaped by the speaker's own
 envelope, so the words stay intelligible.
+
+Character controls colour the result per frame: tremor (a slow pitch and
+loudness wobble), jitter (random pitch unsteadiness) and breath (aspiration
+noise under the speaker's envelope). Their randomness comes from the
+counter-based ``hash_uniform``, keyed on the frame count, so the C++ port
+produces the same frames whatever the block size.
 """
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
+
+from .rng import hash_uniform, hash_uniform_vec
 
 MODES = ("normal", "robot", "whisper")
 TWO_PI = 2.0 * np.pi
@@ -37,6 +47,18 @@ def _dirichlet(x: np.ndarray, n: int) -> np.ndarray:
 
 def _wrap(p: np.ndarray) -> np.ndarray:
     return p - TWO_PI * np.round(p / TWO_PI)
+
+
+def _noise_phasors(stream: int, first: int, count: int) -> np.ndarray:
+    """exp(i * 2 pi u) for counter-based uniforms u, counters first..first+count-1.
+
+    cos and sin directly: cheaper than a complex exp, and the same values.
+    """
+    ph = TWO_PI * hash_uniform_vec(stream, np.arange(first, first + count, dtype=np.int64))
+    out = np.empty(count, dtype=np.complex128)
+    out.real = np.cos(ph)
+    out.imag = np.sin(ph)
+    return out
 
 
 class SpectralVoice:
@@ -85,12 +107,24 @@ class SpectralVoice:
         half = n // 2 + 1
         self._k = np.arange(half, dtype=np.float64)
         self._expct = TWO_PI * self.hop / n
-        self._rng = np.random.default_rng()
+        # Breath noise is tilted toward the highs like real aspiration
+        # (turbulence at the glottis is weak below ~1.5 kHz).
+        fk = self._k * sample_rate / n
+        self._breath_tilt = fk * fk / (fk * fk + 1500.0 ** 2)
+        # Jitter glides to each new random target with a 25 ms time constant.
+        self._jitter_coef = math.exp(-self.hop / (0.025 * sample_rate))
+        # Noise frames are mutually incoherent, so overlap-add sums their power,
+        # not their amplitude: coherent 0.375*o vs incoherent sqrt(35/128*o).
+        self._noise_comp = 0.375 * overlap / math.sqrt(35.0 / 128.0 * overlap)
 
         self.pitch_ratio = 1.0
         self.formant_ratio = 1.0
         self.mode = "normal"
         self.robot_hz = 110.0
+        self.tremor_hz = 5.5
+        self.tremor_depth = 0.0
+        self.jitter = 0.0
+        self.breath = 0.0
         self.reset()
 
     # ---- parameters ------------------------------------------------------
@@ -109,6 +143,20 @@ class SpectralVoice:
     def set_robot_pitch(self, hz: float) -> None:
         self.robot_hz = max(20.0, float(hz))
 
+    # Character ranges match the C++ settings parser, so both agree on any input.
+    def set_tremor(self, hz: float, depth_st: float) -> None:
+        """Vibrato at ``hz``, swinging pitch +/- ``depth_st`` semitones (0 = off)."""
+        self.tremor_hz = min(max(float(hz), 0.5), 15.0)
+        self.tremor_depth = min(max(float(depth_st), 0.0), 3.0)
+
+    def set_jitter(self, amount: float) -> None:
+        """Random pitch unsteadiness, 0..1 (1 = up to +/-0.6 semitone)."""
+        self.jitter = min(max(float(amount), 0.0), 1.0)
+
+    def set_breath(self, amount: float) -> None:
+        """Share of each frame's energy turned into aspiration noise, 0..1."""
+        self.breath = min(max(float(amount), 0.0), 1.0)
+
     def reset(self) -> None:
         n, half = self.fft_size, self.fft_size // 2 + 1
         self._frame = np.zeros(n)
@@ -117,6 +165,9 @@ class SpectralVoice:
         self._out = np.zeros(self._pad)
         self._last_phase = np.zeros(half)
         self._sum_phase = np.zeros(half)
+        self._frame_index = 0  # frames since reset: the counter for every random draw
+        self._tremor_phase = 0.0
+        self._jitter_state = 0.0
 
     # ---- streaming -------------------------------------------------------
     def process(self, x: np.ndarray) -> np.ndarray:
@@ -137,10 +188,32 @@ class SpectralVoice:
         self._out = out[m:]
         return out[:m]
 
+    def _character(self, f: int) -> tuple[float, float]:
+        """This frame's pitch ratio and gain after tremor and jitter.
+
+        Depends only on the frame count, never on the audio. At neutral
+        settings the factors are 2**0 and 10**0, both exactly 1.0, so the
+        output is bit-identical to running without them.
+        """
+        sr = self.sample_rate
+        # The tremor rate wanders +/-10% frame to frame so it doesn't sound like
+        # a metronome. Its phase runs even at zero depth, so the wobble depends
+        # only on the frame count, not on when tremor was turned up.
+        rate = self.tremor_hz * (1.0 + 0.2 * (hash_uniform(1, f) - 0.5))
+        self._tremor_phase = (self._tremor_phase + TWO_PI * rate * self.hop / sr) % TWO_PI
+        s = math.sin(self._tremor_phase)
+        tremor_st = self.tremor_depth * s
+        gain = 10.0 ** (1.5 * self.tremor_depth * s / 20.0)  # real vibrato swings loudness too
+        target = self.jitter * 0.6 * (2.0 * hash_uniform(2, f) - 1.0)
+        self._jitter_state = target + (self._jitter_state - target) * self._jitter_coef
+        return self.pitch_ratio * 2.0 ** ((tremor_st + self._jitter_state) / 12.0), gain
+
     def _process_frame(self) -> np.ndarray:
         n, osamp = self.fft_size, self.overlap
         k = self._k
         half = len(k)
+        f = self._frame_index
+        r, gain = self._character(f)
 
         # analysis: magnitude + true per-bin frequency (in bins)
         spec = np.fft.rfft(self._frame * self._window)
@@ -158,38 +231,62 @@ class SpectralVoice:
         flat = mag / np.exp(log_env)
 
         # excitation: shift or replace
-        if self.mode == "normal" and abs(self.pitch_ratio - 1.0) >= 1e-9:
-            out_spec = self._shift_peaks(mag, true_freq, log_env)
-            return self._overlap_add(out_spec)
-        if self.mode == "normal":
-            # Nothing to move: keep the analysis phases (bit-exact pass-through
-            # when the formants stay put too).
-            exc = flat * np.exp(1j * phase)
-        elif self.mode == "robot":
-            f0 = self.robot_hz * self.pitch_ratio * n / self.sample_rate
-            harmonics = np.arange(1, int((half - 1) / f0) + 1) * f0
-            exc = np.zeros(half, dtype=np.complex128)
-            if len(harmonics):
-                idx = np.round(harmonics).astype(np.int64)
-                ph = _wrap(self._sum_phase[idx] + TWO_PI * harmonics / osamp)
-                exc[idx] = np.exp(1j * ph)
-        else:  # whisper
-            exc = np.exp(1j * self._rng.uniform(0, TWO_PI, half))
+        if self.mode == "normal" and abs(r - 1.0) >= 1e-9:
+            out_spec = self._shift_peaks(mag, true_freq, log_env, r)  # sets _sum_phase
+        else:
+            if self.mode == "normal":
+                # Nothing to move: keep the analysis phases (bit-exact pass-through
+                # when the formants stay put too).
+                exc = flat * np.exp(1j * phase)
+            elif self.mode == "robot":
+                f0 = self.robot_hz * r * n / self.sample_rate
+                harmonics = np.arange(1, int((half - 1) / f0) + 1) * f0
+                exc = np.zeros(half, dtype=np.complex128)
+                if len(harmonics):
+                    idx = np.round(harmonics).astype(np.int64)
+                    ph = _wrap(self._sum_phase[idx] + TWO_PI * harmonics / osamp)
+                    exc[idx] = np.exp(1j * ph)
+            else:  # whisper
+                exc = _noise_phasors(4, f * half, half)
 
-        # re-apply the (optionally shifted) envelope and resynthesise
-        env = np.interp(k / self.formant_ratio, k, log_env)
-        out_spec = exc * np.exp(env)
-        if self.mode != "normal":
-            # Replaced excitations carry no loudness of their own; match frame energy.
-            # Whisper frames are mutually incoherent, so overlap-add sums power,
-            # not amplitude: undo that shortfall (coherent 0.375*o vs sqrt(35/128*o)).
-            out_energy = float(np.vdot(out_spec, out_spec).real)
-            if out_energy > 0:
-                out_spec *= np.sqrt(float(np.dot(mag, mag)) / out_energy)
-            if self.mode == "whisper":
-                out_spec *= 0.375 * osamp / np.sqrt(35.0 / 128.0 * osamp)
-        self._sum_phase = np.angle(out_spec)
+            # re-apply the (optionally shifted) envelope and resynthesise
+            env = np.interp(k / self.formant_ratio, k, log_env)
+            out_spec = exc * np.exp(env)
+            if self.mode != "normal":
+                # Replaced excitations carry no loudness of their own; match frame energy.
+                out_energy = float(np.vdot(out_spec, out_spec).real)
+                if out_energy > 0:
+                    out_spec *= np.sqrt(float(np.dot(mag, mag)) / out_energy)
+                if self.mode == "whisper":
+                    out_spec *= self._noise_comp
+            self._sum_phase = np.angle(out_spec)
+
+        # Breath goes in after the phase memory is updated: noise phases must
+        # never be propagated into the next frame's partials.
+        if self.breath > 0 and self.mode != "whisper":
+            out_spec = self._add_breath(out_spec, log_env, f)
+        out_spec = out_spec * gain
+        self._frame_index += 1
         return self._overlap_add(out_spec)
+
+    def _add_breath(self, out_spec: np.ndarray, log_env: np.ndarray, f: int) -> np.ndarray:
+        """Trade ``breath`` of the frame's energy for envelope-shaped noise.
+
+        The noise follows the (formant-shifted) envelope, so it whispers the
+        same vowel, tilted toward the highs where aspiration lives. The frame's
+        energy is split between voice and noise rather than added to, so
+        breathiness changes the texture more than the loudness.
+        """
+        k = self._k
+        half = len(k)
+        env = np.interp(k / self.formant_ratio, k, log_env)
+        nmag = np.exp(env) * self._breath_tilt
+        e_h = float(np.vdot(out_spec, out_spec).real)
+        e_n = float(np.dot(nmag, nmag))
+        if e_h <= 0 or e_n <= 0:
+            return out_spec
+        nmag *= math.sqrt(self.breath * e_h / e_n) * self._noise_comp
+        return math.sqrt(1.0 - self.breath) * out_spec + nmag * _noise_phasors(3, f * half, half)
 
     def _overlap_add(self, out_spec: np.ndarray) -> np.ndarray:
         n, hop = self.fft_size, self.hop
@@ -213,12 +310,12 @@ class SpectralVoice:
         t = pos - i0
         return self._ktab[i0] * (1 - t) + self._ktab[i0 + 1] * t
 
-    def _shift_peaks(self, mag, true_freq, log_env) -> np.ndarray:
+    def _shift_peaks(self, mag, true_freq, log_env, r) -> np.ndarray:
         """Formant-aware pitch shift by peak resynthesis.
 
         Each spectral peak is measured as a sinusoid: exact frequency from the
         phase vocoder, complex amplitude by dividing out the window kernel.
-        It is then redrawn at precisely ``ratio`` times its frequency as an
+        It is then redrawn at precisely ``r`` times its frequency as an
         analytic window main lobe. Shifting whole bins instead leaves each lobe
         up to half a bin away from the frequency its phase encodes, and
         overlap-add turns that mismatch into audible sidebands. Phase is carried
@@ -226,7 +323,6 @@ class SpectralVoice:
         update), so partials stay coherent.
         """
         half = len(mag)
-        r = self.pitch_ratio
         inner = mag[1:-1]
         floor = mag.max() * 1e-4
         peaks = np.flatnonzero((inner > mag[:-2]) & (inner >= mag[2:]) & (inner > floor)) + 1

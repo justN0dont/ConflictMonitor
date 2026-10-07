@@ -14,6 +14,8 @@ import math
 import numpy as np
 from scipy.signal import lfilter
 
+from .rng import hash_uniform
+
 
 def db_to_lin(db: float) -> float:
     return 10.0 ** (db / 20.0)
@@ -237,6 +239,46 @@ def drive(x: np.ndarray, amount: float) -> np.ndarray:
         return x
     k = 1.0 + 19.0 * amount
     return np.tanh(k * x) / math.tanh(k) if k > 1 else x
+
+
+class GravelModulator:
+    """Vocal fry / gravel: a fast, slightly irregular train of amplitude dips.
+
+    Creaky voice is the vocal folds slapping shut in uneven pulses well below
+    the speaking pitch. Pulling the level down with a raised-cosine dip at
+    ``hz`` reproduces that rattle; ``amount`` sets how deep each dip goes. The
+    rate wanders +/-25% every 256 samples, keyed on the absolute sample index
+    through the counter-based RNG, so the result is the same for any block size
+    and in the C++ port. The phase advances even at amount 0, so the pulse
+    train depends only on elapsed time, never on when gravel was switched on.
+    """
+
+    TICK = 256  # samples per random rate step
+
+    def __init__(self, fs: float):
+        self.fs = fs
+        self._phase = 0.0
+        self._count = 0  # absolute sample index
+
+    def process(self, x: np.ndarray, amount: float, hz: float) -> np.ndarray:
+        # Same ranges as the C++ settings parser, so both agree on any input.
+        amount = min(max(float(amount), 0.0), 1.0)
+        hz = min(max(float(hz), 10.0), 200.0)
+        n = len(x)
+        if n == 0:
+            return x
+        # One draw per 256-sample tick, not per sample: a block spans only a few.
+        tick = (self._count + np.arange(n)) // self.TICK
+        first = self._count // self.TICK
+        wobble = np.array([hash_uniform(5, t) for t in range(first, int(tick[-1]) + 1)])[tick - first]
+        f = hz * (1.0 + 0.5 * (wobble - 0.5))
+        ph = self._phase + np.cumsum(2 * math.pi * f / self.fs)
+        self._phase = float(ph[-1] % (2 * math.pi))
+        self._count += n
+        if amount <= 0:
+            return x
+        m = 0.5 - 0.5 * np.cos(ph)
+        return x * (1.0 - amount * m * m)
 
 
 class _Comb:

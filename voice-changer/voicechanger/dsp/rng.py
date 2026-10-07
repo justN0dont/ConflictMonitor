@@ -23,9 +23,8 @@ _MIX2 = 0x94D049BB133111EB
 _UNIT = 2.0 ** -53  # 53 random bits -> a double in [0, 1), exactly representable
 
 # uint64 copies so the vectorised version stays in wrapping integer arithmetic
-# (a Python int operand would promote and lose the mod-2**64 behaviour).
-_STREAM64, _COUNTER64, _OFFSET64 = np.uint64(_STREAM), np.uint64(_COUNTER), np.uint64(_OFFSET)
-_MIX1_64, _MIX2_64 = np.uint64(_MIX1), np.uint64(_MIX2)
+# (with a Python int operand, older NumPy promotes to float64 and loses mod 2**64).
+_COUNTER64, _MIX1_64, _MIX2_64 = np.uint64(_COUNTER), np.uint64(_MIX1), np.uint64(_MIX2)
 _S30, _S27, _S31, _S11 = np.uint64(30), np.uint64(27), np.uint64(31), np.uint64(11)
 
 
@@ -39,11 +38,18 @@ def hash_uniform(stream: int, counter: int) -> float:
 
 
 def hash_uniform_vec(stream: int, counters) -> np.ndarray:
-    """``hash_uniform`` over an array of counters (same values, element for element)."""
-    c = np.asarray(counters).astype(np.uint64)
+    """``hash_uniform`` over an array of counters (same values, element for element).
+
+    In place on one fresh array: it runs per FFT frame on the audio thread.
+    """
+    z = np.asarray(counters).astype(np.uint64)  # astype copies, so the caller's array is safe
     with np.errstate(over="ignore"):
-        z = np.uint64(stream) * _STREAM64 + c * _COUNTER64 + _OFFSET64
-        z = (z ^ (z >> _S30)) * _MIX1_64
-        z = (z ^ (z >> _S27)) * _MIX2_64
-        z = z ^ (z >> _S31)
-    return (z >> _S11).astype(np.float64) * _UNIT
+        z *= _COUNTER64
+        z += np.uint64((stream * _STREAM + _OFFSET) & _MASK)
+        z ^= z >> _S30
+        z *= _MIX1_64
+        z ^= z >> _S27
+        z *= _MIX2_64
+        z ^= z >> _S31
+    z >>= _S11
+    return z.astype(np.float64) * _UNIT
