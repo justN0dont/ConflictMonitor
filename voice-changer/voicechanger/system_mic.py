@@ -295,12 +295,17 @@ class System:
                             "/grant", "*S-1-5-33:(OI)(CI)M"], check=False, capture_output=True)
 
     def restart_audio(self) -> None:
-        self.log.append("restart Audiosrv")
+        """Reload effect registrations. The endpoint builder caches each mic's
+        FxProperties, so restart it too, not just Windows Audio, which depends on it."""
+        self.log.append("restart AudioEndpointBuilder + Audiosrv")
         if self.dry_run or sys.platform != "win32":
             return
-        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",  # pragma: no cover
-                        "Restart-Service -Name Audiosrv -Force"], check=False, capture_output=True)
-        time.sleep(1.0)
+        script = ("Stop-Service -Name Audiosrv -Force; "  # pragma: no cover
+                  "Restart-Service -Name AudioEndpointBuilder -Force; "
+                  "Start-Service -Name Audiosrv")
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                       check=False, capture_output=True)
+        time.sleep(1.5)
 
 
 def data_dir() -> Path:

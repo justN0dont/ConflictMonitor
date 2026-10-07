@@ -80,7 +80,7 @@ def test_install_attaches_registers_and_copies(reg, system):
     assert reg.get(sm.APO_KEY, "APOInterface0")[1] == sm.IID_IAUDIOSYSTEMEFFECTS
     assert reg.get(sm.APO_KEY, "Flags")[1] == 0x0E
     assert {e.id for e in sm.list_endpoints(reg) if e.installed} == {REALTEK}
-    assert "restart Audiosrv" in system.log
+    assert any("Audiosrv" in line for line in system.log)
 
 
 def test_uninstall_restores_every_original_value_exactly(reg, system):

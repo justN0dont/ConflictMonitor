@@ -66,6 +66,9 @@ Worth knowing:
 - **"Raw" audio:** a few apps can ask Windows for unprocessed audio, which skips
   *all* effects, for example Zoom's "Original sound for musicians" or
   exclusive-mode pro-audio apps. Turn that option off in the app.
+- **Apps that already had the mic open** need to reopen it (e.g. leave and
+  rejoin the Discord call). If the voice still doesn't change after Install,
+  restart the PC once. Some audio drivers only reload their effects at boot.
 - **After big Windows or audio-driver updates**, Windows sometimes resets the
   mic's effects. If the voice stops changing, click Install again.
 - **Emergency off switch:** Sound settings → your microphone → turn off
