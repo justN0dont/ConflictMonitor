@@ -5,6 +5,7 @@
     python -m voicechanger presets         # list presets
     python -m voicechanger live --preset deeper --output "CABLE Input" --monitor "Headphones"
     python -m voicechanger file in.wav out.wav --preset robot
+    python -m voicechanger file in.wav out.wav --pitch -5 --tremor-depth 0.6 --breath 0.3
     python -m voicechanger apo list                       # Windows: microphones
     python -m voicechanger apo install --endpoint {id}    # voice-change that mic in every app
     python -m voicechanger apo uninstall                  # put everything back
@@ -21,6 +22,8 @@ from .presets import PRESETS, make_settings
 
 VOICE_FLAGS = {
     "pitch": float, "formant": float, "mode": str, "robot_hz": float, "mix": float,
+    "tremor_depth": float, "tremor_hz": float, "jitter": float, "breath": float,
+    "gravel": float, "gravel_hz": float,
     "gate_threshold_db": float, "highpass_hz": float, "lowpass_hz": float,
     "low_db": float, "mid_db": float, "high_db": float, "drive": float,
     "reverb_mix": float, "reverb_room": float, "input_gain_db": float, "output_gain_db": float,

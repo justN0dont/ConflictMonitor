@@ -22,6 +22,14 @@ SLIDERS = {
         ("robot_hz", "Robot pitch", 40, 400, 1, "Hz"),
         ("mix", "Mix (dry/wet)", 0, 1, 0.01, ""),
     ],
+    "Character": [
+        ("tremor_depth", "Tremor", 0, 2, 0.05, "st"),
+        ("tremor_hz", "Tremor rate", 2, 10, 0.1, "Hz"),
+        ("jitter", "Shakiness", 0, 1, 0.01, ""),
+        ("breath", "Breathiness", 0, 1, 0.01, ""),
+        ("gravel", "Gravel", 0, 1, 0.01, ""),
+        ("gravel_hz", "Gravel rate", 20, 120, 1, "Hz"),
+    ],
     "Tone": [
         ("highpass_hz", "High-pass", 20, 1000, 5, "Hz"),
         ("lowpass_hz", "Low-pass", 1000, 20000, 100, "Hz"),
@@ -41,6 +49,10 @@ SLIDERS = {
         ("output_gain_db", "Output gain", -24, 12, 0.5, "dB"),
     ],
 }
+
+# group: (row, column, rowspan). Character sits under Voice (both shape the
+# shifter), which keeps the window three groups wide.
+GRID = {"Voice": (0, 0, 1), "Character": (1, 0, 1), "Tone": (0, 1, 2), "Dynamics & space": (0, 2, 2)}
 
 
 class Meter(tk.Canvas):
@@ -79,7 +91,6 @@ class App:
         self.system_active = False  # voice changer installed on a mic: sliders drive it live
         self._sys_write_pending = False
         root.title("Voice Changer")
-        root.minsize(760, 560)
 
         try:
             from .audio import default_device, list_devices
@@ -91,6 +102,10 @@ class App:
             messagebox.showwarning("Audio unavailable", str(exc))
 
         self._build()
+        # Measured, not fixed: the natural height depends on the platform's
+        # fonts, and shrinking below it would cut off the bottom slider rows.
+        root.update_idletasks()
+        root.minsize(760, root.winfo_reqheight())
         self._load_preset("natural")
         self._tick()
         root.protocol("WM_DELETE_WINDOW", self._close)
@@ -113,7 +128,7 @@ class App:
             ("Monitor (hear yourself)", self.mon_var, ["(none)"] + outs),
         ]):
             ttk.Label(top, text=text).grid(row=0, column=col, sticky="w", padx=4)
-            ttk.Combobox(top, textvariable=var, values=values, width=34, state="readonly").grid(
+            ttk.Combobox(top, textvariable=var, values=values, width=28, state="readonly").grid(
                 row=1, column=col, padx=4, pady=2, sticky="ew")
             top.columnconfigure(col, weight=1)
         ttk.Label(top, text="Quality").grid(row=0, column=3, sticky="w", padx=4)
@@ -142,9 +157,10 @@ class App:
 
         body = ttk.Frame(self.root)
         body.pack(fill="x", **pad)
-        for col, (group, items) in enumerate(SLIDERS.items()):
+        for group, items in SLIDERS.items():
+            grid_row, col, span = GRID[group]
             frame = ttk.LabelFrame(body, text=group)
-            frame.grid(row=0, column=col, sticky="nsew", padx=4)
+            frame.grid(row=grid_row, column=col, rowspan=span, sticky="nsew", padx=4, pady=(4 if grid_row else 0, 0))
             body.columnconfigure(col, weight=1)
             for row, (key, label, lo, hi, res, unit) in enumerate(items):
                 self._slider(frame, row, key, label, lo, hi, res, unit)
