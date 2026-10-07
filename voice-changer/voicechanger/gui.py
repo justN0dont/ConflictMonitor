@@ -6,6 +6,7 @@ import json
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 import sys
 import threading
@@ -157,10 +158,15 @@ class App:
 
         body = ttk.Frame(self.root)
         body.pack(fill="x", **pad)
+        # One label column width for every group, so the sliders of groups
+        # stacked in a column (Voice over Character) line up.
+        font = tkfont.nametofont(ttk.Style().lookup("TLabel", "font") or "TkDefaultFont")
+        label_px = max(font.measure(item[1]) for items in SLIDERS.values() for item in items) + 8  # + padx
         for group, items in SLIDERS.items():
             grid_row, col, span = GRID[group]
             frame = ttk.LabelFrame(body, text=group)
             frame.grid(row=grid_row, column=col, rowspan=span, sticky="nsew", padx=4, pady=(4 if grid_row else 0, 0))
+            frame.columnconfigure(0, minsize=label_px)
             body.columnconfigure(col, weight=1)
             for row, (key, label, lo, hi, res, unit) in enumerate(items):
                 self._slider(frame, row, key, label, lo, hi, res, unit)
