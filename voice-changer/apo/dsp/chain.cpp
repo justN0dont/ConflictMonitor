@@ -94,12 +94,12 @@ QualitySpec quality_spec(Quality q, int sample_rate) {
     return {base, 8};
 }
 
-VoiceChain::VoiceChain(int sample_rate, Quality quality, int block_size)
+VoiceChain::VoiceChain(int sample_rate, Quality quality, int block_size, bool always_pad)
     : fs_(sample_rate),
       block_(block_size),
       quality_(quality),
       voice_(sample_rate, quality_spec(quality, sample_rate).fft_size, quality_spec(quality, sample_rate).overlap,
-             block_size),
+             block_size, always_pad),
       dry_(voice_.latency()),
       bypass_delay_(voice_.latency()),
       gravel_(sample_rate),
@@ -142,14 +142,16 @@ void VoiceChain::process(const float* in, float* out, int n, const Settings& s) 
     }
     input_peak = peak;
 
-    // Bypass runs through a matching delay so toggling it is an honest A/B.
+    // Bypass is the raw microphone (no input gain either) through a matching
+    // delay, so toggling it is an honest A/B.
     if (s.bypass) {
         // Keep the shifter and gravel state running (output discarded), so
         // toggling bypass never changes their phase history.
         voice_.process(x, wet, n);
         gravel_.process(wet, n, s.gravel, s.gravel_hz);
         dry_.process(x, dry, n);
-        bypass_delay_.process(x, wet, n);
+        for (int i = 0; i < n; i++) dry[i] = in[i];
+        bypass_delay_.process(dry, wet, n);
         peak = 0.0;
         for (int i = 0; i < n; i++) {
             out[i] = (float)wet[i];
@@ -158,7 +160,10 @@ void VoiceChain::process(const float* in, float* out, int n, const Settings& s) 
         output_peak = peak;
         return;
     }
-    bypass_delay_.process(x, dry, n);  // discard; keeps the line's contents current
+    // Discarded; keeps the line's contents current. `in` is still intact:
+    // `out` (which may alias it) is written only at the end.
+    for (int i = 0; i < n; i++) dry[i] = in[i];
+    bypass_delay_.process(dry, dry, n);
 
     rumble_.process(x, n);
     gate_.enabled = s.gate_enabled;

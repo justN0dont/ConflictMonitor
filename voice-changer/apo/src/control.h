@@ -48,12 +48,19 @@ public:
 
     // ---- audio-thread side (wait-free) ----
     bool PollSettings(vc::Settings& out, bool& active) { return slot_.ReadIfNewer(seen_seq_, out, active); }
-    vc::VoiceChain* TakePendingChain() { return pending_.exchange(nullptr, std::memory_order_acq_rel); }
-    void RetireChain(vc::VoiceChain* old) {
-        vc::VoiceChain* prev = retired_.exchange(old, std::memory_order_acq_rel);
-        // The settings thread only builds a new chain once `retired_` is empty,
-        // so `prev` is always null here. Never free on the audio thread.
-        (void)prev;
+    // Swaps in a chain the settings thread built and hands the old one back
+    // through `retired_`, for the settings thread to free (never free on the
+    // audio thread). Only while `retired_` is empty, so nothing parked there
+    // is ever overwritten (and leaked). `retired_` is filled before `pending_`
+    // is cleared: the settings thread builds only when it sees both empty, so
+    // it can never catch a swap halfway and build a second chain.
+    void AdoptPendingChain(vc::VoiceChain*& chain) {
+        if (retired_.load(std::memory_order_acquire) != nullptr) return;
+        vc::VoiceChain* fresh = pending_.load(std::memory_order_acquire);
+        if (!fresh) return;
+        retired_.store(chain, std::memory_order_release);
+        pending_.store(nullptr, std::memory_order_release);
+        chain = fresh;
     }
     void ReportBlock(uint32_t frames, float in_peak, float out_peak, int latency);
 

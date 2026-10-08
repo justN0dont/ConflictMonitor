@@ -30,12 +30,13 @@ std::complex<double> dirichlet(double x, int n) {
 }
 }  // namespace
 
-SpectralVoice::SpectralVoice(int sample_rate, int fft_size, int overlap, int block_size, double lifter_seconds)
+SpectralVoice::SpectralVoice(int sample_rate, int fft_size, int overlap, int block_size, bool always_pad,
+                             double lifter_seconds)
     : sr_(sample_rate), n_(fft_size), overlap_(overlap), fft_(fft_size) {
     if (fft_size % overlap) throw std::invalid_argument("fft_size must be divisible by overlap");
     hop_ = n_ / overlap_;
     half_ = n_ / 2 + 1;
-    pad_ = (block_size > 0 && block_size % hop_ == 0) ? 0 : hop_ - 1;
+    pad_ = (block_size > 0 && block_size % hop_ == 0 && !always_pad) ? 0 : hop_ - 1;
     latency_ = n_ - hop_ + pad_;
     scale_ = 1.0 / (0.375 * overlap_);
     expct_ = kTwoPi * hop_ / n_;
@@ -270,7 +271,10 @@ void SpectralVoice::process_frame(double* out_hop) {
             if (mode_ == Mode::Whisper) g *= noise_comp_;
             for (int k = 0; k < half; k++) spec_out_[k] *= g;
         }
-        for (int k = 0; k < half; k++) sum_phase_[k] = std::arg(spec_out_[k]);
+        // Empty bins get phase 0, not the arg of a signed zero (see spectral.py):
+        // silence scales bins to +-0, and arg(-0-0i) = -pi would be carried
+        // into every later frame, differently from numpy.
+        for (int k = 0; k < half; k++) sum_phase_[k] = spec_out_[k] == cd(0, 0) ? 0.0 : std::arg(spec_out_[k]);
     }
 
     // Breath goes in after the phase memory is updated: noise phases must

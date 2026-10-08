@@ -68,6 +68,8 @@ class SpectralVoice:
     of the hop, no extra buffering is needed and the delay is exactly
     ``fft_size - hop``. Otherwise ``hop - 1`` samples of padding are added so
     output is always available. ``latency`` reports the total either way.
+    ``always_pad`` adds the padding regardless, for callers that promise a
+    maximum block length but may also deliver shorter blocks.
     """
 
     def __init__(
@@ -76,6 +78,7 @@ class SpectralVoice:
         fft_size: int = 1024,
         overlap: int = 8,
         block_size: int | None = None,
+        always_pad: bool = False,
         lifter_seconds: float = 0.0012,
     ) -> None:
         if fft_size & (fft_size - 1):
@@ -86,7 +89,7 @@ class SpectralVoice:
         self.fft_size = n = fft_size
         self.overlap = overlap
         self.hop = n // overlap
-        pad = 0 if block_size and block_size % self.hop == 0 else self.hop - 1
+        pad = 0 if block_size and block_size % self.hop == 0 and not always_pad else self.hop - 1
         self.latency = n - self.hop + pad
         self._pad = pad
 
@@ -259,7 +262,11 @@ class SpectralVoice:
                     out_spec *= np.sqrt(float(np.dot(mag, mag)) / out_energy)
                 if self.mode == "whisper":
                     out_spec *= self._noise_comp
-            self._sum_phase = np.angle(out_spec)
+            # Empty bins get phase 0, not the angle of a signed zero: silence
+            # scales bins to +-0 in a way that depends on how the multiply is
+            # done (numpy's complex product vs C++'s per-component one), and
+            # angle(-0-0j) = -pi would be carried into every later frame.
+            self._sum_phase = np.where(out_spec != 0, np.angle(out_spec), 0.0)
 
         # Breath goes in after the phase memory is updated: noise phases must
         # never be propagated into the next frame's partials.

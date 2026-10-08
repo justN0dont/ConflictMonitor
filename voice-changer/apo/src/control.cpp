@@ -32,8 +32,14 @@ std::wstring DataDir() {
 }
 
 void Log(const char* fmt, ...) {
-    // Never called from the audio thread.
-    const std::wstring path = DataDir() + L"\\apo.log";
+    // Never called from the audio thread. Never throws either: it runs in
+    // catch blocks whose whole point is that nothing escapes.
+    std::wstring path;
+    try {
+        path = DataDir() + L"\\apo.log";
+    } catch (...) {
+        return;
+    }
     WIN32_FILE_ATTRIBUTE_DATA a;
     if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a) && a.nFileSizeLow > 256 * 1024) {
         DeleteFileW(path.c_str());  // keep it small
@@ -193,36 +199,49 @@ void Controller::WriteStatus() {
 
 void Controller::Run() {
     uint32_t ticks = 0;
+    bool failing = false;
     while (WaitForSingleObject(stop_event_, 100) == WAIT_TIMEOUT) {
-        // Free whatever the audio thread swapped out.
-        delete retired_.exchange(nullptr, std::memory_order_acq_rel);
+        // Nothing may escape this thread: std::terminate would take down
+        // audiodg.exe and all system audio. What can throw here (strings,
+        // file buffers, parsing) only fails when memory runs out, so skip the
+        // tick and try again on the next.
+        try {
+            // Free whatever the audio thread swapped out.
+            delete retired_.exchange(nullptr, std::memory_order_acq_rel);
 
-        std::string text;
-        uint64_t stamp = 0;
-        const bool present = ReadSettingsFile(text, stamp);
-        if (!present && file_stamp_ != 0) {
-            file_stamp_ = 0;
-            slot_.Publish(vc::Settings(), false);
-            Log("settings file removed: pass-through");
-        } else if (present && stamp != file_stamp_) {
-            file_stamp_ = stamp;
-            const vc::Settings s = vc::parse_settings(text);
-            desired_quality_ = s.quality;
-            slot_.Publish(s, true);
-        }
-        // A quality change needs a differently sized chain. Build it here,
-        // never on the audio thread, and only once the previous swap has been
-        // handed back, so nothing is ever freed in real time. Retried each tick.
-        if (desired_quality_ != built_quality_ && pending_.load() == nullptr && retired_.load() == nullptr) {
-            try {
-                pending_.store(new vc::VoiceChain(sample_rate_, desired_quality_, max_block_), std::memory_order_release);
-                built_quality_ = desired_quality_;
-            } catch (...) {
-                Log("could not build chain for new quality");
-                desired_quality_ = built_quality_;
+            std::string text;
+            uint64_t stamp = 0;
+            const bool present = ReadSettingsFile(text, stamp);
+            if (!present && file_stamp_ != 0) {
+                file_stamp_ = 0;
+                slot_.Publish(vc::Settings(), false);
+                Log("settings file removed: pass-through");
+            } else if (present && stamp != file_stamp_) {
+                const vc::Settings s = vc::parse_settings(text);
+                desired_quality_ = s.quality;
+                slot_.Publish(s, true);
+                file_stamp_ = stamp;  // last, so a tick that throws reads the file again
             }
+            // A quality change needs a differently sized chain. Build it here,
+            // never on the audio thread, and only once both handoff slots are
+            // empty (see AdoptPendingChain), so nothing is ever freed in real
+            // time. Retried each tick.
+            if (desired_quality_ != built_quality_ && pending_.load() == nullptr && retired_.load() == nullptr) {
+                try {
+                    pending_.store(new vc::VoiceChain(sample_rate_, desired_quality_, max_block_, /*always_pad=*/true),
+                                   std::memory_order_release);
+                    built_quality_ = desired_quality_;
+                } catch (...) {
+                    Log("could not build chain for new quality");
+                    desired_quality_ = built_quality_;
+                }
+            }
+            if (++ticks % 10 == 0) WriteStatus();
+            failing = false;
+        } catch (...) {
+            if (!failing) Log("settings thread: tick failed (out of memory?); retrying");
+            failing = true;
         }
-        if (++ticks % 10 == 0) WriteStatus();
     }
 }
 

@@ -40,10 +40,10 @@ def settings_ini(settings, quality: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run_cpp(tmp_path, settings, quality, x, block, alt=None, period=0):
+def run_cpp(tmp_path, settings, quality, x, block, alt=None, period=0, sr=SR):
     (tmp_path / "s.ini").write_text(settings_ini(settings, quality))
     x.astype("<f4").tofile(tmp_path / "in.f32")
-    cmd = [str(CLI), str(SR), str(block), str(tmp_path / "s.ini"), str(tmp_path / "in.f32"), str(tmp_path / "out.f32")]
+    cmd = [str(CLI), str(sr), str(block), str(tmp_path / "s.ini"), str(tmp_path / "in.f32"), str(tmp_path / "out.f32")]
     if alt is not None:
         (tmp_path / "alt.ini").write_text(settings_ini(alt, quality))
         cmd += [str(tmp_path / "alt.ini"), str(period)]
@@ -54,9 +54,9 @@ def run_cpp(tmp_path, settings, quality, x, block, alt=None, period=0):
     return np.fromfile(tmp_path / "out.f32", "<f4").astype(np.float64)
 
 
-def run_py(settings, quality, x, block, alt=None, period=0):
+def run_py(settings, quality, x, block, alt=None, period=0, sr=SR):
     """Blocks alternate between ``settings`` and ``alt`` every ``period`` blocks, like dsp_cli."""
-    chain = VoiceChain(SR, quality, settings)
+    chain = VoiceChain(sr, quality, settings)
     assert chain.block_size == block
     out = []
     for b, i in enumerate(range(0, len(x) - block + 1, block)):
@@ -65,10 +65,10 @@ def run_py(settings, quality, x, block, alt=None, period=0):
     return np.concatenate(out)
 
 
-def assert_match(tmp_path, settings, quality, x, label, alt=None, period=0):
+def assert_match(tmp_path, settings, quality, x, label, alt=None, period=0, sr=SR):
     block = QUALITY[quality][2]
-    py = run_py(settings, quality, x, block, alt, period)
-    cpp = run_cpp(tmp_path, settings, quality, x, block, alt, period)[:len(py)]
+    py = run_py(settings, quality, x, block, alt, period, sr)
+    cpp = run_cpp(tmp_path, settings, quality, x, block, alt, period, sr)[:len(py)]
     peak = np.max(np.abs(py))
     assert np.std(py) > 1e-4, f"{label}: silent output proves nothing"
     err = np.max(np.abs(py - cpp))
@@ -104,6 +104,16 @@ def test_cpp_matches_python(tmp_path, preset):
 def test_cpp_matches_python_every_quality(tmp_path, quality, preset):
     x = voice_like(f0=180, seconds=1.0).astype(np.float32).astype(np.float64)
     assert_match(tmp_path, make_settings(preset), quality, x, preset)
+
+
+# 44.1 kHz uses the 48 kHz sizes; 96 kHz doubles the FFT (quality_spec), as
+# the system effect does on a 96 kHz microphone.
+@pytest.mark.parametrize("sr", [44100, 96000])
+@pytest.mark.parametrize("quality", list(QUALITY))
+@pytest.mark.parametrize("preset", ["deeper", "old_lady"])
+def test_cpp_matches_python_at_other_rates(tmp_path, sr, quality, preset):
+    x = voice_like(f0=140, seconds=1.0, sr=sr).astype(np.float32).astype(np.float64)
+    assert_match(tmp_path, make_settings(preset), quality, x, f"{preset} at {sr} Hz", sr=sr)
 
 
 CHARACTER = {
@@ -142,6 +152,8 @@ LIVE = {
                            bypass=True)),
     "rates-change": (dict(mode="robot", tremor_depth=2.0, tremor_hz=3.0, gravel=1.0, gravel_hz=30.0),
                      dict(mode="robot", tremor_depth=2.0, tremor_hz=12.0, gravel=1.0, gravel_hz=170.0)),
+    # Bypass is the raw microphone: the input gain applies only to the effect.
+    "bypass-toggle-gain": (dict(pitch=-3, input_gain_db=9.0), dict(pitch=-3, input_gain_db=9.0, bypass=True)),
 }
 
 
@@ -151,6 +163,25 @@ def test_cpp_matches_python_with_live_changes(tmp_path, case, quality):
     x = voice_like(f0=150, seconds=1.5).astype(np.float32).astype(np.float64)
     a, b = LIVE[case]
     assert_match(tmp_path, Settings(**a), quality, x, case, alt=Settings(**b), period=3)
+
+
+# Exact digital silence (a muted mic, BUFFER_SILENT) scales every bin to a
+# signed zero; the phase memory must not depend on which sign each language
+# ends up with, or robot harmonics come out with different phases ever after.
+@pytest.mark.parametrize("quality", list(QUALITY))
+def test_cpp_matches_python_robot_after_digital_silence(tmp_path, quality):
+    x = np.concatenate((np.zeros(SR // 4), voice_like(f0=150, seconds=0.75)))
+    assert_match(tmp_path, Settings(mode="robot"), quality, x.astype(np.float32).astype(np.float64),
+                 "robot after silence")
+
+
+@pytest.mark.parametrize("quality", list(QUALITY))
+def test_cpp_matches_python_whisper_then_robot_across_silence(tmp_path, quality):
+    period = 12  # blocks: whisper through the silence, then robot once the voice starts
+    silence = np.zeros(period * QUALITY[quality][2])
+    x = np.concatenate((silence, voice_like(f0=150, seconds=1.0))).astype(np.float32).astype(np.float64)
+    assert_match(tmp_path, Settings(mode="whisper"), quality, x, "whisper -> robot", alt=Settings(mode="robot"),
+                 period=period)
 
 
 def random_settings(rng: np.random.Generator, mode: str) -> Settings:

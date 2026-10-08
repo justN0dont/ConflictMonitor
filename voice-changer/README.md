@@ -24,7 +24,8 @@ What makes it sound professional rather than like a toy:
 - **Character controls** (tremor, shakiness, breathiness, gravel) add the cues
   that make a voice sound old, rough or eerie, which a pitch shift alone can't.
 - Loudness stays steady whatever the shift.
-- Bypass is delay-matched, so A/B comparison is honest.
+- Bypass is the raw mic (input gain off too), delay-matched, so A/B comparison
+  is honest.
 - Monitor output, WAV recording, offline file rendering, saveable settings.
 
 ## Quick start (Windows)
@@ -75,6 +76,9 @@ Worth knowing:
   mic's effects. If the voice stops changing, click Install again.
 - **Emergency off switch:** Sound settings → your microphone → turn off
   *Audio enhancements*. Or run `python -m voicechanger apo uninstall` from the folder.
+- **Sample rates** up to 192 kHz are processed. Above that (a mic set to
+  384 kHz in its Advanced properties) the effect can't keep up, so the audio
+  passes through unchanged and the log says so.
 - The status line shows which apps are currently using the changed mic. A
   diagnostic log is in `%ProgramData%\VoiceChanger\apo.log`.
 
@@ -231,17 +235,18 @@ gravel pulses at its rate whatever the block size.
 It also checks that the C++ code inside the Windows effect matches the Python
 reference sample for sample (within 1e-4). That covers every preset, each
 character control alone and combined (including out-of-range values, which
-both sides must clamp alike), settings changing mid-stream, and a randomized
-fuzz set that sweeps every control across its range in all three modes and
-quality tiers. Finally, it checks that install/uninstall restores the registry
-exactly across several kinds of mic.
+both sides must clamp alike), settings changing mid-stream, exact digital
+silence, 44.1 and 96 kHz, and a randomized fuzz set that sweeps every control
+across its range in all three modes and quality tiers. Finally, it checks that
+install/uninstall restores the registry exactly across several kinds of mic.
 
 On Windows, CI also builds the APO with MSVC and runs `apo_harness.exe`, which
 loads the DLL the way the audio engine does. It negotiates formats, processes
 audio and checks the pitch, applies live settings changes (including the
 character controls, checking that tremor swings the pitch at its rate), swaps
-quality mid-stream, falls back to pass-through when the settings are removed,
-and unloads.
+quality mid-stream, stays cheap through seconds of silence, keeps wet and dry
+aligned across a partial period, passes 384 kHz through untouched, falls back
+to pass-through when the settings are removed, and unloads.
 
 ### Building the APO yourself
 

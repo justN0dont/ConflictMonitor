@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from voicechanger.chain import QUALITY, Settings, VoiceChain
+from voicechanger.chain import QUALITY, Settings, VoiceChain, quality_spec
 from voicechanger.dsp.effects import Biquad, Compressor, Limiter, NoiseGate, Reverb, lin_to_db
 from voicechanger.dsp.spectral import SpectralVoice
 from voicechanger.presets import PRESETS, apply_preset, make_settings
@@ -73,6 +73,21 @@ def test_odd_block_sizes_still_line_up():
     y = stream(v, x, block=100)
     L = v.latency
     assert np.max(np.abs(y[L + 10000:] - x[10000:len(x) - L])) < 1e-6
+
+
+def test_always_pad_takes_a_short_block_without_losing_alignment():
+    """The APO's periods are whole hops, but the engine can deliver a partial one."""
+    x = voice_like(seconds=1.0)
+    sizes = [512] * 40 + [100] + [512] * 50
+    with pytest.raises(ValueError):  # without the padding a short block has no output ready
+        SpectralVoice(SR, fft_size=2048, block_size=512).process(x[:100])
+    v = SpectralVoice(SR, fft_size=2048, block_size=512, always_pad=True)
+    assert v.latency == 2048 - 1
+    edges = np.cumsum([0] + sizes)
+    y = np.concatenate([v.process(x[a:b]) for a, b in zip(edges, edges[1:])])
+    L = v.latency
+    assert np.max(np.abs(y[L + 10000:] - x[10000:len(y) - L])) < 1e-6
+    assert VoiceChain(SR, "balanced", always_pad=True).latency == v.latency
 
 
 @pytest.mark.parametrize("semis", [-12, -5, 3, 7, 12])
@@ -147,6 +162,17 @@ def test_silence_stays_silent_and_finite():
     assert np.all(np.isfinite(y)) and np.max(np.abs(y)) < 1e-6
 
 
+@pytest.mark.parametrize("mode", ["normal", "robot", "whisper"])
+def test_digital_silence_leaves_the_phase_memory_at_zero(mode):
+    """Silence scales bins to signed zeros; their angle (0 or +-pi, depending
+    on how the multiply rounds) must not end up in the phase memory."""
+    v = SpectralVoice(SR, block_size=256)
+    v.set_mode(mode)
+    stream(v, voice_like(seconds=0.32))  # whole blocks
+    stream(v, np.zeros(256 * 48))
+    assert np.all(v._sum_phase == 0.0)
+
+
 # ---- effects --------------------------------------------------------------
 
 def test_highpass_removes_rumble():
@@ -212,12 +238,33 @@ def test_chain_is_fast_enough_for_real_time(quality):
     assert rt < 0.5, f"{quality} used {rt:.0%} of real time"
 
 
-def test_bypass_is_delay_matched_dry():
-    s = Settings(bypass=True)
+@pytest.mark.parametrize("input_gain_db", [0.0, 12.0, -20.0])
+def test_bypass_is_delay_matched_dry(input_gain_db):
+    """Bypass is the raw microphone, without the input gain, for an honest A/B
+    (and so the gain can't push it past full scale with the limiter out)."""
+    s = Settings(bypass=True, input_gain_db=input_gain_db)
     chain = VoiceChain(SR, "balanced", s)
     x = voice_like(seconds=1.0)
     y = chain.process_buffer(x)
     assert np.max(np.abs(y - x.astype(np.float32))) < 1e-6
+
+
+@pytest.mark.parametrize("sr,quality,fft", [
+    (44100, "balanced", 2048), (48000, "low-latency", 1024), (72000, "balanced", 2048),
+    (88200, "balanced", 4096), (96000, "low-latency", 2048), (96000, "high-quality", 8192),
+    (192000, "balanced", 8192), (384000, "high-quality", 16384),
+])
+def test_fft_size_follows_the_sample_rate_like_the_apo(sr, quality, fft):
+    """Same bin width at 96 kHz as at 48 kHz, so a file renders like the live effect."""
+    assert quality_spec(quality, sr)[0] == fft
+    chain = VoiceChain(sr, quality)
+    assert chain.voice.fft_size == fft and chain.block_size == QUALITY[quality][2]
+
+
+def test_pitch_shift_at_96_khz():
+    sr = 96000
+    y = VoiceChain(sr, "balanced", Settings(pitch=-5)).process_buffer(voice_like(f0=110, seconds=1.0, sr=sr))
+    assert abs(lowest_harmonic_hz(y, sr) - 110 * 2 ** (-5 / 12)) < 3
 
 
 def test_settings_change_live_and_preset_applies_in_place():

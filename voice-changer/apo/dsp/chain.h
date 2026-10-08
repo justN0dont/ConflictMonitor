@@ -49,8 +49,9 @@ QualitySpec quality_spec(Quality q, int sample_rate);
 class VoiceChain {
 public:
     // block_size: the largest block process() will see (fixes the shifter's
-    // padding; see SpectralVoice).
-    VoiceChain(int sample_rate, Quality quality, int block_size);
+    // padding; see SpectralVoice). always_pad: blocks may also be shorter,
+    // as the audio engine's can be.
+    VoiceChain(int sample_rate, Quality quality, int block_size, bool always_pad = false);
 
     // Mono in -> mono out, n <= block_size. `in` and `out` may alias.
     void process(const float* in, float* out, int n, const Settings& s);

@@ -91,7 +91,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "file":
         from .fileio import process_file
-        secs = process_file(args.src, args.dst, _settings_from(args), args.quality or "high-quality")
+        s = _settings_from(args)
+        # Settings saved while A/B-ing would otherwise write the input back
+        # out unchanged; the GUI's Process WAV ignores bypass the same way.
+        s.bypass = False
+        secs = process_file(args.src, args.dst, s, args.quality or "high-quality")
         print(f"wrote {args.dst} ({secs:.1f} s)")
         return 0
 

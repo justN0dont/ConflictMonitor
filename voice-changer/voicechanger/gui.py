@@ -103,10 +103,11 @@ class App:
             messagebox.showwarning("Audio unavailable", str(exc))
 
         self._build()
-        # Measured, not fixed: the natural height depends on the platform's
-        # fonts, and shrinking below it would cut off the bottom slider rows.
+        # Measured, not fixed: the natural size depends on the platform's
+        # fonts. Any shorter cuts off the bottom slider rows; any narrower
+        # squeezes the sliders to stubs and clips buttons and checkboxes.
         root.update_idletasks()
-        root.minsize(760, root.winfo_reqheight())
+        root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
         self._load_preset("natural")
         self._tick()
         root.protocol("WM_DELETE_WINDOW", self._close)

@@ -31,6 +31,23 @@ QUALITY = {
 }
 
 
+def quality_spec(quality: str, sample_rate: int) -> tuple[int, int, int]:
+    """(fft_size, overlap, block_size) for ``quality`` at ``sample_rate``.
+
+    The QUALITY sizes are for 44.1/48 kHz. Above 72 kHz the FFT doubles per
+    octave (up to 16384 points) to keep about the same bin width, so the
+    lowest voice that shifts cleanly doesn't depend on the rate. Same rule as
+    quality_spec in apo/dsp/chain.cpp, so a 96 kHz file renders like the live
+    system effect.
+    """
+    fft_size, overlap, block = QUALITY[quality]
+    rate = int(sample_rate)
+    while rate > 72000 and fft_size < 16384:
+        fft_size *= 2
+        rate //= 2
+    return fft_size, overlap, block
+
+
 @dataclass
 class Settings:
     # voice
@@ -80,14 +97,17 @@ class Settings:
 
 
 class VoiceChain:
-    def __init__(self, sample_rate: int, quality: str = "balanced", settings: Settings | None = None):
-        fft_size, overlap, block = QUALITY[quality]
+    def __init__(self, sample_rate: int, quality: str = "balanced", settings: Settings | None = None,
+                 always_pad: bool = False):
+        """``always_pad``: blocks may be shorter than ``block_size`` (see SpectralVoice)."""
+        fft_size, overlap, block = quality_spec(quality, sample_rate)
         self.sample_rate = fs = sample_rate
         self.quality = quality
         self.block_size = block
         self.settings = settings or Settings()
 
-        self.voice = SpectralVoice(fs, fft_size=fft_size, overlap=overlap, block_size=block)
+        self.voice = SpectralVoice(fs, fft_size=fft_size, overlap=overlap, block_size=block,
+                                   always_pad=always_pad)
         self.latency = self.voice.latency
         self._dry = DelayLine(self.latency)
         self._bypass_delay = DelayLine(self.latency)
@@ -118,20 +138,21 @@ class VoiceChain:
 
     def process(self, block: np.ndarray) -> np.ndarray:
         s = self.settings
-        x = np.asarray(block, dtype=np.float64) * db_to_lin(s.input_gain_db)
+        raw = np.asarray(block, dtype=np.float64)
+        x = raw * db_to_lin(s.input_gain_db)
         self.input_peak = float(np.max(np.abs(x))) if len(x) else 0.0
 
-        # Bypass still goes through a matching delay, so toggling it is an
-        # honest A/B with no jump in timing.
+        # Bypass is the raw microphone (no input gain either) through a
+        # matching delay, so toggling it is an honest A/B with no jump in timing.
         if s.bypass:
             # Keep the shifter and gravel state running, so toggling bypass
             # never changes their phase history.
             self._gravel.process(self.voice.process(x), s.gravel, s.gravel_hz)
-            y = self._bypass_delay.process(x)
+            y = self._bypass_delay.process(raw)
             self._dry.process(x)
             self.output_peak = float(np.max(np.abs(y))) if len(y) else 0.0
             return y.astype(np.float32)
-        self._bypass_delay.process(x)
+        self._bypass_delay.process(raw)
 
         x = self._rumble.process(x)
         self._gate.enabled = s.gate_enabled

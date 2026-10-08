@@ -12,6 +12,11 @@
 #include "../src/apo_headers.h"
 #include "../src/media_type.h"
 
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#include <xmmintrin.h>
+#define VC_HAVE_MXCSR 1
+#endif
+
 namespace {
 
 int g_failures = 0;
@@ -121,6 +126,17 @@ double Rms(const std::vector<float>& y) {
     return std::sqrt(s / (y.empty() ? 1 : y.size()));
 }
 
+// RMS of the last `n` samples.
+double TailRms(const std::vector<float>& y, size_t n) {
+    return Rms(std::vector<float>(y.end() - (ptrdiff_t)std::min(n, y.size()), y.end()));
+}
+
+std::vector<float> Sine(double hz, double amp, size_t n, double rate) {
+    std::vector<float> x(n);
+    for (size_t i = 0; i < n; i++) x[i] = (float)(amp * std::sin(2 * kPi * hz * (double)i / rate));
+    return x;
+}
+
 struct Apo {
     IAudioProcessingObject* apo = nullptr;
     IAudioProcessingObjectRT* rt = nullptr;
@@ -153,6 +169,34 @@ std::vector<float> Run(Apo& a, const std::vector<float>& x, bool* channels_equal
     }
     if (channels_equal) *channels_equal = equal;
     return out;
+}
+
+// One APOProcess call of `frames` frames: mono x (duplicated to every
+// channel), or a BUFFER_SILENT buffer when x is null. Appends the left channel
+// to `out`; returns how long the call took, in milliseconds.
+double Call(Apo& a, const float* x, UINT32 frames, std::vector<float>& out) {
+    std::vector<float> ib((size_t)frames * kChannels), ob((size_t)frames * kChannels);
+    for (UINT32 i = 0; i < frames; i++)
+        for (UINT32 c = 0; c < kChannels; c++) ib[i * kChannels + c] = x ? x[i] : 123.0f;
+    APO_CONNECTION_PROPERTY in{(UINT_PTR)ib.data(), frames, x ? BUFFER_VALID : BUFFER_SILENT, 0};
+    APO_CONNECTION_PROPERTY o{(UINT_PTR)ob.data(), 0, BUFFER_INVALID, 0};
+    APO_CONNECTION_PROPERTY* pin = &in;
+    APO_CONNECTION_PROPERTY* pout = &o;
+    LARGE_INTEGER freq, t0, t1;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    a.rt->APOProcess(1, &pin, 1, &pout);
+    QueryPerformanceCounter(&t1);
+    for (UINT32 i = 0; i < frames; i++) out.push_back(ob[i * kChannels]);
+    return 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
+}
+
+HRESULT Lock(Apo& a, IAudioMediaType* format, UINT32 max_frames) {
+    APO_CONNECTION_DESCRIPTOR din{APO_CONNECTION_BUFFER_TYPE_EXTERNAL, 0, max_frames, format, 0};
+    APO_CONNECTION_DESCRIPTOR dout = din;
+    APO_CONNECTION_DESCRIPTOR* pdin = &din;
+    APO_CONNECTION_DESCRIPTOR* pdout = &dout;
+    return a.cfg->LockForProcess(1, &pdin, 1, &pdout);
 }
 
 }  // namespace
@@ -313,11 +357,98 @@ int wmain(int argc, wchar_t** argv) {
     for (float v : y) finite = finite && std::isfinite(v) && std::fabs(v) < 1.0f;
     CHECK(finite && flags == BUFFER_VALID, "BUFFER_SILENT input treated as silence");
 
+    // ---- seconds of digital silence after speech ----
+    // Filter, shifter and reverb state decays into subnormal numbers, which
+    // the CPU handles in microcode unless the APO flushes them to zero.
+    // Without that, a burst of calls took most of their 10 ms period, and
+    // silence went on costing more than speech.
+    WriteSettings("quality=high-quality\npitch=5\nreverb_mix=1\nreverb_room=1\n");
+    Sleep(400);
+    Run(a, Voice(150, 0.2, phase), nullptr, nullptr);  // picks up the new chain
+    Sleep(300);
+    x = Voice(150, 2.0, phase);
+    std::vector<double> speech_ms, silence_ms;
+    y.clear();
+    for (size_t pos = 0; pos + kPeriod <= x.size(); pos += kPeriod) speech_ms.push_back(Call(a, &x[pos], kPeriod, y));
+    y.clear();
+    for (int i = 0; i < 800; i++) silence_ms.push_back(Call(a, nullptr, kPeriod, y));  // 8 s
+    finite = true;
+    for (float v : y) finite = finite && std::isfinite(v) && std::fabs(v) < 1.0f;
+    std::sort(speech_ms.begin(), speech_ms.end());
+    std::sort(silence_ms.begin(), silence_ms.end());
+    const double speech_med = speech_ms[speech_ms.size() / 2], silence_med = silence_ms[silence_ms.size() / 2];
+    // Generous: a period is 10 ms, and a call normally takes well under 1.
+    const double budget = std::fmax(3.0, 3.0 * speech_med);
+    const int over = (int)std::count_if(silence_ms.begin(), silence_ms.end(), [&](double ms) { return ms > budget; });
+    CHECK(finite, "8 s of BUFFER_SILENT after speech: output finite");
+    // A couple are allowed for the OS preempting the harness.
+    CHECK(over <= 2, "silence never gets expensive: %d of %d calls over %.1f ms (worst %.2f ms)", over,
+          (int)silence_ms.size(), budget, silence_ms.back());
+    CHECK(silence_med < 1.3 * speech_med + 0.05, "silence costs no more than speech: median %.2f ms vs %.2f ms",
+          silence_med, speech_med);
+
+#ifdef VC_HAVE_MXCSR
+    // MXCSR belongs to the caller: whatever the APO sets must be undone on
+    // every return path, the early one included.
+    const unsigned int csr = _mm_getcsr() & ~0x8040u;  // FTZ and DAZ off, as on a fresh thread
+    _mm_setcsr(csr);
+    y.clear();
+    Call(a, &x[0], kPeriod, y);
+    const unsigned int after_call = _mm_getcsr();
+    a.rt->APOProcess(0, nullptr, 0, nullptr);  // bad arguments: returns at once
+    const unsigned int after_early = _mm_getcsr();
+    CHECK(after_call == csr && after_early == csr, "MXCSR restored after APOProcess (0x%04x -> 0x%04x, 0x%04x)", csr,
+          after_call, after_early);
+#endif
+
     // ---- status heartbeat for the GUI ----
     WIN32_FIND_DATAW fd;
     HANDLE fh = FindFirstFileW((g_dir + L"\\apo-status-*.ini").c_str(), &fd);
     CHECK(fh != INVALID_HANDLE_VALUE, "status heartbeat file written");
     if (fh != INVALID_HANDLE_VALUE) FindClose(fh);
+
+    // ---- a short call when the period is a whole number of hops ----
+    // With 512-frame periods the shifter needs no padding for full periods,
+    // but the engine can also deliver a partial one. Without padding the wet
+    // path would then fall behind the dry path for good: with mix 0.5 and a
+    // 1200 Hz tone, 100 samples is half a cycle, and the two would cancel.
+    CHECK(SUCCEEDED(a.cfg->UnlockForProcess()), "unlock to change the period");
+    WriteSettings("quality=balanced\nmix=0.5\ngate_enabled=0\ncomp_enabled=0\n");
+    CHECK(SUCCEEDED(Lock(a, f48, 512)), "LockForProcess with 512-frame periods");
+    x = Sine(1200.0, 0.3, kRate * 2 + 100, kRate);
+    y.clear();
+    size_t at = 0;
+    for (; at + 512 <= kRate; at += 512) Call(a, &x[at], 512, y);
+    const double before_short = TailRms(y, kRate / 4);
+    Call(a, &x[at], 100, y);
+    at += 100;
+    for (; at + 512 <= x.size(); at += 512) Call(a, &x[at], 512, y);
+    const double after_short = TailRms(y, kRate / 4);
+    CHECK(before_short > 0.19 && std::fabs(after_short / before_short - 1.0) < 0.05,
+          "100-frame call keeps wet and dry aligned: rms %.4f before, %.4f after (want ~0.212)", before_short,
+          after_short);
+
+    // ---- above 192 kHz: accepted, but passed through untouched ----
+    CHECK(SUCCEEDED(a.cfg->UnlockForProcess()), "unlock to change the rate");
+    WriteSettings("quality=balanced\npitch=12\n");
+    FloatMediaType* f384 = FloatMediaType::Create(384000, kChannels);
+    sup = nullptr;
+    CHECK(a.apo->IsInputFormatSupported(nullptr, f384, &sup) == S_OK && sup == f384, "accepts float32 stereo 384 kHz");
+    if (sup) sup->Release();
+    CHECK(SUCCEEDED(Lock(a, f384, 3840)), "LockForProcess at 384 kHz");
+    x = Sine(1000.0, 0.3, 3840 * 20, 384000.0);
+    y.clear();
+    for (size_t pos = 0; pos < x.size(); pos += 3840) Call(a, &x[pos], 3840, y);
+    maxdiff = 0.0;
+    for (size_t i = 0; i < y.size(); i++) maxdiff = std::fmax(maxdiff, std::fabs(y[i] - x[i]));
+    lat = -1;
+    a.apo->GetLatency(&lat);
+    CHECK(maxdiff == 0.0 && lat == 0, "384 kHz: exact pass-through (max diff %g), zero latency", maxdiff);
+    CHECK(SUCCEEDED(a.cfg->UnlockForProcess()), "unlock at 384 kHz");
+    f384->Release();
+
+    CHECK(SUCCEEDED(Lock(a, f48, kPeriod)), "LockForProcess at 48 kHz again");
+    Sleep(200);
 
     // ---- settings removed: back to exact pass-through ----
     DeleteFileW((g_dir + L"\\apo-settings.ini").c_str());

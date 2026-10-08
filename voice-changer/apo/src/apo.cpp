@@ -4,7 +4,46 @@
 #include <cstring>
 #include <new>
 
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#include <xmmintrin.h>
+#define VC_HAVE_MXCSR 1
+#endif
+
 #include "media_type.h"
+
+namespace {
+
+// Above this the chain can't keep up on ordinary hardware: its FFT grows with
+// the rate to keep the same bin width, so its cost does too.
+constexpr UINT32 kMaxProcessRate = 192000;
+
+// Flush-to-zero and denormals-are-zero for one APOProcess call. Exact digital
+// silence (BUFFER_SILENT, a muted mic) lets filter, shifter and reverb state
+// decay into subnormal doubles, which x86 handles in microcode: a burst of
+// periods that overrun their deadline a couple of seconds into the silence,
+// then several times the normal load for as long as it lasts. Flushing only
+// changes values below 1e-308. MXCSR's control bits belong to the caller (the
+// x64 ABI treats them as callee-saved), so the destructor puts them back on
+// every return path.
+#ifdef VC_HAVE_MXCSR
+class DenormalGuard {
+public:
+    DenormalGuard() : saved_(_mm_getcsr()) { _mm_setcsr(saved_ | kFtzDaz); }
+    ~DenormalGuard() { _mm_setcsr(saved_); }
+    DenormalGuard(const DenormalGuard&) = delete;
+    DenormalGuard& operator=(const DenormalGuard&) = delete;
+
+private:
+    static constexpr unsigned int kFtzDaz = 0x8040;  // FTZ (bit 15) | DAZ (bit 6)
+    unsigned int saved_;
+};
+#else
+struct DenormalGuard {
+    DenormalGuard() {}
+};
+#endif
+
+}  // namespace
 
 VoiceChangerAPO::VoiceChangerAPO() { InterlockedIncrement(&g_objects); }
 
@@ -157,17 +196,37 @@ STDMETHODIMP VoiceChangerAPO::LockForProcess(UINT32 nIn, APO_CONNECTION_DESCRIPT
     sample_rate_ = (UINT32)(fin.fFramesPerSecond + 0.5f);
     max_frames_ = ppIn[0]->u32MaxFrameCount;
 
+    delete chain_;
+    chain_ = nullptr;
+    active_ = false;
+    if (sample_rate_ > kMaxProcessRate) {
+        // Refusing the format could stop Windows opening the mic at all, so
+        // accept it and leave the audio alone: no chain means an exact
+        // pass-through that reports zero latency.
+        vcapo::Log("locked: %u Hz, %u ch: above %u Hz, passing audio through unprocessed", sample_rate_, channels_,
+                   kMaxProcessRate);
+        locked_ = true;
+        return S_OK;
+    }
+
+    // Nothing may throw out of a COM method: the engine is not C++, and an
+    // escaping exception would take down audiodg.exe and all system audio.
     try {
         active_ = control_.LoadInitial(settings_);
-        delete chain_;
-        chain_ = new vc::VoiceChain((int)sample_rate_, settings_.quality, (int)max_frames_);
+        // Pads the shifter even when max_frames_ is a whole number of hops:
+        // the engine can also deliver shorter (partial) periods.
+        chain_ = new vc::VoiceChain((int)sample_rate_, settings_.quality, (int)max_frames_, /*always_pad=*/true);
         mono_in_.assign(max_frames_, 0.0f);
         mono_out_.assign(max_frames_, 0.0f);
+        control_.Start((int)sample_rate_, (int)channels_, (int)max_frames_, settings_.quality);
     } catch (...) {
-        vcapo::Log("LockForProcess: out of memory (rate %u, frames %u)", sample_rate_, max_frames_);
+        control_.Stop();
+        delete chain_;
+        chain_ = nullptr;
+        active_ = false;
+        vcapo::Log("LockForProcess: out of resources (rate %u, frames %u)", sample_rate_, max_frames_);
         return E_OUTOFMEMORY;
     }
-    control_.Start((int)sample_rate_, (int)channels_, (int)max_frames_, settings_.quality);
     vcapo::Log("locked: %u Hz, %u ch, %u frames/period, latency %d samples, %s", sample_rate_, channels_, max_frames_,
                chain_->latency(), active_ ? "active" : "pass-through (no settings file)");
     locked_ = true;
@@ -187,6 +246,7 @@ STDMETHODIMP VoiceChangerAPO::UnlockForProcess() {
 
 STDMETHODIMP_(void) VoiceChangerAPO::APOProcess(UINT32 nIn, APO_CONNECTION_PROPERTY** ppIn, UINT32 nOut,
                                                 APO_CONNECTION_PROPERTY** ppOut) {
+    const DenormalGuard ftz;
     if (!locked_ || nIn != 1 || nOut != 1 || !ppIn || !ppOut || !ppIn[0] || !ppOut[0]) return;
     APO_CONNECTION_PROPERTY* in = ppIn[0];
     APO_CONNECTION_PROPERTY* out = ppOut[0];
@@ -196,10 +256,7 @@ STDMETHODIMP_(void) VoiceChangerAPO::APOProcess(UINT32 nIn, APO_CONNECTION_PROPE
     const UINT32 ch = channels_;
     const bool silent = in->u32BufferFlags == BUFFER_SILENT;
 
-    if (vc::VoiceChain* fresh = control_.TakePendingChain()) {
-        control_.RetireChain(chain_);
-        chain_ = fresh;
-    }
+    control_.AdoptPendingChain(chain_);
     control_.PollSettings(settings_, active_);
 
     out->u32ValidFrameCount = frames;

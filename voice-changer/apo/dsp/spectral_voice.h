@@ -22,8 +22,9 @@ class SpectralVoice {
 public:
     // block_size: the block length process() will be called with. When it is a
     // multiple of the hop no padding is needed; otherwise hop-1 samples are
-    // added so output is always available (see latency()).
-    SpectralVoice(int sample_rate, int fft_size = 2048, int overlap = 8, int block_size = 0,
+    // added so output is always available (see latency()). always_pad adds
+    // them regardless, for callers whose blocks may also be shorter.
+    SpectralVoice(int sample_rate, int fft_size = 2048, int overlap = 8, int block_size = 0, bool always_pad = false,
                   double lifter_seconds = 0.0012);
 
     void set_pitch(double semitones);

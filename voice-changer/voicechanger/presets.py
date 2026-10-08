@@ -100,7 +100,7 @@ PRESETS: dict[str, dict] = {
     },
     "vibrato": {
         "tremor_hz": 5.5, "tremor_depth": 0.5, "low_db": -1.5, "mid_db": 2.5, "high_db": 5,
-        "reverb_mix": 0.35, "reverb_room": 0.75, "comp_makeup_db": 3.4
+        "reverb_mix": 0.35, "reverb_room": 0.75, "comp_makeup_db": 3.5
     },
 }
 
