@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+# scratch output from apo/build dsp_cli runs
+*.f32
+/s.ini
