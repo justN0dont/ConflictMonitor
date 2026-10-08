@@ -20,7 +20,7 @@ from voicechanger.presets import PRESETS, make_settings
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_character import MAXED, PINNED  # noqa: E402
-from test_dsp import voice_like  # noqa: E402
+from test_dsp import voice_like, voice_with_pitch  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATES = [ROOT / "apo/build/dsp_cli", ROOT / "apo/build/Release/dsp_cli.exe", ROOT / "apo/build/dsp_cli.exe"]
@@ -141,6 +141,46 @@ CHARACTER = {
 def test_cpp_matches_python_with_character(tmp_path, case, quality):
     x = voice_like(f0=140, seconds=1.5).astype(np.float32).astype(np.float64)
     assert_match(tmp_path, Settings(**CHARACTER[case]), quality, x, case)
+
+
+# Jitter's target scaling, gravel's rate step and the tremor's cycle count all
+# depend on the hop and the sample rate: 16 kHz keeps the 48 kHz FFT sizes
+# (so each hop is three times longer), 96 kHz doubles them.
+AT_RATES = {
+    "jitter": dict(jitter=1.0),
+    "jitter+pitch+gravel": dict(pitch=-3, jitter=0.6, gravel=0.7, gravel_hz=60.0),
+    "robot+jitter+tremor": dict(mode="robot", robot_hz=130, jitter=0.8, tremor_depth=1.0, tremor_hz=7.0),
+}
+
+
+@pytest.mark.parametrize("sr", [16000, 96000])
+@pytest.mark.parametrize("quality", list(QUALITY))
+@pytest.mark.parametrize("case", list(AT_RATES))
+def test_cpp_matches_python_with_character_at_other_rates(tmp_path, case, quality, sr):
+    x = voice_like(f0=140, seconds=1.5, sr=sr).astype(np.float32).astype(np.float64)
+    assert_match(tmp_path, Settings(**AT_RATES[case]), quality, x, f"{case} at {sr} Hz", sr=sr)
+
+
+# A voice gliding up an octave: its partials cross a bin every few frames, so
+# the shifter's per-sinusoid phase tracking (match, tie-break, fallback to the
+# per-bin memory) runs on every frame. Its matching window scales with the
+# hop, FFT size and rate: 4.5 to 72 bins at 16 kHz, against 2 to 8 at 48 kHz.
+GLIDING = {
+    "deeper": make_settings("deeper"),
+    "feminine": make_settings("feminine"),
+    "old_lady": make_settings("old_lady"),
+    "robot+tremor": Settings(mode="robot", robot_hz=95, tremor_depth=0.8),
+    "tremor+jitter": Settings(pitch=-2, formant=1, tremor_depth=1.0, tremor_hz=6.5, jitter=0.8),
+}
+
+
+@pytest.mark.parametrize("sr", [SR, 16000])
+@pytest.mark.parametrize("quality", list(QUALITY))
+@pytest.mark.parametrize("case", list(GLIDING))
+def test_cpp_matches_python_on_a_gliding_voice(tmp_path, case, quality, sr):
+    t = np.arange(int(1.5 * sr)) / sr
+    x = voice_with_pitch(110 * 2 ** (t / 1.5), sr=sr).astype(np.float32).astype(np.float64)  # 110 -> 220 Hz
+    assert_match(tmp_path, GLIDING[case], quality, x, f"{case}, gliding at {sr} Hz", sr=sr)
 
 
 # Settings changing every few blocks, as from the UI: the tremor, jitter and

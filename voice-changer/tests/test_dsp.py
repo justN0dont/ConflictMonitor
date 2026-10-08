@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from scipy.signal import butter, hilbert, sosfiltfilt
 
 from voicechanger.chain import QUALITY, Settings, VoiceChain, quality_spec
 from voicechanger.dsp.effects import Biquad, Compressor, Limiter, NoiseGate, Reverb, lin_to_db
@@ -19,6 +20,48 @@ def voice_like(f0=150.0, seconds=2.0, sr=SR):
             break
         x += np.sin(2 * np.pi * f * t) / (1 + ((f - 700) / 300) ** 2)
     return 0.2 * x / np.max(np.abs(x))
+
+
+def voice_with_pitch(f0_hz, f0=150.0, sr=SR):
+    """voice_like's harmonics on a pitch that follows ``f0_hz`` (Hz per sample; ``f0`` is its centre).
+
+    Each harmonic keeps a fixed level, so any change in it at the output is the shifter's doing.
+    """
+    ph = 2 * np.pi * np.cumsum(f0_hz) / sr
+    x = sum(np.sin(h * ph) / (1 + ((h * f0 - 700) / 300) ** 2) for h in range(1, 40) if h * f0 < sr / 2.2)
+    return 0.2 * x / np.max(np.abs(x))
+
+
+def dip_stats(env):
+    """(share of time more than 6 dB below its median level, deepest dip in dB), edges trimmed."""
+    env = env[4000:-4000]
+    db = 20 * np.log10(env / np.median(env) + 1e-12)
+    return float(np.mean(db < -6)), float(db.min())
+
+
+def harmonic_dips(y, f0, harmonics, sr=SR):
+    """Per harmonic of ``f0``: dip_stats of its level."""
+    out = {}
+    for h in harmonics:
+        sos = butter(4, [(h - 0.33) * f0, (h + 0.33) * f0], btype="band", fs=sr, output="sos")
+        out[h] = dip_stats(np.abs(hilbert(sosfiltfilt(sos, y))))
+    return out
+
+
+def tracked_harmonic_dips(y, f0_hz, harmonics, sr=SR):
+    """harmonic_dips for a pitch that swings further than a fixed band can hold.
+
+    Each harmonic is demodulated along its own trajectory (``f0_hz``: the
+    expected fundamental at each sample of ``y``) and low-passed at 25 Hz, so
+    even the upper ones are followed through their whole swing.
+    """
+    lp = butter(4, 25.0, fs=sr, output="sos")
+    ph = 2 * np.pi * np.cumsum(f0_hz) / sr
+    out = {}
+    for h in harmonics:
+        z = y * np.exp(-1j * h * ph)
+        out[h] = dip_stats(np.abs(sosfiltfilt(lp, z.real) + 1j * sosfiltfilt(lp, z.imag)))
+    return out
 
 
 def stream(proc, x, block=256):
@@ -116,6 +159,56 @@ def test_pitch_shift_adds_no_sidebands():
         target = f * 2 ** (semis / 12)
         off = np.abs(freqs - target) > 15
         assert lin_to_db(spec[off].max() / spec.max()) < -40, (f, semis)
+
+
+@pytest.mark.parametrize("quality", list(QUALITY))
+def test_shifted_harmonics_do_not_drop_out_while_the_voice_glides(quality):
+    """A speaking voice glides in pitch all the time, so its partials keep
+    moving between FFT bins. Each one's phase follows it (by sinusoid, matched
+    where frames overlap): kept per bin, it was lost on every move and the
+    out-of-phase frame cancelled the partial for about a frame."""
+    t = np.arange(4 * SR) / SR
+    x = voice_with_pitch(150 * 2 ** (0.5 * np.sin(2 * np.pi * 5.5 * t) / 12))  # +/-0.5 st at 5.5 Hz
+    s = make_settings("deeper")
+    f0 = 150 * 2 ** (s.pitch / 12)
+    dips = {}
+    for label, track in (("before", False), ("after", True)):
+        y = VoiceChain(SR, quality, s, track_peaks=track).process_buffer(x)[SR:]
+        dips[label] = harmonic_dips(y, f0, (1, 2, 3, 4, 5, 6, 8))
+    worst = {k: max(share for share, _ in d.values()) for k, d in dips.items()}
+    deepest = {k: min(low for _, low in d.values()) for k, d in dips.items()}
+    assert worst["before"] > 0.01  # the measurement does see the dropouts
+    assert worst["after"] < 0.01, dips["after"]
+    assert deepest["after"] > deepest["before"] / 3, dips
+
+
+# A partial moves hop * fft_size / rate**2 times as many bins per hop as at
+# balanced 48 kHz: 4x at high-quality, 9x at 16 kHz (a Bluetooth headset mic).
+FURTHER_PER_HOP = [("balanced", 48000), ("high-quality", 48000), ("balanced", 16000)]
+
+
+@pytest.mark.parametrize("quality,sr", FURTHER_PER_HOP)
+@pytest.mark.parametrize("preset", ["feminine", "chipmunk"])
+def test_upper_harmonics_do_not_drop_out_while_a_raised_voice_glides(preset, quality, sr):
+    """Raising the pitch speeds up every partial's glide, the upper ones most,
+    and at high-quality and 16 kHz each also moves several times further per
+    hop in bins. Matched to the previous frame's partials within a fixed 2
+    bins, h8-h14 dropped out there 8-23% of the time, 30-60 dB down; the
+    window now scales with the hop, FFT size and sample rate."""
+    t = np.arange(4 * sr) / sr
+    f0_hz = 150 * 2 ** (3 * np.sin(2 * np.pi * 0.7 * t) / 12)  # speech-like +/-3 st drift
+    x = voice_with_pitch(f0_hz, sr=sr)
+    s = make_settings(preset)
+    shifted = f0_hz * 2 ** (s.pitch / 12)  # process_buffer lines the output up with the input
+    dips = {}
+    for label, track in (("before", False), ("after", True)):
+        y = VoiceChain(sr, quality, s, track_peaks=track).process_buffer(x)
+        dips[label] = tracked_harmonic_dips(y[sr:], shifted[sr:], (1, 2, 3, 5, 8, 11, 14), sr)
+    worst = {k: max(share for share, _ in d.values()) for k, d in dips.items()}
+    deepest = {k: min(low for _, low in d.values()) for k, d in dips.items()}
+    assert worst["before"] > 0.01  # the measurement does see the dropouts
+    assert worst["after"] < 0.01, dips["after"]
+    assert deepest["after"] > deepest["before"] / 3, dips
 
 
 def test_pitch_shift_preserves_formants():

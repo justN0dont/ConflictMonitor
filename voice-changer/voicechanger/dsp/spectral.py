@@ -17,8 +17,8 @@ envelope, so the words stay intelligible.
 Character controls colour the result per frame: tremor (a slow pitch and
 loudness wobble), jitter (random pitch unsteadiness) and breath (aspiration
 noise under the speaker's envelope). Their randomness comes from the
-counter-based ``hash_uniform``, keyed on the frame count, so the C++ port
-produces the same frames whatever the block size.
+counter-based ``hash_uniform``, keyed on the frame (or tremor cycle) count, so
+the C++ port produces the same frames whatever the block size.
 """
 
 from __future__ import annotations
@@ -34,6 +34,22 @@ TWO_PI = 2.0 * np.pi
 _KMAX = 6      # kernel table spans +/- this many bins
 _KRES = 256    # table points per bin
 _LOBE = 3      # bins drawn either side of each resynthesised peak
+# A sinusoid continues the previous frame's nearest one within _TRACK bins at
+# balanced quality at 48 kHz (hop 256, FFT 2048): a glide of up to _TRACK_RATE
+# Hz per second (about 8.8 kHz/s). The window scales to that rate at other hops
+# and sample rates, but never drops below _TRACK bins.
+_TRACK = 2.0
+_TRACK_RATE = _TRACK * 48000.0 * 48000.0 / (256 * 2048)
+_EMPTY = np.zeros(0)
+
+
+def _glide_coef(hop: int, sample_rate: int) -> float:
+    """Per-frame decay of jitter's 25 ms glide toward each new random target."""
+    return math.exp(-hop / (0.025 * sample_rate))
+
+
+# Jitter is tuned at balanced quality at 48 kHz (hop 256); see _jitter_norm.
+_JITTER_REF_COEF = _glide_coef(256, 48000)
 
 
 def _dirichlet(x: np.ndarray, n: int) -> np.ndarray:
@@ -70,6 +86,13 @@ class SpectralVoice:
     output is always available. ``latency`` reports the total either way.
     ``always_pad`` adds the padding regardless, for callers that promise a
     maximum block length but may also deliver shorter blocks.
+
+    ``track_peaks`` continues each resynthesised sinusoid's phase from the
+    previous frame's nearest one (see ``_next_phase``). False selects the
+    older per-bin phase memory. It exists for the tests: tracking changes
+    every pitch-shifted frame's phases, so comparing bit for bit against older
+    code (to prove, say, that the character controls change nothing at their
+    neutral defaults) needs the old memory, as does measuring what tracking fixes.
     """
 
     def __init__(
@@ -80,6 +103,7 @@ class SpectralVoice:
         block_size: int | None = None,
         always_pad: bool = False,
         lifter_seconds: float = 0.0012,
+        track_peaks: bool = True,
     ) -> None:
         if fft_size & (fft_size - 1):
             raise ValueError("fft_size must be a power of two")
@@ -115,7 +139,20 @@ class SpectralVoice:
         fk = self._k * sample_rate / n
         self._breath_tilt = fk * fk / (fk * fk + 1500.0 ** 2)
         # Jitter glides to each new random target with a 25 ms time constant.
-        self._jitter_coef = math.exp(-self.hop / (0.025 * sample_rate))
+        # That smoothing leaves (1-c)/(1+c) of the target's variance, which
+        # grows with the hop, so the target is scaled to give the same pitch
+        # spread at every quality and sample rate as at the reference hop.
+        # (Products of the same two factors, so it is exactly 1 there.)
+        c, c_ref = _glide_coef(self.hop, sample_rate), _JITTER_REF_COEF
+        self._jitter_coef = c
+        self._jitter_norm = math.sqrt(((1.0 + c) * (1.0 - c_ref)) / ((1.0 - c) * (1.0 + c_ref)))
+        # A partial gliding at a given rate moves hop/sr * rate Hz per hop, which
+        # is hop * n / sr**2 * rate bins: four times as many at high-quality as at
+        # balanced, nine times at 16 kHz. A fixed bin window would lose the partials
+        # there that it follows at balanced, so it scales to follow the same glide
+        # rate everywhere (2 bins at balanced and low-latency at 48 kHz, 8 at
+        # high-quality, 18 at 16 kHz balanced).
+        self._track = max(_TRACK, _TRACK_RATE * self.hop * n / (sample_rate * sample_rate))
         # Noise frames are mutually incoherent, so overlap-add sums their power,
         # not their amplitude: coherent 0.375*o vs incoherent sqrt(35/128*o).
         self._noise_comp = 0.375 * overlap / math.sqrt(35.0 / 128.0 * overlap)
@@ -128,6 +165,7 @@ class SpectralVoice:
         self.tremor_depth = 0.0
         self.jitter = 0.0
         self.breath = 0.0
+        self.track_peaks = track_peaks
         self.reset()
 
     # ---- parameters ------------------------------------------------------
@@ -153,7 +191,7 @@ class SpectralVoice:
         self.tremor_depth = min(max(float(depth_st), 0.0), 3.0)
 
     def set_jitter(self, amount: float) -> None:
-        """Random pitch unsteadiness, 0..1 (1 = up to +/-0.6 semitone)."""
+        """Random pitch unsteadiness, 0..1 (1 = about 0.11 semitone RMS, peaks near 0.4)."""
         self.jitter = min(max(float(amount), 0.0), 1.0)
 
     def set_breath(self, amount: float) -> None:
@@ -168,8 +206,12 @@ class SpectralVoice:
         self._out = np.zeros(self._pad)
         self._last_phase = np.zeros(half)
         self._sum_phase = np.zeros(half)
-        self._frame_index = 0  # frames since reset: the counter for every random draw
+        # The previous frame's sinusoids (see _next_phase): frequency in bins
+        # (ascending), the frequency drawn, and phase at frame start.
+        self._prev_f = self._prev_drawn = self._prev_ph = _EMPTY
+        self._frame_index = 0  # frames since reset: the counter for jitter, breath and whisper draws
         self._tremor_phase = 0.0
+        self._tremor_cycle = 0  # completed tremor cycles: the counter for its rate draws
         self._jitter_state = 0.0
 
     # ---- streaming -------------------------------------------------------
@@ -199,15 +241,21 @@ class SpectralVoice:
         output is bit-identical to running without them.
         """
         sr = self.sample_rate
-        # The tremor rate wanders +/-10% frame to frame so it doesn't sound like
-        # a metronome. Its phase runs even at zero depth, so the wobble depends
-        # only on the frame count, not on when tremor was turned up.
-        rate = self.tremor_hz * (1.0 + 0.2 * (hash_uniform(1, f) - 0.5))
-        self._tremor_phase = (self._tremor_phase + TWO_PI * rate * self.hop / sr) % TWO_PI
+        # Each tremor cycle runs at its own rate, up to +/-10% off (about 6%
+        # RMS), so it doesn't sound like a metronome: natural tremor varies by
+        # several percent from cycle to cycle. Drawn per cycle, not per frame,
+        # where the draws would average out over the cycle. The phase runs
+        # even at zero depth, so the cycles depend only on elapsed frames, not
+        # on when tremor was turned up.
+        rate = self.tremor_hz * (1.0 + 0.2 * (hash_uniform(1, self._tremor_cycle) - 0.5))
+        self._tremor_phase += TWO_PI * rate * self.hop / sr
+        while self._tremor_phase >= TWO_PI:
+            self._tremor_phase -= TWO_PI
+            self._tremor_cycle += 1
         s = math.sin(self._tremor_phase)
         tremor_st = self.tremor_depth * s
         gain = 10.0 ** (1.5 * self.tremor_depth * s / 20.0)  # real vibrato swings loudness too
-        target = self.jitter * 0.6 * (2.0 * hash_uniform(2, f) - 1.0)
+        target = self.jitter * 0.6 * self._jitter_norm * (2.0 * hash_uniform(2, f) - 1.0)
         self._jitter_state = target + (self._jitter_state - target) * self._jitter_coef
         return self.pitch_ratio * 2.0 ** ((tremor_st + self._jitter_state) / 12.0), gain
 
@@ -247,8 +295,14 @@ class SpectralVoice:
                 exc = np.zeros(half, dtype=np.complex128)
                 if len(harmonics):
                     idx = np.round(harmonics).astype(np.int64)
-                    ph = _wrap(self._sum_phase[idx] + TWO_PI * harmonics / osamp)
+                    # Each harmonic is a single-bin line: drawn at its bin.
+                    ph = self._next_phase(harmonics, idx.astype(np.float64), idx)
                     exc[idx] = np.exp(1j * ph)
+                    # Where harmonics share a bin the last one is drawn, so it is the one kept.
+                    last = np.append(idx[1:] != idx[:-1], True)
+                    self._keep_sinusoids(harmonics[last], idx[last].astype(np.float64), ph[last])
+                else:
+                    self._keep_sinusoids(_EMPTY, _EMPTY, _EMPTY)
             else:  # whisper
                 exc = _noise_phasors(4, f * half, half)
 
@@ -267,6 +321,8 @@ class SpectralVoice:
             # done (numpy's complex product vs C++'s per-component one), and
             # angle(-0-0j) = -pi would be carried into every later frame.
             self._sum_phase = np.where(out_spec != 0, np.angle(out_spec), 0.0)
+            if self.mode != "robot":  # no sinusoids to continue: per-bin phases only
+                self._keep_sinusoids(_EMPTY, _EMPTY, _EMPTY)
 
         # Breath goes in after the phase memory is updated: noise phases must
         # never be propagated into the next frame's partials.
@@ -317,6 +373,42 @@ class SpectralVoice:
         t = pos - i0
         return self._ktab[i0] * (1 - t) + self._ktab[i0 + 1] * t
 
+    def _next_phase(self, f: np.ndarray, drawn: np.ndarray, dest_bin: np.ndarray) -> np.ndarray:
+        """Phase at frame start for sinusoids at ``f`` bins (ascending), drawn at ``drawn``.
+
+        Each continues the previous frame's nearest sinusoid if that lay within
+        ``_track`` bins (the lower one on a tie), and otherwise takes what the
+        per-bin memory holds at its destination bin. Per-bin memory alone
+        loses a partial whenever its destination bin changes, as tremor,
+        jitter and the speaker's own pitch glides keep making it do: the new
+        bin holds no phase, the frame is drawn out of phase with the frames it
+        overlaps, and the partial cancels for about a frame (20-60 dB dips).
+
+        A continued phase is matched midway between the two frames' centres,
+        where they overlap most, by advancing the centre phase at the mean of
+        the two frequencies. Matching at the frame start instead leaves the
+        frames pi x (frequency change) apart there, which cancels the upper
+        harmonics of a moving pitch just as surely. ``drawn`` is the frequency
+        each frame actually contains: the sinusoid's own for a window lobe,
+        its bin for robot's single-bin lines (whose phase advance alone makes
+        overlap-add land on the true frequency).
+        """
+        per_bin = _wrap(self._sum_phase[dest_bin] + TWO_PI * f / self.overlap)
+        pf = self._prev_f
+        if not self.track_peaks or len(pf) == 0:
+            return per_bin
+        j = np.searchsorted(pf, f)
+        lo, hi = np.maximum(j - 1, 0), np.minimum(j, len(pf) - 1)
+        d_lo, d_hi = np.abs(f - pf[lo]), np.abs(pf[hi] - f)
+        near = np.where(d_hi < d_lo, hi, lo)
+        cont = self._prev_ph[near] + np.pi * (pf[near] + f) / self.overlap + np.pi * (self._prev_drawn[near] - drawn)
+        return np.where(np.minimum(d_lo, d_hi) <= self._track, _wrap(cont), per_bin)
+
+    def _keep_sinusoids(self, f: np.ndarray, drawn: np.ndarray, ph: np.ndarray) -> None:
+        """Remember this frame's sinusoids for the next frame's _next_phase."""
+        if self.track_peaks:
+            self._prev_f, self._prev_drawn, self._prev_ph = f, drawn, ph
+
     def _shift_peaks(self, mag, true_freq, log_env, r) -> np.ndarray:
         """Formant-aware pitch shift by peak resynthesis.
 
@@ -327,7 +419,8 @@ class SpectralVoice:
         up to half a bin away from the frequency its phase encodes, and
         overlap-add turns that mismatch into audible sidebands. Phase is carried
         frame to frame per output sinusoid (Laroche & Dolson's peak-locked
-        update), so partials stay coherent.
+        update), so partials stay coherent, and by sinusoid rather than by bin
+        (_next_phase), so that holds while partials move between bins.
         """
         half = len(mag)
         inner = mag[1:-1]
@@ -357,10 +450,11 @@ class SpectralVoice:
 
         # phase at frame start, propagated from the previous output frame
         dest_bin = np.round(fo).astype(np.int64)
-        ph = _wrap(self._sum_phase[dest_bin] + TWO_PI * fo / self.overlap)
+        ph = self._next_phase(fo, fo, dest_bin)  # each lobe is drawn at its exact frequency
         new_sin_phase = np.zeros(half)
         new_sin_phase[dest_bin] = ph
         self._sum_phase = new_sin_phase
+        self._keep_sinusoids(fo, fo, ph)
 
         offs = np.arange(-_LOBE, _LOBE + 1)
         bins = dest_bin[:, None] + offs[None, :]

@@ -247,16 +247,17 @@ class GravelModulator:
     Creaky voice is the vocal folds slapping shut in uneven pulses well below
     the speaking pitch. Pulling the level down with a raised-cosine dip at
     ``hz`` reproduces that rattle; ``amount`` sets how deep each dip goes. The
-    rate wanders +/-25% every 256 samples, keyed on the absolute sample index
-    through the counter-based RNG, so the result is the same for any block size
-    and in the C++ port. The phase advances even at amount 0, so the pulse
-    train depends only on elapsed time, never on when gravel was switched on.
+    rate wanders +/-25% every 5.3 ms (256 samples at 48 kHz), keyed on the
+    absolute sample index through the counter-based RNG, so the result is the
+    same for any block size and in the C++ port. The step is a time, not a
+    sample count, so the pulses are as irregular at 96 kHz as at 48 kHz. The
+    phase advances even at amount 0, so the pulse train depends only on
+    elapsed time, never on when gravel was switched on.
     """
-
-    TICK = 256  # samples per random rate step
 
     def __init__(self, fs: float):
         self.fs = fs
+        self.tick = max(1, round(256 * fs / 48000))  # samples per random rate step
         self._phase = 0.0
         self._count = 0  # absolute sample index
 
@@ -267,9 +268,9 @@ class GravelModulator:
         n = len(x)
         if n == 0:
             return x
-        # One draw per 256-sample tick, not per sample: a block spans only a few.
-        tick = (self._count + np.arange(n)) // self.TICK
-        first = self._count // self.TICK
+        # One draw per tick, not per sample: a block spans only a few.
+        tick = (self._count + np.arange(n)) // self.tick
+        first = self._count // self.tick
         wobble = np.array([hash_uniform(5, t) for t in range(first, int(tick[-1]) + 1)])[tick - first]
         f = hz * (1.0 + 0.5 * (wobble - 0.5))
         ph = self._phase + np.cumsum(2 * math.pi * f / self.fs)

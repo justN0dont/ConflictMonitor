@@ -14,6 +14,12 @@ constexpr double kTwoPi = 2.0 * kPi;
 constexpr int kKMax = 6;    // kernel table spans +/- this many bins
 constexpr int kKRes = 256;  // table points per bin
 constexpr int kLobe = 3;    // bins drawn either side of each resynthesised peak
+// A sinusoid continues the previous frame's nearest one within kTrack bins at
+// balanced quality at 48 kHz (hop 256, FFT 2048): a glide of up to kTrackRate
+// Hz per second. The window scales to that rate at other hops and sample
+// rates, but never drops below kTrack bins (see the constructor).
+constexpr double kTrack = 2.0;
+constexpr double kTrackRate = kTrack * 48000.0 * 48000.0 / (256 * 2048);
 constexpr int kMaxBlockDefault = 8192;
 
 // numpy's round() is round-half-to-even; nearbyint matches under the default
@@ -21,6 +27,9 @@ constexpr int kMaxBlockDefault = 8192;
 inline double round_even(double x) { return std::nearbyint(x); }
 
 inline double wrap(double p) { return p - kTwoPi * round_even(p / kTwoPi); }
+
+// Per-frame decay of jitter's 25 ms glide toward each new random target.
+inline double glide_coef(int hop, int sample_rate) { return std::exp(-hop / (0.025 * sample_rate)); }
 
 std::complex<double> dirichlet(double x, int n) {
     const double num = std::sin(kPi * x);
@@ -31,8 +40,8 @@ std::complex<double> dirichlet(double x, int n) {
 }  // namespace
 
 SpectralVoice::SpectralVoice(int sample_rate, int fft_size, int overlap, int block_size, bool always_pad,
-                             double lifter_seconds)
-    : sr_(sample_rate), n_(fft_size), overlap_(overlap), fft_(fft_size) {
+                             double lifter_seconds, bool track_peaks)
+    : sr_(sample_rate), n_(fft_size), overlap_(overlap), track_peaks_(track_peaks), fft_(fft_size) {
     if (fft_size % overlap) throw std::invalid_argument("fft_size must be divisible by overlap");
     hop_ = n_ / overlap_;
     half_ = n_ / 2 + 1;
@@ -41,7 +50,19 @@ SpectralVoice::SpectralVoice(int sample_rate, int fft_size, int overlap, int blo
     scale_ = 1.0 / (0.375 * overlap_);
     expct_ = kTwoPi * hop_ / n_;
     // Jitter glides to each new random target with a 25 ms time constant.
-    jitter_coef_ = std::exp(-hop_ / (0.025 * sample_rate));
+    // That smoothing leaves (1-c)/(1+c) of the target's variance, which grows
+    // with the hop, so the target is scaled to give the pitch spread of the
+    // reference hop (256 at 48 kHz: balanced) at every quality and rate.
+    // (Products of the same two factors, so it is exactly 1 there.)
+    const double c = glide_coef(hop_, sample_rate), c_ref = glide_coef(256, 48000);
+    jitter_coef_ = c;
+    jitter_norm_ = std::sqrt(((1.0 + c) * (1.0 - c_ref)) / ((1.0 - c) * (1.0 + c_ref)));
+    // A partial gliding at a given rate moves hop/sr * rate Hz per hop, which is
+    // hop * n / sr^2 * rate bins: four times as many at high-quality as at
+    // balanced, nine times at 16 kHz. The window scales to follow the same
+    // glide rate everywhere (2 bins at balanced and low-latency at 48 kHz, 8 at
+    // high-quality, 18 at 16 kHz balanced). Same operation order as the Python.
+    track_ = std::max(kTrack, kTrackRate * hop_ * n_ / ((double)sample_rate * sample_rate));
     // Noise frames are mutually incoherent, so overlap-add sums their power,
     // not their amplitude: coherent 0.375*o vs incoherent sqrt(35/128*o).
     noise_comp_ = 0.375 * overlap_ / std::sqrt(35.0 / 128.0 * overlap_);
@@ -72,6 +93,11 @@ SpectralVoice::SpectralVoice(int sample_rate, int fft_size, int overlap, int blo
     out_ring_.assign(pad_ + max_block + 2 * n_, 0.0);
     last_phase_.assign(half_, 0.0);
     sum_phase_.assign(half_, 0.0);
+    // At most one sinusoid per bin: shift_peaks' peaks are local maxima, and
+    // robot keeps only the harmonic drawn in each bin.
+    prev_f_.assign(half_, 0.0);
+    prev_drawn_.assign(half_, 0.0);
+    prev_ph_.assign(half_, 0.0);
     re_.assign(n_, 0.0);
     im_.assign(n_, 0.0);
     mag_.assign(half_, 0.0);
@@ -92,7 +118,7 @@ SpectralVoice::SpectralVoice(int sample_rate, int fft_size, int overlap, int blo
     peaks_.reserve(half_);
     peak_amp_.reserve(half_);
     peak_fo_.reserve(half_);
-    peak_ph_.reserve(half_);  // shift_peaks keeps at most one entry per bin
+    peak_ph_.reserve(half_);  // shift_peaks and robot keep at most one entry per bin
     peak_dest_.reserve(half_);
     reset();
 }
@@ -112,12 +138,14 @@ void SpectralVoice::reset() {
     std::fill(accum_.begin(), accum_.end(), 0.0);
     std::fill(last_phase_.begin(), last_phase_.end(), 0.0);
     std::fill(sum_phase_.begin(), sum_phase_.end(), 0.0);
+    prev_count_ = 0;
     std::fill(out_ring_.begin(), out_ring_.end(), 0.0);
     pending_count_ = 0;
     ring_read_ = 0;
     ring_count_ = pad_;  // start with `pad_` zeros queued
     frame_index_ = 0;
     tremor_phase_ = 0.0;
+    tremor_cycle_ = 0;
     jitter_state_ = 0.0;
 }
 
@@ -173,15 +201,22 @@ double SpectralVoice::character(double& gain) {
     // the factors are 2**0 and 10**0, both exactly 1.0, so the output is
     // bit-identical to running without them.
     const uint64_t f = frame_index_;
-    // The tremor rate wanders +/-10% frame to frame so it doesn't sound like a
-    // metronome. Its phase runs even at zero depth, so the wobble depends only
-    // on the frame count, not on when tremor was turned up.
-    const double rate = tremor_hz_ * (1.0 + 0.2 * (hash_uniform(1, f) - 0.5));
-    tremor_phase_ = std::fmod(tremor_phase_ + kTwoPi * rate * hop_ / sr_, kTwoPi);
+    // Each tremor cycle runs at its own rate, up to +/-10% off (about 6% RMS),
+    // so it doesn't sound like a metronome: natural tremor varies by several
+    // percent from cycle to cycle. Drawn per cycle, not per frame, where the
+    // draws would average out over the cycle. The phase runs even at zero
+    // depth, so the cycles depend only on elapsed frames, not on when tremor
+    // was turned up.
+    const double rate = tremor_hz_ * (1.0 + 0.2 * (hash_uniform(1, tremor_cycle_) - 0.5));
+    tremor_phase_ += kTwoPi * rate * hop_ / sr_;
+    while (tremor_phase_ >= kTwoPi) {
+        tremor_phase_ -= kTwoPi;
+        tremor_cycle_++;
+    }
     const double s = std::sin(tremor_phase_);
     const double tremor_st = tremor_depth_ * s;
     gain = std::pow(10.0, 1.5 * tremor_depth_ * s / 20.0);  // real vibrato swings loudness too
-    const double target = jitter_ * 0.6 * (2.0 * hash_uniform(2, f) - 1.0);
+    const double target = jitter_ * 0.6 * jitter_norm_ * (2.0 * hash_uniform(2, f) - 1.0);
     jitter_state_ = target + (jitter_state_ - target) * jitter_coef_;
     return pitch_ratio_ * std::pow(2.0, (tremor_st + jitter_state_) / 12.0);
 }
@@ -237,25 +272,43 @@ void SpectralVoice::process_frame(double* out_hop) {
     } else {
         if (mode_ == Mode::Normal) {
             for (int k = 0; k < half; k++) spec_out_[k] = std::polar(flat_[k], phase_[k]);
+            prev_count_ = 0;  // no sinusoids to continue: per-bin phases only
         } else if (mode_ == Mode::Robot) {
             std::fill(spec_out_.begin(), spec_out_.end(), cd(0, 0));
             const double f0 = robot_hz_ * r * n / sr_;
             const int count = (int)((half - 1) / f0);
-            // Phases come from the previous frame's sum_phase_, which is only
-            // rewritten below, so one pass needs no scratch (and a low f0, with
-            // more harmonics than bins, cannot outgrow one). Where harmonics
-            // share a bin the last one wins, as in numpy's fancy assignment.
+            // Phases come from the previous frame's sum_phase_ and prev_*, which
+            // are only rewritten below. Where harmonics share a bin the last
+            // one wins, as in numpy's fancy assignment, and only it is kept
+            // for the next frame (so a low f0, with more harmonics than bins,
+            // cannot outgrow the lists). Each harmonic is a single-bin line:
+            // drawn at its bin.
+            peak_fo_.clear();
+            peak_dest_.clear();
+            peak_ph_.clear();
+            int cursor = 0;
             for (int h = 1; h <= count; h++) {
                 const double fh = h * f0;
                 const int idx = (int)round_even(fh);
-                spec_out_[idx] = std::polar(1.0, wrap(sum_phase_[idx] + kTwoPi * fh / osamp));
+                const double ph = next_phase(fh, idx, idx, cursor);
+                spec_out_[idx] = std::polar(1.0, ph);
+                if (!peak_dest_.empty() && peak_dest_.back() == idx) {
+                    peak_fo_.back() = fh;
+                    peak_ph_.back() = ph;
+                } else {
+                    peak_fo_.push_back(fh);
+                    peak_dest_.push_back(idx);
+                    peak_ph_.push_back(ph);
+                }
             }
+            keep_sinusoids(true);
         } else {
             const uint64_t first = f * (uint64_t)half;
             for (int k = 0; k < half; k++) {
                 const double ph = kTwoPi * hash_uniform(4, first + k);
                 spec_out_[k] = cd(std::cos(ph), std::sin(ph));
             }
+            prev_count_ = 0;
         }
 
         // ---- re-apply the (optionally shifted) envelope ----
@@ -320,6 +373,7 @@ void SpectralVoice::shift_peaks(double r) {
     peak_fo_.clear();
     peak_dest_.clear();
     peak_ph_.clear();
+    int cursor = 0;
     for (int j = 1; j < half - 1; j++) {
         if (mag_[j] > mag_[j - 1] && mag_[j] >= mag_[j + 1] && mag_[j] > floor) {
             const double fp = true_freq_[j];
@@ -335,7 +389,7 @@ void SpectralVoice::shift_peaks(double r) {
                 peak_fo_.push_back(fo);
                 const int dest = (int)round_even(fo);
                 peak_dest_.push_back(dest);
-                peak_ph_.push_back(wrap(sum_phase_[dest] + kTwoPi * fo / overlap_));
+                peak_ph_.push_back(next_phase(fo, fo, dest, cursor));  // each lobe is drawn at its exact frequency
             }
         }
     }
@@ -345,6 +399,7 @@ void SpectralVoice::shift_peaks(double r) {
     const size_t np = peaks_.size();
     for (size_t i = 0; i < np; i++) new_phase_[peak_dest_[i]] = peak_ph_[i];
     std::copy(new_phase_.begin(), new_phase_.end(), sum_phase_.begin());
+    keep_sinusoids(false);
 
     for (size_t i = 0; i < np; i++) {
         const cd c = std::polar(peak_amp_[i], peak_ph_[i]);
@@ -364,6 +419,38 @@ void SpectralVoice::shift_peaks(double r) {
         const double g = std::sqrt(in_e / out_e);
         for (int k = 0; k < half; k++) spec_out_[k] *= g;
     }
+}
+
+double SpectralVoice::next_phase(double f, double drawn, int dest, int& cursor) const {
+    // Continue the previous frame's nearest sinusoid within track_ bins (the
+    // lower one on a tie), else take the per-bin memory, as before. Per-bin
+    // memory alone loses a partial whenever its bin changes (tremor, jitter,
+    // the speaker's own glides): the frame is then drawn out of phase with
+    // the frames it overlaps and the partial cancels for about a frame. The
+    // continued phase is matched midway between the frames' centres, where
+    // they overlap most; a frame-start match leaves them pi x (frequency
+    // change) apart there. `drawn` is the frequency the frame contains: the
+    // sinusoid's own for a window lobe, its bin for robot's single-bin lines.
+    const double per_bin = wrap(sum_phase_[dest] + kTwoPi * f / overlap_);
+    const int m = prev_count_;
+    if (!track_peaks_ || m == 0) return per_bin;
+    while (cursor < m && prev_f_[cursor] < f) cursor++;  // np.searchsorted, side="left"
+    const int lo = cursor > 0 ? cursor - 1 : 0, hi = cursor < m ? cursor : m - 1;
+    const double d_lo = std::fabs(f - prev_f_[lo]), d_hi = std::fabs(prev_f_[hi] - f);
+    const int near = d_hi < d_lo ? hi : lo;
+    if (std::min(d_lo, d_hi) > track_) return per_bin;
+    return wrap(prev_ph_[near] + kPi * (prev_f_[near] + f) / overlap_ + kPi * (prev_drawn_[near] - drawn));
+}
+
+void SpectralVoice::keep_sinusoids(bool drawn_at_bin) {
+    if (!track_peaks_) return;
+    const int count = (int)peak_fo_.size();
+    for (int i = 0; i < count; i++) {
+        prev_f_[i] = peak_fo_[i];
+        prev_drawn_[i] = drawn_at_bin ? (double)peak_dest_[i] : peak_fo_[i];
+        prev_ph_[i] = peak_ph_[i];
+    }
+    prev_count_ = count;
 }
 
 void SpectralVoice::overlap_add(double* out_hop) {

@@ -98,8 +98,9 @@ class Settings:
 
 class VoiceChain:
     def __init__(self, sample_rate: int, quality: str = "balanced", settings: Settings | None = None,
-                 always_pad: bool = False):
-        """``always_pad``: blocks may be shorter than ``block_size`` (see SpectralVoice)."""
+                 always_pad: bool = False, track_peaks: bool = True):
+        """``always_pad``: blocks may be shorter than ``block_size``; ``track_peaks``
+        False selects the shifter's older per-bin phase memory (see SpectralVoice)."""
         fft_size, overlap, block = quality_spec(quality, sample_rate)
         self.sample_rate = fs = sample_rate
         self.quality = quality
@@ -107,7 +108,7 @@ class VoiceChain:
         self.settings = settings or Settings()
 
         self.voice = SpectralVoice(fs, fft_size=fft_size, overlap=overlap, block_size=block,
-                                   always_pad=always_pad)
+                                   always_pad=always_pad, track_peaks=track_peaks)
         self.latency = self.voice.latency
         self._dry = DelayLine(self.latency)
         self._bypass_delay = DelayLine(self.latency)

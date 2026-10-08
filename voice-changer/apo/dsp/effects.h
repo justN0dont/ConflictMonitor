@@ -271,15 +271,17 @@ inline void drive(double* x, int n, double amount) {
 
 // Vocal fry / gravel: a fast, slightly irregular train of raised-cosine dips
 // in level at `hz`, like vocal folds slapping shut in uneven pulses; `amount`
-// sets the dip depth. The rate wanders +/-25% every 256 samples, keyed on the
-// absolute sample index through hash_uniform, so the result is the same for any
-// block size and matches the Python. The phase advances even at amount 0, so
-// the pulse train depends only on elapsed time, never on when it was switched on.
+// sets the dip depth. The rate wanders +/-25% every 5.3 ms (256 samples at
+// 48 kHz), keyed on the absolute sample index through hash_uniform, so the
+// result is the same for any block size and matches the Python. The step is a
+// time, not a sample count, so the pulses are as irregular at 96 kHz as at
+// 48 kHz. The phase advances even at amount 0, so the pulse train depends only
+// on elapsed time, never on when it was switched on.
 class GravelModulator {
 public:
-    static constexpr int kTick = 256;  // samples per random rate step
-
-    explicit GravelModulator(double fs) : fs_(fs) {}
+    // Python's round() is round-half-to-even, as is nearbyint by default.
+    explicit GravelModulator(double fs)
+        : fs_(fs), tick_len_(std::max<uint64_t>(1, (uint64_t)std::nearbyint(256.0 * fs / 48000.0))) {}
 
     void process(double* x, int n, double amount, double hz) {
         // Same ranges as the settings parser (and the Python), whatever the caller passes.
@@ -287,7 +289,7 @@ public:
         hz = std::min(std::max(hz, 10.0), 200.0);
         const double two_pi = 2.0 * 3.14159265358979323846;
         for (int i = 0; i < n; i++, count_++) {
-            const uint64_t tick = count_ / kTick;
+            const uint64_t tick = count_ / tick_len_;
             if (tick != tick_) {  // one draw per tick, not per sample
                 tick_ = tick;
                 wobble_ = hash_uniform(5, tick);
@@ -309,6 +311,7 @@ public:
 
 private:
     double fs_;
+    uint64_t tick_len_;           // samples per random rate step
     double phase_ = 0.0;
     uint64_t count_ = 0;          // absolute sample index
     uint64_t tick_ = UINT64_MAX;  // tick whose draw is cached in wobble_ (none yet)

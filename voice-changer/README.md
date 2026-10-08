@@ -13,10 +13,10 @@ What makes it sound professional rather than like a toy:
   A deeper voice stays a human voice instead of a slowed-down tape, and gender
   shifts sound natural.
 - **Clean shifting.** Every harmonic is measured as a sinusoid and redrawn at
-  exactly the shifted frequency, with phase carried coherently from frame to
-  frame. A pure tone comes out as a pure tone, with everything else more than
-  40 dB down (this is tested). The common per-bin vocoder approach leaves
-  audible warble here.
+  exactly the shifted frequency, with its phase followed from frame to frame
+  as it moves. A pure tone comes out as a pure tone, with everything else more
+  than 40 dB down, and harmonics stay whole while the pitch glides or wobbles
+  (both tested). The common per-bin vocoder approach leaves audible warble here.
 - **A full channel strip:** rumble filter, noise gate, tone filters, 3-band EQ,
   saturation, compressor, reverb, and a limiter that never lets output clip.
 - **Robot** (fixed-pitch harmonic voice) and **whisper** modes keep your words
@@ -162,7 +162,8 @@ Characters, built on the character controls below:
 - `kid`: an octave up with a much smaller vocal tract (formants up 5), a little
   breathiness and unsteadiness, and a bright, forward tone.
 - `tough_guy`: big and forceful. Pitch down 5 with a longer vocal tract, chest
-  weight, a vocal-fry rattle, gritty drive, a barking midrange and heavy, punchy compression.
+  weight, a vocal-fry rattle, light grit and a barking midrange. The
+  compressor only reins in shouting.
 - `pirate`: gruff and weathered. A little deeper, with hoarse breath, fry
   gravel, light grit, a barky midrange and a softened top.
 - `valley_girl`: bright and airy. Slightly higher pitch and formants, light
@@ -180,7 +181,9 @@ Characters, built on the character controls below:
 - `alien`: pitch up 6 with formants down 4, a fast 9 Hz warble and a 180 Hz
   buzz for a metallic shimmer, in a small, bright room.
 - `megaphone`: a bullhorn. A narrow 600 Hz–4 kHz band with a honky 1.5 kHz
-  peak, heavy drive, tight compression and a touch of outdoor space.
+  peak and a touch of outdoor space. Its drive is moderate, so the grit
+  grows the louder you speak (nearly clean on a quiet mic), and the
+  compressor only catches loud input.
 - `vibrato`: a singer's vibrato, a steady 5.5 Hz swing of about half a semitone
   each way with a matching loudness pulse, a brighter top and a lush hall reverb.
 
@@ -194,10 +197,12 @@ output is bit-for-bit the same as without them.
   this much either way, with loudness rising and falling in step, as in a sung
   vibrato or an aged, shaky voice.
 - **Tremor rate** (2–10 Hz): how fast it swings. Aged voices and vibrato sit
-  around 5–7 Hz, slower sounds eerie, faster becomes a warble. It drifts ±10%
-  so it never sounds mechanical.
+  around 5–7 Hz, slower sounds eerie, faster becomes a warble. Each cycle runs
+  up to ±10% off it (about 6% on average), as natural tremor does, so it never
+  sounds mechanical.
 - **Shakiness** (0–1, typically 0.3–0.6): random, smoothly gliding pitch
-  wander, up to ±0.6 semitone at 1.
+  wander, about 0.1 semitone RMS at 1 with peaks near 0.4, the same at every
+  quality setting and sample rate.
 - **Breathiness** (0–1, typically 0.1–0.4): turns that share of the voice's
   energy into breath noise shaped by your own formants, so the voice gets
   airier without getting louder. Whisper mode is all breath already, so it has
@@ -229,14 +234,17 @@ no sidebands, that loudness holds, that the limiter never exceeds its ceiling,
 that every preset runs clean, and that each quality tier runs comfortably
 faster than real time. For the character controls it checks that at zero they
 leave the output bit-identical to before they existed, that tremor swings the
-pitch at its set rate and depth, that breath keeps loudness steady, and that
-gravel pulses at its rate whatever the block size.
+pitch at its set rate and depth with natural cycle-to-cycle variation, that
+shakiness is the same at every quality and sample rate, that harmonics don't
+drop out while tremor, shakiness or the speaker's own glides move the pitch
+(at balanced and high quality, and on a 16 kHz headset mic), that breath keeps
+loudness steady, and that gravel pulses at its rate whatever the block size.
 
 It also checks that the C++ code inside the Windows effect matches the Python
 reference sample for sample (within 1e-4). That covers every preset, each
 character control alone and combined (including out-of-range values, which
 both sides must clamp alike), settings changing mid-stream, exact digital
-silence, 44.1 and 96 kHz, and a randomized fuzz set that sweeps every control
+silence, a voice gliding an octave, 16, 44.1 and 96 kHz, and a randomized fuzz set that sweeps every control
 across its range in all three modes and quality tiers. Finally, it checks that
 install/uninstall restores the registry exactly across several kinds of mic.
 

@@ -24,8 +24,12 @@ public:
     // multiple of the hop no padding is needed; otherwise hop-1 samples are
     // added so output is always available (see latency()). always_pad adds
     // them regardless, for callers whose blocks may also be shorter.
+    // track_peaks: continue each resynthesised sinusoid's phase from the
+    // previous frame's nearest one (see next_phase). false selects the older
+    // per-bin phase memory, like the Python's flag, which exists for the
+    // tests: bit-for-bit comparisons against older code need the old memory.
     SpectralVoice(int sample_rate, int fft_size = 2048, int overlap = 8, int block_size = 0, bool always_pad = false,
-                  double lifter_seconds = 0.0012);
+                  double lifter_seconds = 0.0012, bool track_peaks = true);
 
     void set_pitch(double semitones);
     void set_formant(double semitones);
@@ -33,7 +37,7 @@ public:
     void set_robot_pitch(double hz) { robot_hz_ = hz < 20.0 ? 20.0 : hz; }
     // Character controls, clamped to the settings parser's ranges like the Python.
     void set_tremor(double hz, double depth_st);  // vibrato rate, peak swing in semitones (0 = off)
-    void set_jitter(double amount);               // 0..1, up to +/-0.6 semitone of random pitch drift
+    void set_jitter(double amount);               // 0..1; 1 = about 0.11 semitone RMS, peaks near 0.4
     void set_breath(double amount);               // 0..1, share of frame energy turned into aspiration
     void reset();
 
@@ -51,13 +55,20 @@ private:
     void process_frame(double* out_hop);
     double character(double& gain);  // this frame's pitch ratio (and gain) after tremor and jitter
     void shift_peaks(double r);      // fills spec_out_ from analysis buffers
+    // Phase at frame start of a sinusoid at f bins drawn at `drawn` (see
+    // spectral.py _next_phase). Within a frame, calls come in ascending f:
+    // `cursor` walks the previous frame's list alongside.
+    double next_phase(double f, double drawn, int dest, int& cursor) const;
+    void keep_sinusoids(bool drawn_at_bin);  // this frame's peak_* lists become prev_*
     void add_breath();               // mixes aspiration noise into spec_out_
     void overlap_add(double* out_hop);
     cd kernel(double d) const;
     double interp_env(double x) const;  // np.interp(x, k, log_env), clamped
 
     int sr_, n_, overlap_, hop_, half_, latency_, pad_, lifter_;
-    double scale_, expct_, jitter_coef_, noise_comp_;
+    double scale_, expct_, jitter_coef_, jitter_norm_, noise_comp_;
+    double track_;  // next_phase's window in bins: kTrack scaled to the hop, FFT size and rate
+    bool track_peaks_;
     double pitch_ratio_ = 1.0, formant_ratio_ = 1.0, robot_hz_ = 110.0;
     double tremor_hz_ = 5.5, tremor_depth_ = 0.0, jitter_ = 0.0, breath_ = 0.0;
     Mode mode_ = Mode::Normal;
@@ -71,7 +82,12 @@ private:
     int pending_count_ = 0;
     int ring_read_ = 0, ring_count_ = 0;
     std::vector<double> last_phase_, sum_phase_;
-    uint64_t frame_index_ = 0;  // frames since reset: the counter for every random draw
+    // The previous frame's sinusoids: frequency in bins (ascending), the
+    // frequency drawn, and phase at frame start. prev_count_ of them are valid.
+    std::vector<double> prev_f_, prev_drawn_, prev_ph_;
+    int prev_count_ = 0;
+    uint64_t frame_index_ = 0;   // frames since reset: the counter for jitter, breath and whisper draws
+    uint64_t tremor_cycle_ = 0;  // completed tremor cycles: the counter for its rate draws
     double tremor_phase_ = 0.0, jitter_state_ = 0.0;
 
     // per-frame scratch

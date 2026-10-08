@@ -11,11 +11,20 @@ on big shifts alone. Aged voices are shaky: a 4-7 Hz tremor (tremor_hz,
 tremor_depth) plus cycle-to-cycle pitch jitter, with aspiration noise from a
 leaky glottis (breath) and less high end. Gravel is vocal fry: irregular
 low-rate pulsing (gravel, gravel_hz about 30-50 Hz) that also gives the
-"tough guy", pirate and valley-girl timbres their texture. The character
-presets trim output_gain_db or comp_makeup_db so each stays within about 3 dB
-of "natural" in loudness; each was measured on low (110 Hz) and high (210 Hz)
-voices. (Some earlier presets, such as demon, robot and radio, run a few dB
-hotter through their drive.)
+"tough guy", pirate and valley-girl timbres their texture.
+
+Every character preset is within 3 dB of "natural" in loudness (K-weighted,
+over speech, balanced quality) on a quiet and a loud mic, -38 and -22 dBFS
+speech RMS, for low (110 Hz) and high (210 Hz) voices;
+tests/test_preset_loudness.py checks this. The compressor can't take back an
+EQ or drive boost on a quiet mic, where the signal stays under its threshold,
+so a boosting preset raises the threshold about as far as the boost lifts the
+signal (it then starts working at the same mic level as natural's) and cuts
+output_gain_db by the boost. Drive squashes level too, harder the louder the
+mic, which is why megaphone's is moderate. The cost: megaphone and tough_guy
+are nearly clean and uncompressed at normal speaking levels, and their grit
+and compression show only on loud input (the README says so). (Some earlier
+presets, such as demon, robot and radio, run a few dB hotter through their drive.)
 """
 
 from __future__ import annotations
@@ -53,13 +62,13 @@ PRESETS: dict[str, dict] = {
     },
     "tough_guy": {
         "pitch": -5, "formant": -3, "gravel": 0.4, "gravel_hz": 45, "low_db": 4, "mid_db": 6, "high_db": -1,
-        "lowpass_hz": 12000, "drive": 0.15, "comp_threshold_db": -22, "comp_ratio": 5, "comp_makeup_db": 0,
-        "output_gain_db": -1.5, "gate_threshold_db": -46
+        "lowpass_hz": 12000, "drive": 0.15, "comp_threshold_db": -10, "comp_ratio": 5, "comp_makeup_db": 0,
+        "output_gain_db": -8.5, "gate_threshold_db": -46
     },
     "pirate": {
         "pitch": -3, "formant": -1.5, "jitter": 0.3, "breath": 0.15, "gravel": 0.4, "gravel_hz": 45,
         "low_db": 1.5, "mid_db": 4, "high_db": -3, "lowpass_hz": 8000, "drive": 0.12,
-        "comp_threshold_db": -18, "comp_makeup_db": 0, "output_gain_db": -4.5
+        "comp_threshold_db": -13, "comp_makeup_db": 0, "output_gain_db": -6.5
     },
     "valley_girl": {
         "pitch": 4, "formant": 2, "breath": 0.1, "gravel": 0.25, "gravel_hz": 35, "low_db": -2, "mid_db": 3,
@@ -77,7 +86,7 @@ PRESETS: dict[str, dict] = {
     },
     "raspy": {
         "formant": -1, "breath": 0.25, "gravel": 0.4, "gravel_hz": 35, "lowpass_hz": 11000, "low_db": 2.5,
-        "high_db": -2, "drive": 0.12, "comp_threshold_db": -16, "comp_makeup_db": 0, "output_gain_db": -4.5
+        "high_db": -2, "drive": 0.12, "comp_threshold_db": -15, "comp_makeup_db": 0, "output_gain_db": -4.5
     },
     "ghost": {
         "pitch": 2, "formant": 2, "tremor_hz": 3.5, "tremor_depth": 0.7, "jitter": 0.3, "breath": 0.4,
@@ -86,17 +95,17 @@ PRESETS: dict[str, dict] = {
     },
     "ogre": {
         "pitch": -12, "formant": -6, "gravel": 0.7, "gravel_hz": 30, "highpass_hz": 45, "low_db": 4,
-        "mid_db": 4, "drive": 0.2, "comp_makeup_db": 0, "reverb_mix": 0.1, "reverb_room": 0.5,
-        "output_gain_db": -3
+        "mid_db": 4, "drive": 0.2, "comp_threshold_db": -10, "comp_makeup_db": 0, "reverb_mix": 0.1,
+        "reverb_room": 0.5, "output_gain_db": -7.5
     },
     "alien": {
         "pitch": 6, "formant": -4, "tremor_hz": 9, "tremor_depth": 0.6, "gravel": 0.3, "gravel_hz": 180,
         "mid_db": 4, "high_db": 2, "reverb_mix": 0.12, "reverb_room": 0.3, "comp_makeup_db": 4.5
     },
     "megaphone": {
-        "highpass_hz": 600, "lowpass_hz": 4000, "low_db": -9, "mid_db": 10, "high_db": -6, "drive": 0.65,
-        "gate_threshold_db": -45, "comp_threshold_db": -12, "comp_ratio": 4, "comp_makeup_db": 0,
-        "reverb_mix": 0.1, "reverb_room": 0.3, "output_gain_db": -10.5
+        "highpass_hz": 600, "lowpass_hz": 4000, "low_db": -9, "mid_db": 10, "high_db": -6, "drive": 0.15,
+        "gate_threshold_db": -45, "comp_threshold_db": -6, "comp_ratio": 4, "comp_makeup_db": 0,
+        "reverb_mix": 0.1, "reverb_room": 0.3, "output_gain_db": -11
     },
     "vibrato": {
         "tremor_hz": 5.5, "tremor_depth": 0.5, "low_db": -1.5, "mid_db": 2.5, "high_db": 5,

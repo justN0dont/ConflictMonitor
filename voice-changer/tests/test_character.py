@@ -6,6 +6,7 @@ leave the output bit-identical to the implementation from before they existed.
 """
 
 import importlib
+import math
 import subprocess
 import sys
 import time
@@ -21,11 +22,16 @@ from voicechanger.dsp.spectral import SpectralVoice
 from voicechanger.presets import PRESETS, make_settings
 
 sys.path.insert(0, str(Path(__file__).parent))
-from test_dsp import stream, voice_like  # noqa: E402
+from test_dsp import FURTHER_PER_HOP, stream, tracked_harmonic_dips, voice_like  # noqa: E402
 
 SR = 48000
 ROOT = Path(__file__).resolve().parents[1]
 PRE_CHARACTER = "0e53a0517c76c052e250f263ab27b5f2be2d33e1"  # last commit before these controls
+PRE_NORMALISED = "b08ded4cb3365bbd5169a3307de32c353e375fa8"  # last before jitter/gravel were made rate-independent
+# The shifter's older per-bin phase memory. Comparisons with old code use it:
+# per-sinusoid phase tracking changes every pitch-shifted frame's phases, so
+# it would hide whatever else the comparison is meant to catch.
+PER_BIN_PHASE = {"track_peaks": False}
 NEUTRAL = {k: getattr(Settings(), k)
            for k in ("tremor_hz", "tremor_depth", "jitter", "breath", "gravel", "gravel_hz")}
 MAXED = {"tremor_hz": 15.0, "tremor_depth": 3.0, "jitter": 1.0, "breath": 1.0,
@@ -107,24 +113,35 @@ def test_hash_uniform_vectorised_matches_scalar_and_stays_in_range():
 
 # ---- neutral defaults change nothing --------------------------------------
 
-@pytest.fixture(scope="module")
-def old_impl(tmp_path_factory):
-    """The chain and shifter as they were before the character controls, from git."""
-    pkg = tmp_path_factory.mktemp("pre_character") / "vc_pre_character"
+def load_old_impl(tmp_path_factory, rev: str, package: str, files):
+    """(chain, spectral) modules as they were at ``rev``, from git, as package ``package``."""
+    pkg = tmp_path_factory.mktemp(package) / package
     try:
-        for name in ("__init__.py", "chain.py", "dsp/__init__.py", "dsp/effects.py", "dsp/spectral.py"):
-            src = subprocess.run(["git", "show", f"{PRE_CHARACTER}:./voicechanger/{name}"],
+        for name in ("__init__.py", "chain.py", "dsp/__init__.py", *files):
+            src = subprocess.run(["git", "show", f"{rev}:./voicechanger/{name}"],
                                  cwd=ROOT, check=True, capture_output=True, text=True).stdout
             (pkg / name).parent.mkdir(parents=True, exist_ok=True)
             (pkg / name).write_text(src)
     except (OSError, subprocess.CalledProcessError):
-        pytest.skip("pre-character sources are not in this git checkout")
+        pytest.skip(f"sources from {rev[:7]} are not in this git checkout")
     sys.path.insert(0, str(pkg.parent))
     try:
-        return (importlib.import_module("vc_pre_character.chain"),
-                importlib.import_module("vc_pre_character.dsp.spectral"))
+        return importlib.import_module(f"{package}.chain"), importlib.import_module(f"{package}.dsp.spectral")
     finally:
         sys.path.remove(str(pkg.parent))
+
+
+@pytest.fixture(scope="module")
+def old_impl(tmp_path_factory):
+    """The chain and shifter as they were before the character controls."""
+    return load_old_impl(tmp_path_factory, PRE_CHARACTER, "vc_pre_character", ("dsp/effects.py", "dsp/spectral.py"))
+
+
+@pytest.fixture(scope="module")
+def pre_normalised_impl(tmp_path_factory):
+    """The chain and shifter as they were before jitter and gravel were made rate-independent."""
+    return load_old_impl(tmp_path_factory, PRE_NORMALISED, "vc_pre_normalised",
+                         ("dsp/effects.py", "dsp/spectral.py", "dsp/rng.py"))
 
 
 # Whisper drew from an unseeded generator before, so it has no fixed output to compare.
@@ -136,7 +153,7 @@ def test_neutral_chain_is_bit_identical_to_before(old_impl, preset):
     old_chain, _ = old_impl
     s = make_settings(preset).update(**NEUTRAL)
     x = voice_like(f0=140, seconds=1.5)
-    new = run_chain(x, chain=VoiceChain(SR, "balanced", s))
+    new = run_chain(x, chain=VoiceChain(SR, "balanced", s, **PER_BIN_PHASE))
     old = run_chain(x, chain=old_chain.VoiceChain(SR, "balanced", s))
     assert np.array_equal(new, old)
 
@@ -144,7 +161,7 @@ def test_neutral_chain_is_bit_identical_to_before(old_impl, preset):
 def test_neutral_bypass_toggling_is_bit_identical_to_before(old_impl):
     old_chain, _ = old_impl
     s_new, s_old = make_settings("deeper"), make_settings("deeper")
-    new, old = VoiceChain(SR, "balanced", s_new), old_chain.VoiceChain(SR, "balanced", s_old)
+    new, old = VoiceChain(SR, "balanced", s_new, **PER_BIN_PHASE), old_chain.VoiceChain(SR, "balanced", s_old)
     x = voice_like(f0=140, seconds=1.5)
     b = new.block_size
     for j, i in enumerate(range(0, len(x) - b + 1, b)):
@@ -164,8 +181,8 @@ def test_neutral_shifter_is_bit_identical_to_before(old_impl, fft, ov, block, co
     _, old_spectral = old_impl
     x = voice_like(f0=160, seconds=1.6)  # whole 512-sample blocks
     outs = []
-    for cls in (SpectralVoice, old_spectral.SpectralVoice):
-        v = cls(SR, fft_size=fft, overlap=ov, block_size=block)
+    for cls, phase in ((SpectralVoice, PER_BIN_PHASE), (old_spectral.SpectralVoice, {})):
+        v = cls(SR, fft_size=fft, overlap=ov, block_size=block, **phase)
         v.set_pitch(controls.get("pitch", 0))
         v.set_formant(controls.get("formant", 0))
         v.set_mode(controls.get("mode", "normal"))
@@ -231,6 +248,122 @@ def test_jitter_roughens_pitch_but_keeps_its_centre():
     assert spreads[1] > 2 * spreads[0] + 0.01 and spreads[2] > 1.5 * spreads[1]
 
 
+def pitch_per_frame(voice, seconds=120.0):
+    """The shifter's own pitch offset (semitones) for each frame of ``seconds``, before any audio."""
+    n = int(seconds * voice.sample_rate / voice.hop)
+    return np.array([12 * math.log2(voice._character(f)[0]) for f in range(n)])
+
+
+@pytest.mark.parametrize("quality", list(QUALITY))
+def test_tremor_cycles_vary_in_length_like_natural_tremor(quality):
+    """Each cycle draws its own rate: a few percent cycle to cycle, the same at every quality.
+    (One draw per frame averaged out to under 1.5% over the frames of a cycle.)"""
+    hz = 5.5
+    v = VoiceChain(SR, quality).voice
+    v.set_tremor(hz, 1.0)
+    st = pitch_per_frame(v)
+    t = np.arange(len(st)) * v.hop / SR
+    up = np.flatnonzero((st[:-1] < 0) & (st[1:] >= 0))
+    starts = t[up] + (t[up + 1] - t[up]) * -st[up] / (st[up + 1] - st[up])
+    periods = np.diff(starts)
+    assert abs(periods.mean() * hz - 1) < 0.02
+    assert 0.03 < np.std(periods) / periods.mean() < 0.09
+
+
+def jitter_spread_st(sr, quality):
+    """Pitch spread from jitter 1 alone, in semitones: (RMS of the per-frame pitch, as measured on the output)."""
+    v = VoiceChain(sr, quality).voice
+    v.set_jitter(1.0)
+    frames = np.sqrt(np.mean(pitch_per_frame(v) ** 2))
+    y = VoiceChain(sr, quality, Settings(jitter=1.0)).process_buffer(voice_like(f0=150, seconds=8.0, sr=sr))
+    track, _ = f0_track(y[sr:], sr=sr)
+    return frames, np.std(12 * np.log2(track / np.median(track)))
+
+
+def test_jitter_spread_does_not_depend_on_quality_or_sample_rate():
+    """The glide toward each per-frame target smooths more at shorter hops; the
+    targets are scaled to cancel that. Before, 48 kHz gave 0.07 / 0.11 / 0.15 st
+    at low-latency / balanced / high-quality, and 16 kHz balanced 0.15 st."""
+    ref = jitter_spread_st(SR, "balanced")
+    for sr, quality in [(SR, "low-latency"), (SR, "high-quality"), (16000, "balanced")]:
+        got = jitter_spread_st(sr, quality)
+        assert abs(got[0] / ref[0] - 1) < 0.05, (sr, quality, got, ref)  # what the scaling controls
+        assert abs(got[1] / ref[1] - 1) < 0.15, (sr, quality, got, ref)  # what a listener gets
+
+
+@pytest.mark.parametrize("preset", ["old_lady", "old_man", "kid"])
+def test_jitter_and_gravel_are_unchanged_where_the_presets_were_tuned(pre_normalised_impl, preset):
+    """At balanced quality at 48 kHz both scalings are exactly 1, so the output is bit-identical."""
+    old_chain, _ = pre_normalised_impl
+    s = make_settings(preset).update(tremor_depth=0.0)  # tremor did change: its rate is drawn per cycle now
+    x = voice_like(f0=140, seconds=1.5)
+    new = run_chain(x, chain=VoiceChain(SR, "balanced", s, **PER_BIN_PHASE))
+    old = run_chain(x, chain=old_chain.VoiceChain(SR, "balanced", s))
+    assert np.array_equal(new, old)
+
+
+def test_gravel_rate_steps_are_a_fixed_time_at_any_sample_rate():
+    for fs, tick in [(48000, 256), (44100, 235), (96000, 512), (16000, 85)]:
+        assert GravelModulator(fs).tick == tick
+
+
+# ---- harmonics stay whole while the pitch moves ---------------------------
+
+# Gravel, breath and reverb modulate the level by design: off, to isolate the pitch motion.
+STILL = dict(gravel=0.0, breath=0.0, reverb_mix=0.0)
+MOVING_PITCH = {
+    "old_lady": make_settings("old_lady").update(**STILL),
+    "ghost": make_settings("ghost").update(**STILL),
+    "vibrato": make_settings("vibrato").update(**STILL),
+    "alien": make_settings("alien").update(**STILL),
+    "tremor 0.5 st": Settings(tremor_depth=0.5),
+    "jitter 0.6": Settings(jitter=0.6),
+    "robot + tremor 0.5 st": Settings(mode="robot", tremor_depth=0.5),
+    "robot + jitter 0.6": Settings(mode="robot", jitter=0.6),
+}
+
+
+def shifter_f0(chain, s, f0, length):
+    """The fundamental the shifter aims for at each sample of process_buffer's
+    output, from its own per-frame pitch: ``f0`` (or the robot's) times each
+    frame's ratio, placed at the frame's centre, which process_buffer lines up
+    with the input's."""
+    v = chain.voice
+    twin = SpectralVoice(chain.sample_rate, fft_size=v.fft_size, overlap=v.overlap)
+    twin.set_pitch(s.pitch)
+    twin.set_tremor(s.tremor_hz, s.tremor_depth)
+    twin.set_jitter(s.jitter)
+    frames = length // v.hop + 2
+    ratio = [twin._character(f)[0] for f in range(frames)]
+    centre = (np.arange(frames) + 1) * v.hop - v.fft_size // 2
+    return (s.robot_hz if s.mode == "robot" else f0) * np.interp(np.arange(length), centre, ratio)
+
+
+@pytest.mark.parametrize("quality,sr", FURTHER_PER_HOP)
+@pytest.mark.parametrize("case", list(MOVING_PITCH))
+def test_harmonics_do_not_drop_out_under_tremor_and_jitter(case, quality, sr):
+    """Each partial's phase follows it from frame to frame. Kept per FFT bin, it
+    was lost whenever tremor or jitter moved a partial to the next bin, and the
+    out-of-phase frame cancelled it for about a frame: 20-60 dB dips. Matching
+    each partial to the previous frame's within a fixed 2 bins still lost the
+    upper harmonics at high-quality and 16 kHz, where they move several times
+    further per hop in bins; the window now scales with that. Each harmonic is
+    measured along the shifter's own pitch, so even h14's whole swing is followed."""
+    s = MOVING_PITCH[case]
+    x = voice_like(f0=150, seconds=4.0, sr=sr)
+    dips = {}
+    for label, phase in (("before", PER_BIN_PHASE), ("after", {})):
+        chain = VoiceChain(sr, quality, s, **phase)
+        y = chain.process_buffer(x)
+        f0 = shifter_f0(chain, s, 150.0, len(y))
+        dips[label] = tracked_harmonic_dips(y[sr:], f0[sr:], (1, 2, 3, 5, 8, 11, 14), sr)
+    worst = {k: max(share for share, _ in d.values()) for k, d in dips.items()}
+    deepest = {k: min(low for _, low in d.values()) for k, d in dips.items()}
+    assert worst["before"] > 0.01  # the measurement does see the dropouts
+    assert worst["after"] < 0.01, dips["after"]
+    assert deepest["after"] > deepest["before"] / 3, dips
+
+
 # ---- breath ---------------------------------------------------------------
 
 def harmonic_to_noise_db(y, f0, width=12.0, fmax=8000.0):
@@ -275,6 +408,7 @@ def test_breath_never_reaches_the_phase_memory():
         for i in range(0, len(x) - 127, 128):
             ya, yb = a.process(x[i:i + 128]), b.process(x[i:i + 128])
             assert np.array_equal(a._sum_phase, b._sum_phase)
+            assert np.array_equal(a._prev_ph, b._prev_ph)
         assert np.max(np.abs(ya - yb)) > 1e-4  # ...while the audio itself did change
 
 
