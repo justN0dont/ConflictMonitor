@@ -29,7 +29,7 @@ SLIDERS = {
         ("jitter", "Shakiness", 0, 1, 0.01, ""),
         ("breath", "Breathiness", 0, 1, 0.01, ""),
         ("gravel", "Gravel", 0, 1, 0.01, ""),
-        ("gravel_hz", "Gravel rate", 20, 120, 1, "Hz"),
+        ("gravel_hz", "Gravel rate", 20, 200, 1, "Hz"),
     ],
     "Tone": [
         ("highpass_hz", "High-pass", 20, 1000, 5, "Hz"),

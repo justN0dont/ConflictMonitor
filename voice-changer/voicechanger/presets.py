@@ -11,10 +11,11 @@ on big shifts alone. Aged voices are shaky: a 4-7 Hz tremor (tremor_hz,
 tremor_depth) plus cycle-to-cycle pitch jitter, with aspiration noise from a
 leaky glottis (breath) and less high end. Gravel is vocal fry: irregular
 low-rate pulsing (gravel, gravel_hz about 30-50 Hz) that also gives the
-"tough guy", pirate and valley-girl timbres their texture. Several presets
-trim output_gain_db or comp_makeup_db so switching between them never jumps
-more than about 3 dB in loudness; each was measured on low (110 Hz) and high
-(210 Hz) voices.
+"tough guy", pirate and valley-girl timbres their texture. The character
+presets trim output_gain_db or comp_makeup_db so each stays within about 3 dB
+of "natural" in loudness; each was measured on low (110 Hz) and high (210 Hz)
+voices. (Some earlier presets, such as demon, robot and radio, run a few dB
+hotter through their drive.)
 """
 
 from __future__ import annotations

@@ -21,6 +21,8 @@ What makes it sound professional rather than like a toy:
   saturation, compressor, reverb, and a limiter that never lets output clip.
 - **Robot** (fixed-pitch harmonic voice) and **whisper** modes keep your words
   intelligible because they reuse your own formants.
+- **Character controls** (tremor, shakiness, breathiness, gravel) add the cues
+  that make a voice sound old, rough or eerie, which a pitch shift alone can't.
 - Loudness stays steady whatever the shift.
 - Bypass is delay-matched, so A/B comparison is honest.
 - Monitor output, WAV recording, offline file rendering, saveable settings.
@@ -96,6 +98,7 @@ python -m voicechanger presets
 python -m voicechanger live --preset deeper --output "CABLE Input" --monitor "Headphones"
 python -m voicechanger live --pitch -3 --formant 3 --record take1.wav
 python -m voicechanger file in.wav out.wav --preset robot
+python -m voicechanger file in.wav out.wav --preset old_man --breath 0.3
 
 # Windows, system-wide (asks for admin when needed)
 python -m voicechanger apo list                       # microphones, * = installed
@@ -120,9 +123,93 @@ harmonics must be resolvable to be shifted cleanly.
 
 ## Presets
 
-`natural`, `deeper`, `feminine`, `masculine`, `anonymous` (pitch and formants
-moved in opposite directions, which makes a voice hard to recognise),
-`chipmunk`, `giant`, `demon`, `robot`, `android`, `whisper`, `radio`, `cathedral`.
+27 presets. Each one is a starting point: load it, then adjust any slider.
+Pitch and formant amounts are in semitones.
+
+Voices:
+
+- `natural`: your own voice through the clean-up chain only (rumble filter,
+  gate, gentle compression).
+- `deeper`: pitch down 4, formants down 2, a little extra warmth.
+- `feminine`: pitch up 6 and formants up 3 (between typical male and female
+  voices, pitch differs far more than formants), lighter lows, a brighter top.
+- `masculine`: pitch down 6 and formants down 3, more low end, a slightly darker top.
+- `anonymous`: pitch down 3 and formants up 3. Moving them in opposite
+  directions makes a voice hard to recognise.
+- `chipmunk`: pitch and formants both up most of an octave, small and squeaky.
+- `giant`: pitch down 10 with a much longer vocal tract (formants down 6),
+  heavy lows and a large room.
+- `demon`: an octave down with nearly your own formants, heavy distortion,
+  booming lows and a big reverb.
+- `robot`: a 110 Hz monotone carried by your own formants so words stay
+  clear, with a mid push and light grit.
+- `android`: a higher 220 Hz monotone, slightly raised formants, a touch of room.
+- `whisper`: harmonics replaced by breath noise shaped by your formants, with
+  a brighter top. An intelligible whisper.
+- `radio`: a 400 Hz–3.4 kHz telephone band, a mid push, distortion and hard compression.
+- `cathedral`: your own voice in a very large, long reverb.
+
+Characters, built on the character controls below:
+
+- `old_lady`: pitch up 8 with slightly raised formants, a gentle 6 Hz tremor,
+  unsteady pitch, breathiness, a faint rasp and a thin tone with less chest.
+- `old_man`: a little lower with a thinner chest, a 5 Hz tremor, unsteady
+  pitch, some breath, a touch of gravel and a slightly darker top.
+- `kid`: an octave up with a much smaller vocal tract (formants up 5), a little
+  breathiness and unsteadiness, and a bright, forward tone.
+- `tough_guy`: big and forceful. Pitch down 5 with a longer vocal tract, chest
+  weight, a vocal-fry rattle, gritty drive, a barking midrange and heavy, punchy compression.
+- `pirate`: gruff and weathered. A little deeper, with hoarse breath, fry
+  gravel, light grit, a barky midrange and a softened top.
+- `valley_girl`: bright and airy. Slightly higher pitch and formants, light
+  breathiness, a mid and treble lift and a light, slow fry (the uptalk is up to you).
+- `announcer`: a smooth, deep broadcast voice with lower pitch and formants,
+  warm lows, a crisp top, steady compression and a touch of room.
+- `villain`: menacing. Pitch down 5 with darker formants, a gravelly rattle, a
+  warm close-up low end, a dark top and a long, dramatic reverb.
+- `raspy`: a husky, smoky rasp at your own pitch, with breathy aspiration, a
+  creaky rattle and a touch of warm drive.
+- `ghost`: an airy, hollow spectre. Slightly raised pitch and formants, a slow
+  3.5 Hz waver, heavy breathiness, thin lows and a long, ethereal reverb.
+- `ogre`: huge and monstrous. An octave down with a much longer vocal tract, a
+  heavy, slow 30 Hz gravel growl, grit and a big low end.
+- `alien`: pitch up 6 with formants down 4, a fast 9 Hz warble and a 180 Hz
+  buzz for a metallic shimmer, in a small, bright room.
+- `megaphone`: a bullhorn. A narrow 600 Hz–4 kHz band with a honky 1.5 kHz
+  peak, heavy drive, tight compression and a touch of outdoor space.
+- `vibrato`: a singer's vibrato, a steady 5.5 Hz swing of about half a semitone
+  each way with a matching loudness pulse, a brighter top and a lush hall reverb.
+
+## Character controls
+
+The *Character* sliders add the cues listeners use to judge age and texture.
+Tremor, Shakiness, Breathiness and Gravel start at zero, and at zero the
+output is bit-for-bit the same as without them.
+
+- **Tremor** (0–2 semitones, typically 0.3–0.7): a regular pitch swing of up to
+  this much either way, with loudness rising and falling in step, as in a sung
+  vibrato or an aged, shaky voice.
+- **Tremor rate** (2–10 Hz): how fast it swings. Aged voices and vibrato sit
+  around 5–7 Hz, slower sounds eerie, faster becomes a warble. It drifts ±10%
+  so it never sounds mechanical.
+- **Shakiness** (0–1, typically 0.3–0.6): random, smoothly gliding pitch
+  wander, up to ±0.6 semitone at 1.
+- **Breathiness** (0–1, typically 0.1–0.4): turns that share of the voice's
+  energy into breath noise shaped by your own formants, so the voice gets
+  airier without getting louder. Whisper mode is all breath already, so it has
+  no effect there.
+- **Gravel** (0–1, typically 0.2–0.4, up to 0.7 for a growl): vocal fry. The
+  level dips in quick, slightly irregular pulses, like vocal folds closing unevenly.
+- **Gravel rate** (20–200 Hz): the pulse rate. 30–50 Hz sounds like creak;
+  above ~100 Hz it becomes a buzz.
+
+Tremor rate and Gravel rate do nothing until Tremor or Gravel is turned up.
+Like every slider, these apply live: in the preview and system-wide in every
+app, because the Windows effect runs the same processing. Their randomness is
+deterministic, so a file render comes out the same every time. On the command
+line they are `--tremor-depth`, `--tremor-hz`, `--jitter`, `--breath`,
+`--gravel` and `--gravel-hz`, which accept wider ranges (tremor up to 3
+semitones at 0.5–15 Hz, gravel down to 10 Hz).
 
 ## Tests
 
@@ -136,14 +223,25 @@ The suite checks that pass-through is bit-exact, that pitch accuracy is within
 2% for normal and deep voices, that formants are preserved, that shifting adds
 no sidebands, that loudness holds, that the limiter never exceeds its ceiling,
 that every preset runs clean, and that each quality tier runs comfortably
-faster than real time. It also checks that the C++ code inside the Windows
-effect matches the Python reference sample for sample (within 1e-4), and that
-install/uninstall restores the registry exactly across several kinds of mic.
+faster than real time. For the character controls it checks that at zero they
+leave the output bit-identical to before they existed, that tremor swings the
+pitch at its set rate and depth, that breath keeps loudness steady, and that
+gravel pulses at its rate whatever the block size.
+
+It also checks that the C++ code inside the Windows effect matches the Python
+reference sample for sample (within 1e-4). That covers every preset, each
+character control alone and combined (including out-of-range values, which
+both sides must clamp alike), settings changing mid-stream, and a randomized
+fuzz set that sweeps every control across its range in all three modes and
+quality tiers. Finally, it checks that install/uninstall restores the registry
+exactly across several kinds of mic.
 
 On Windows, CI also builds the APO with MSVC and runs `apo_harness.exe`, which
 loads the DLL the way the audio engine does. It negotiates formats, processes
-audio and checks the pitch, applies live settings changes, swaps quality
-mid-stream, falls back to pass-through when the settings are removed, and unloads.
+audio and checks the pitch, applies live settings changes (including the
+character controls, checking that tremor swings the pitch at its rate), swaps
+quality mid-stream, falls back to pass-through when the settings are removed,
+and unloads.
 
 ### Building the APO yourself
 
