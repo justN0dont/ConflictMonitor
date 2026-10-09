@@ -34,9 +34,13 @@ SLIDERS = {
     "Tone": [
         ("highpass_hz", "High-pass", 20, 1000, 5, "Hz"),
         ("lowpass_hz", "Low-pass", 1000, 20000, 100, "Hz"),
-        ("low_db", "Low (200 Hz)", -12, 12, 0.5, "dB"),
-        ("mid_db", "Mid (1.5 kHz)", -12, 12, 0.5, "dB"),
-        ("high_db", "High (5 kHz)", -12, 12, 0.5, "dB"),
+        ("low_hz", "Low shelf at", 50, 1000, 5, "Hz"),
+        ("low_db", "Low", -12, 12, 0.5, "dB"),
+        ("mid_hz", "Mid at", 200, 8000, 10, "Hz"),
+        ("mid_q", "Mid Q", 0.3, 4, 0.05, ""),
+        ("mid_db", "Mid", -12, 12, 0.5, "dB"),
+        ("high_hz", "High shelf at", 1000, 16000, 100, "Hz"),
+        ("high_db", "High", -12, 12, 0.5, "dB"),
         ("drive", "Drive", 0, 1, 0.01, ""),
     ],
     "Dynamics & space": [

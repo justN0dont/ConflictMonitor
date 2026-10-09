@@ -233,12 +233,45 @@ class Limiter:
 # Colour
 # ---------------------------------------------------------------------------
 
-def drive(x: np.ndarray, amount: float) -> np.ndarray:
-    """tanh saturation. amount 0..1; loudness is roughly preserved."""
-    if amount <= 0:
-        return x
-    k = 1.0 + 19.0 * amount
-    return np.tanh(k * x) / math.tanh(k) if k > 1 else x
+class Drive:
+    """tanh saturation whose grit doesn't depend on how loud the mic is.
+
+    A fixed curve bites by level: the same setting stays clean on a quiet mic
+    and fuzzes on a loud one, and normalising it to full scale gave it up to
+    +26 dB of small-signal gain, so driven presets came out far louder than
+    the rest. Instead each block is scaled from its smoothed RMS to REF_DB
+    before the curve and back after it. The grit then depends only on
+    ``amount`` (0..1), quiet parts pass undistorted, and the makeup gives
+    back what flattening the peaks takes off speech (0.1 dB at 0.05, 3.5 dB
+    at 1). The detector runs at any amount, so turning drive up mid-stream
+    starts from the right level.
+    """
+
+    REF_DB = -26.0    # RMS the curve sees
+    FLOOR_DB = -60.0  # quieter than this (pauses, room tone) is not scaled up further
+
+    def __init__(self, fs: float, attack: float = 0.005, release: float = 0.1):
+        self.fs, self.attack, self.release = fs, attack, release
+        self.reset()
+
+    def reset(self) -> None:
+        self._env_db = -120.0
+        self._gain = db_to_lin(self.REF_DB - self.FLOOR_DB)
+
+    def process(self, x: np.ndarray, amount: float) -> np.ndarray:
+        n = len(x)
+        if n == 0:
+            return x
+        level = lin_to_db(float(np.sqrt(np.mean(x * x))))
+        c = _coef(self.attack if level > self._env_db else self.release, n, self.fs)
+        self._env_db = level + (self._env_db - level) * c
+        new = db_to_lin(self.REF_DB - max(self._env_db, self.FLOOR_DB))
+        g = _ramp(self._gain, new, n)
+        self._gain = new
+        if amount <= 0:
+            return x
+        k = (1.0 + 19.0 * amount) * g
+        return np.tanh(k * x) / k * db_to_lin(3.5 * amount ** 1.3)
 
 
 class GravelModulator:

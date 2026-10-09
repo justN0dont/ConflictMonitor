@@ -1,10 +1,13 @@
-"""Character presets keep their loudness relative to "natural" at any mic level.
+"""Every preset keeps its loudness relative to "natural" at any mic level.
 
-Several presets boost the EQ or drive and let the compressor pull the level
-back down. Below the compressor's threshold nothing pulls it down, so tuning
-at one speaking level can leave a preset many dB louder than natural on a
-quiet mic and quieter on a loud one. Each preset is therefore measured at a
-quiet and a loud level, with a low and a high voice.
+A preset tuned at one speaking level can still jump on another: a drive whose
+grit depends on level adds gain on a quiet mic and squashes a loud one, and a
+compressor that starts working at a different mic level from natural's
+reshapes the level as the mic gets louder. Each preset is therefore measured
+on a quiet and a loud mic, with a low and a high voice: its loudness must
+stay near natural's at both, and change between them the way natural's does.
+(On real speech the presets sit within 0.7 dB of natural; this synthetic
+voice, with only three formants, is a coarser check.)
 """
 
 import numpy as np
@@ -12,14 +15,13 @@ import pytest
 from scipy.signal import lfilter
 
 from voicechanger.chain import VoiceChain
-from voicechanger.presets import make_settings
+from voicechanger.presets import PRESETS, make_settings
 
 SR = 48000
-CHARACTERS = ["old_lady", "old_man", "kid", "tough_guy", "pirate", "valley_girl", "announcer", "villain",
-              "raspy", "ghost", "ogre", "alien", "megaphone", "vibrato"]
 LEVELS_DBFS = (-38, -22)  # speech RMS: a quiet laptop mic, and a close headset
 VOICES_HZ = (110, 210)
-TOLERANCE_DB = 3.0
+TOLERANCE_DB = 3.0  # re natural, at either level
+TRACKING_DB = 1.5   # quiet-to-loud change re natural's
 
 
 def k_weighted(y):
@@ -77,9 +79,12 @@ def loudness():
     return measure
 
 
-@pytest.mark.parametrize("preset", CHARACTERS)
-def test_character_preset_stays_near_natural_loudness_at_any_mic_level(loudness, preset):
+@pytest.mark.parametrize("preset", [p for p in PRESETS if p != "natural"])
+def test_preset_stays_near_natural_loudness_at_any_mic_level(loudness, preset):
     ref, got = loudness("natural"), loudness(preset)
     diffs = {key: got[key] - ref[key] for key in ref}
     report = ", ".join(f"{hz} Hz at {lvl} dBFS: {d:+.1f} dB" for (lvl, hz), d in diffs.items())
     assert all(abs(d) <= TOLERANCE_DB for d in diffs.values()), report
+    quiet, loud = LEVELS_DBFS
+    for hz in VOICES_HZ:
+        assert abs(diffs[(loud, hz)] - diffs[(quiet, hz)]) <= TRACKING_DB, report

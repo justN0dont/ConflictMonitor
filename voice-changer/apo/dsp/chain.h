@@ -25,7 +25,8 @@ struct Settings {
     bool gate_enabled = true;
     double gate_threshold_db = -50.0;
     double highpass_hz = 80.0, lowpass_hz = 18000.0;
-    double low_db = 0.0, mid_db = 0.0, high_db = 0.0, drive = 0.0;
+    double low_hz = 200.0, low_db = 0.0, mid_hz = 1500.0, mid_q = 0.9, mid_db = 0.0;
+    double high_hz = 5000.0, high_db = 0.0, drive = 0.0;
     bool comp_enabled = true;
     double comp_threshold_db = -20.0, comp_ratio = 3.0, comp_makeup_db = 3.0;
     double reverb_mix = 0.0, reverb_room = 0.6, output_gain_db = 0.0;
@@ -70,6 +71,7 @@ private:
     GravelModulator gravel_;
     Biquad rumble_, hp_, lp_, low_, mid_, high_;
     NoiseGate gate_;
+    Drive drive_;
     Compressor comp_;
     Reverb reverb_;
     Limiter limiter_;

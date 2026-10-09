@@ -262,12 +262,43 @@ private:
 // Colour
 // ---------------------------------------------------------------------------
 
-inline void drive(double* x, int n, double amount) {
-    if (amount <= 0) return;
-    const double k = 1.0 + 19.0 * amount;
-    const double norm = std::tanh(k);
-    for (int i = 0; i < n; i++) x[i] = std::tanh(k * x[i]) / norm;
-}
+// tanh saturation whose grit doesn't depend on how loud the mic is: each
+// block is scaled from its smoothed RMS to kRefDb before the curve and back
+// after it, so quiet parts pass undistorted and `amount` alone sets the
+// grit. The detector runs at any amount. See Drive in effects.py.
+class Drive {
+public:
+    explicit Drive(double fs) : fs_(fs) { reset(); }
+
+    void process(double* x, int n, double amount) {
+        if (n == 0) return;
+        const double level = lin_to_db(block_rms(x, n));
+        const double c = block_coef(level > env_db_ ? kAttack : kRelease, n, fs_);
+        env_db_ = level + (env_db_ - level) * c;
+        const double nw = db_to_lin(kRefDb - std::max(env_db_, kFloorDb));
+        const double g0 = gain_;
+        gain_ = nw;
+        if (amount <= 0) return;
+        const double k = 1.0 + 19.0 * amount;
+        const double makeup = db_to_lin(3.5 * std::pow(amount, 1.3));
+        for (int i = 0; i < n; i++) {
+            const double kg = k * ramp_at(g0, nw, i, n);
+            x[i] = std::tanh(kg * x[i]) / kg * makeup;
+        }
+    }
+
+    void reset() {
+        env_db_ = -120.0;
+        gain_ = db_to_lin(kRefDb - kFloorDb);
+    }
+
+private:
+    static constexpr double kRefDb = -26.0;    // RMS the curve sees
+    static constexpr double kFloorDb = -60.0;  // quieter than this is not scaled up further
+    static constexpr double kAttack = 0.005, kRelease = 0.1;
+    double fs_;
+    double env_db_ = -120.0, gain_ = 1.0;
+};
 
 // Vocal fry / gravel: a fast, slightly irregular train of raised-cosine dips
 // in level at `hz`, like vocal folds slapping shut in uneven pulses; `amount`

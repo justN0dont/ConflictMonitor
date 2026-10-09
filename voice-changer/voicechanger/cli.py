@@ -25,7 +25,8 @@ VOICE_FLAGS = {
     "tremor_depth": float, "tremor_hz": float, "jitter": float, "breath": float,
     "gravel": float, "gravel_hz": float,
     "gate_threshold_db": float, "highpass_hz": float, "lowpass_hz": float,
-    "low_db": float, "mid_db": float, "high_db": float, "drive": float,
+    "low_hz": float, "low_db": float, "mid_hz": float, "mid_q": float, "mid_db": float,
+    "high_hz": float, "high_db": float, "drive": float,
     "reverb_mix": float, "reverb_room": float, "input_gain_db": float, "output_gain_db": float,
 }
 

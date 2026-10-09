@@ -70,8 +70,12 @@ Settings parse_settings(const std::string& text, Settings s) {
         else if (key == "gate_threshold_db") s.gate_threshold_db = clampd(d, -120, 0);
         else if (key == "highpass_hz") s.highpass_hz = clampd(d, 10, 20000);
         else if (key == "lowpass_hz") s.lowpass_hz = clampd(d, 100, 24000);
+        else if (key == "low_hz") s.low_hz = clampd(d, 20, 2000);
         else if (key == "low_db") s.low_db = clampd(d, -24, 24);
+        else if (key == "mid_hz") s.mid_hz = clampd(d, 100, 12000);
+        else if (key == "mid_q") s.mid_q = clampd(d, 0.1, 10);
         else if (key == "mid_db") s.mid_db = clampd(d, -24, 24);
+        else if (key == "high_hz") s.high_hz = clampd(d, 1000, 20000);
         else if (key == "high_db") s.high_db = clampd(d, -24, 24);
         else if (key == "drive") s.drive = clampd(d, 0, 1);
         else if (key == "comp_threshold_db") s.comp_threshold_db = clampd(d, -80, 0);
@@ -110,6 +114,7 @@ VoiceChain::VoiceChain(int sample_rate, Quality quality, int block_size, bool al
       mid_(sample_rate, BiquadKind::Peaking, 1500.0, 0.9),
       high_(sample_rate, BiquadKind::HighShelf, 5000.0),
       gate_(sample_rate),
+      drive_(sample_rate),
       comp_(sample_rate),
       reverb_(sample_rate),
       limiter_(sample_rate),
@@ -124,6 +129,7 @@ void VoiceChain::reset() {
     gravel_.reset();
     rumble_.reset(); hp_.reset(); lp_.reset(); low_.reset(); mid_.reset(); high_.reset();
     gate_.reset();
+    drive_.reset();
     comp_.reset();
     reverb_.reset();
     limiter_.reset();
@@ -184,15 +190,15 @@ void VoiceChain::process(const float* in, float* out, int n, const Settings& s) 
 
     hp_.set(s.highpass_hz);
     lp_.set(s.lowpass_hz);
-    low_.set(200.0, 0.707, s.low_db);
-    mid_.set(1500.0, 0.9, s.mid_db);
-    high_.set(5000.0, 0.707, s.high_db);
+    low_.set(s.low_hz, 0.707, s.low_db);
+    mid_.set(s.mid_hz, clampd(s.mid_q, 0.1, 10), s.mid_db);
+    high_.set(s.high_hz, 0.707, s.high_db);
     hp_.process(x, n);
     lp_.process(x, n);
     low_.process(x, n);
     mid_.process(x, n);
     high_.process(x, n);
-    drive(x, n, s.drive);
+    drive_.process(x, n, s.drive);
 
     comp_.enabled = s.comp_enabled;
     comp_.threshold_db = s.comp_threshold_db;

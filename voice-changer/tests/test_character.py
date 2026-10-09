@@ -34,6 +34,11 @@ PRE_NORMALISED = "b08ded4cb3365bbd5169a3307de32c353e375fa8"  # last before jitte
 PER_BIN_PHASE = {"track_peaks": False}
 NEUTRAL = {k: getattr(Settings(), k)
            for k in ("tremor_hz", "tremor_depth", "jitter", "breath", "gravel", "gravel_hz")}
+# Tone controls the old code didn't have: its EQ frequencies were fixed at
+# today's defaults, and its drive was a different (level-dependent) curve,
+# tested on its own in test_dsp. Comparisons with old code hold them at what
+# the old code could do.
+OLD_TONE = {"drive": 0.0, **{k: getattr(Settings(), k) for k in ("low_hz", "mid_hz", "mid_q", "high_hz")}}
 MAXED = {"tremor_hz": 15.0, "tremor_depth": 3.0, "jitter": 1.0, "breath": 1.0,
          "gravel": 1.0, "gravel_hz": 200.0}
 
@@ -151,7 +156,7 @@ COMPARABLE = [p for p in PRESETS if PRESETS[p].get("mode") != "whisper"]
 @pytest.mark.parametrize("preset", COMPARABLE)
 def test_neutral_chain_is_bit_identical_to_before(old_impl, preset):
     old_chain, _ = old_impl
-    s = make_settings(preset).update(**NEUTRAL)
+    s = make_settings(preset).update(**NEUTRAL, **OLD_TONE)
     x = voice_like(f0=140, seconds=1.5)
     new = run_chain(x, chain=VoiceChain(SR, "balanced", s, **PER_BIN_PHASE))
     old = run_chain(x, chain=old_chain.VoiceChain(SR, "balanced", s))
@@ -160,7 +165,7 @@ def test_neutral_chain_is_bit_identical_to_before(old_impl, preset):
 
 def test_neutral_bypass_toggling_is_bit_identical_to_before(old_impl):
     old_chain, _ = old_impl
-    s_new, s_old = make_settings("deeper"), make_settings("deeper")
+    s_new, s_old = make_settings("deeper").update(**OLD_TONE), make_settings("deeper").update(**OLD_TONE)
     new, old = VoiceChain(SR, "balanced", s_new, **PER_BIN_PHASE), old_chain.VoiceChain(SR, "balanced", s_old)
     x = voice_like(f0=140, seconds=1.5)
     b = new.block_size
@@ -295,7 +300,7 @@ def test_jitter_spread_does_not_depend_on_quality_or_sample_rate():
 def test_jitter_and_gravel_are_unchanged_where_the_presets_were_tuned(pre_normalised_impl, preset):
     """At balanced quality at 48 kHz both scalings are exactly 1, so the output is bit-identical."""
     old_chain, _ = pre_normalised_impl
-    s = make_settings(preset).update(tremor_depth=0.0)  # tremor did change: its rate is drawn per cycle now
+    s = make_settings(preset).update(tremor_depth=0.0, **OLD_TONE)  # tremor did change: its rate is drawn per cycle now
     x = voice_like(f0=140, seconds=1.5)
     new = run_chain(x, chain=VoiceChain(SR, "balanced", s, **PER_BIN_PHASE))
     old = run_chain(x, chain=old_chain.VoiceChain(SR, "balanced", s))

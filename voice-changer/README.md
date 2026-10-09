@@ -17,8 +17,9 @@ What makes it sound professional rather than like a toy:
   as it moves. A pure tone comes out as a pure tone, with everything else more
   than 40 dB down, and harmonics stay whole while the pitch glides or wobbles
   (both tested). The common per-bin vocoder approach leaves audible warble here.
-- **A full channel strip:** rumble filter, noise gate, tone filters, 3-band EQ,
-  saturation, compressor, reverb, and a limiter that never lets output clip.
+- **A full channel strip:** rumble filter, noise gate, tone filters, a 3-band
+  EQ whose frequencies you can move, saturation that sounds the same however
+  loud your mic is, compressor, reverb, and a limiter that never lets output clip.
 - **Robot** (fixed-pitch harmonic voice) and **whisper** modes keep your words
   intelligible because they reuse your own formants.
 - **Character controls** (tremor, shakiness, breathiness, gravel) add the cues
@@ -130,50 +131,66 @@ harmonics must be resolvable to be shifted cleanly.
 27 presets. Each one is a starting point: load it, then adjust any slider.
 Pitch and formant amounts are in semitones.
 
+Every preset is level-matched to `natural`: within about 0.7 dB on real male
+and female speech, from a quiet laptop mic to a hot headset, so switching
+voices never makes your listeners jump. Each sounds the same at any mic level,
+too: the grit doesn't come and go with how loud you speak, and every preset
+compresses as gently as `natural` (about 3 dB off the louder syllables at a
+normal speaking level; `announcer` a little firmer). Switching presets keeps
+your mic set-up (input gain and gate).
+
+The gender and age presets assume a voice at the other end of the range:
+`feminine`, `kid`, `old_lady` and `valley_girl` start from a lower voice,
+`masculine` from a higher one. Pull Pitch back towards 0 if yours is already
+most of the way there.
+
 Voices:
 
 - `natural`: your own voice through the clean-up chain only (rumble filter,
-  gate, gentle compression).
-- `deeper`: pitch down 4, formants down 2, a little extra warmth.
-- `feminine`: pitch up 6 and formants up 3 (between typical male and female
-  voices, pitch differs far more than formants), lighter lows, a brighter top.
-- `masculine`: pitch down 6 and formants down 3, more low end, a slightly darker top.
-- `anonymous`: pitch down 3 and formants up 3. Moving them in opposite
-  directions makes a voice hard to recognise.
-- `chipmunk`: pitch and formants both up most of an octave, small and squeaky.
-- `giant`: pitch down 10 with a much longer vocal tract (formants down 6),
-  heavy lows and a large room.
-- `demon`: an octave down with nearly your own formants, heavy distortion,
-  booming lows and a big reverb.
+  gate, gentle 2:1 compression).
+- `deeper`: pitch down 4 and formants down 1.5, with the low mids eased and a
+  little presence and air added so the bigger voice stays clear.
+- `feminine`: pitch up 7 and formants up 3 (between typical male and female
+  voices, pitch differs far more than formants), lighter lows and a softened top.
+- `masculine`: pitch down 7 and formants down 2.5, with the low mids eased and
+  presence lifted so the deeper voice stays clear.
+- `anonymous`: pitch down 3 and formants up 3, plus a touch of grit. Moving
+  them in opposite directions makes a voice hard to recognise.
+- `chipmunk`: pitch and formants both up most of an octave, small and squeaky,
+  with some body kept and the sibilance softened.
+- `giant`: pitch down 10 with a much longer vocal tract (formants down 6), big
+  lows kept clear of mud, a presence lift so words stay intelligible, and a large room.
+- `demon`: an octave down with nearly your own formants and a faint trace of
+  your own voice underneath, heavy distortion and a big, dark reverb.
 - `robot`: a 110 Hz monotone carried by your own formants so words stay
-  clear, with a mid push and light grit.
-- `android`: a higher 220 Hz monotone, slightly raised formants, a touch of room.
-- `whisper`: harmonics replaced by breath noise shaped by your formants, with
-  a brighter top. An intelligible whisper.
-- `radio`: a 400 Hz–3.4 kHz telephone band, a mid push, distortion and hard compression.
+  clear, with a mid push and buzzy grit.
+- `android`: a higher 220 Hz monotone, slightly raised formants, a softened
+  top and a touch of room.
+- `whisper`: harmonics replaced by breath noise shaped by your formants. An
+  intelligible whisper.
+- `radio`: a 350 Hz–3.4 kHz telephone band with a mid push and crunchy distortion.
 - `cathedral`: your own voice in a very large, long reverb.
 
 Characters, built on the character controls below:
 
 - `old_lady`: pitch up 8 with slightly raised formants, a gentle 6 Hz tremor,
-  unsteady pitch, breathiness, a faint rasp and a thin tone with less chest.
-- `old_man`: a little lower with a thinner chest, a 5 Hz tremor, unsteady
-  pitch, some breath, a touch of gravel and a slightly darker top.
+  unsteady pitch, breathiness, a faint rasp and a thin, soft tone.
+- `old_man`: a touch lower with a slightly longer vocal tract, a 5 Hz tremor,
+  unsteady pitch, breath, a little gravel, a thinner chest and a softer top.
 - `kid`: an octave up with a much smaller vocal tract (formants up 5), a little
-  breathiness and unsteadiness, and a bright, forward tone.
-- `tough_guy`: big and forceful. Pitch down 5 with a longer vocal tract, chest
-  weight, a vocal-fry rattle, light grit and a barking midrange. The
-  compressor only reins in shouting.
+  breathiness and unsteadiness, some body in the low mids and a softened top.
+- `tough_guy`: big and forceful. Pitch down 4 with a longer vocal tract, a
+  vocal-fry rattle, grit and a barking midrange.
 - `pirate`: gruff and weathered. A little deeper, with hoarse breath, fry
-  gravel, light grit, a barky midrange and a softened top.
-- `valley_girl`: bright and airy. Slightly higher pitch and formants, light
-  breathiness, a mid and treble lift and a light, slow fry (the uptalk is up to you).
-- `announcer`: a smooth, deep broadcast voice with lower pitch and formants,
-  warm lows, a crisp top, steady compression and a touch of room.
-- `villain`: menacing. Pitch down 5 with darker formants, a gravelly rattle, a
-  warm close-up low end, a dark top and a long, dramatic reverb.
+  gravel, grit, a barky midrange and a softened top.
+- `valley_girl`: bright and airy. Higher pitch and formants, light
+  breathiness, an airy top and a light, slow fry (the uptalk is up to you).
+- `announcer`: a smooth, deep broadcast voice. Slightly lower pitch and
+  formants, warm lows, presence and air, firmer compression and a touch of room.
+- `villain`: menacing. Pitch down 4 with darker formants, a gravelly rattle, a
+  dark top and a dramatic reverb.
 - `raspy`: a husky, smoky rasp at your own pitch, with breathy aspiration, a
-  creaky rattle and a touch of warm drive.
+  creaky rattle and warm grit.
 - `ghost`: an airy, hollow spectre. Slightly raised pitch and formants, a slow
   3.5 Hz waver, heavy breathiness, thin lows and a long, ethereal reverb.
 - `ogre`: huge and monstrous. An octave down with a much longer vocal tract, a
@@ -181,11 +198,9 @@ Characters, built on the character controls below:
 - `alien`: pitch up 6 with formants down 4, a fast 9 Hz warble and a 180 Hz
   buzz for a metallic shimmer, in a small, bright room.
 - `megaphone`: a bullhorn. A narrow 600 Hz–4 kHz band with a honky 1.5 kHz
-  peak and a touch of outdoor space. Its drive is moderate, so the grit
-  grows the louder you speak (nearly clean on a quiet mic), and the
-  compressor only catches loud input.
+  peak, a crunchy horn distortion and a touch of outdoor space.
 - `vibrato`: a singer's vibrato, a steady 5.5 Hz swing of about half a semitone
-  each way with a matching loudness pulse, a brighter top and a lush hall reverb.
+  each way with a matching loudness pulse, a little presence and air, and a hall reverb.
 
 ## Character controls
 

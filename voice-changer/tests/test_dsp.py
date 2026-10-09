@@ -3,9 +3,9 @@ import pytest
 from scipy.signal import butter, hilbert, sosfiltfilt
 
 from voicechanger.chain import QUALITY, Settings, VoiceChain, quality_spec
-from voicechanger.dsp.effects import Biquad, Compressor, Limiter, NoiseGate, Reverb, lin_to_db
+from voicechanger.dsp.effects import Biquad, Compressor, Drive, Limiter, NoiseGate, Reverb, lin_to_db
 from voicechanger.dsp.spectral import SpectralVoice
-from voicechanger.presets import PRESETS, apply_preset, make_settings
+from voicechanger.presets import MIC_SETUP, PRESETS, apply_preset, make_settings
 
 SR = 48000
 
@@ -307,6 +307,67 @@ def test_reverb_adds_a_decaying_tail():
     assert early > 1e-4 and late < early and np.all(np.isfinite(y))
 
 
+def syllables(seconds=3.0):
+    """voice_like swelling and fading three times a second, so a level detector has speech-like work."""
+    t = np.arange(int(SR * seconds)) / SR
+    x = voice_like(seconds=seconds) * (0.1 + np.clip(np.sin(2 * np.pi * 3 * t), 0, 1))
+    return x / np.sqrt(np.mean(x ** 2))
+
+
+def run_drive(x, amount, block=512):
+    d = Drive(SR)
+    return np.concatenate([d.process(x[i:i + block], amount) for i in range(0, len(x), block)])
+
+
+def distortion_db(x, y, n=960):
+    """Energy in y that no scaled copy of x explains, per 20 ms, relative to y's."""
+    num = den = 0.0
+    for i in range(0, len(x) - n, n):
+        a, b = x[i:i + n], y[i:i + n]
+        g = (a @ b) / max(a @ a, 1e-20)
+        num += np.sum((b - g * a) ** 2)
+        den += b @ b
+    return 10 * np.log10(num / den)
+
+
+@pytest.mark.parametrize("amount", [0.2, 0.6, 1.0])
+def test_drive_sounds_the_same_on_a_quiet_or_a_loud_mic(amount):
+    """Same grit and same level change from a quiet laptop mic to a hot headset.
+    (Its makeup is fitted to real speech; test_preset_loudness covers loudness.)"""
+    grit, gain = [], []
+    for level_db in (-40, -28, -16):
+        x = syllables() * 10 ** (level_db / 20)
+        y = run_drive(x, amount)
+        grit.append(distortion_db(x, y))
+        gain.append(lin_to_db(np.std(y) / np.std(x)))
+    assert np.ptp(grit) < 0.5 and np.ptp(gain) < 0.2, (grit, gain)
+
+
+def test_drive_grit_follows_the_amount_and_zero_is_off():
+    x = syllables() * 10 ** (-28 / 20)
+    grit = [distortion_db(x, run_drive(x, a)) for a in (0.1, 0.3, 0.6, 1.0)]
+    assert all(b > a + 2 for a, b in zip(grit, grit[1:])), grit
+    assert -45 < grit[0] and grit[-1] < -10, grit
+    assert np.array_equal(run_drive(x, 0.0), x)
+
+
+def test_eq_bands_sit_where_their_frequency_settings_put_them():
+    """A boost at mid_hz lifts a tone there and leaves one two octaves away nearly alone."""
+    t = np.arange(SR) / SR
+
+    def level(tone_hz, **eq):
+        s = Settings(gate_enabled=False, comp_enabled=False, highpass_hz=20.0, **eq)
+        y = VoiceChain(SR, "balanced", s).process_buffer(0.05 * np.sin(2 * np.pi * tone_hz * t))
+        return lin_to_db(np.std(y[SR // 2:]))
+
+    for hz in (700.0, 3000.0):
+        flat = level(hz)
+        assert abs(level(hz, mid_hz=hz, mid_db=9.0) - flat - 9.0) < 0.5
+        assert abs(level(hz, mid_hz=hz * 4, mid_db=9.0) - flat) < 1.5
+    assert abs(level(100.0, low_hz=400.0, low_db=-6.0) - level(100.0) + 6.0) < 0.5
+    assert abs(level(12000.0, high_hz=3000.0, high_db=4.0) - level(12000.0) - 4.0) < 0.5
+
+
 # ---- full chain -----------------------------------------------------------
 
 @pytest.mark.parametrize("name", list(PRESETS))
@@ -368,6 +429,15 @@ def test_settings_change_live_and_preset_applies_in_place():
     assert chain.settings.pitch == PRESETS["chipmunk"]["pitch"]
     y = chain.process_buffer(x)
     assert lowest_harmonic_hz(y) > 150 * 1.5
+
+
+def test_switching_presets_keeps_the_mic_set_up():
+    s = Settings(input_gain_db=7.5, gate_enabled=False, gate_threshold_db=-61.0)
+    apply_preset(s, "radio")
+    assert (s.input_gain_db, s.gate_enabled, s.gate_threshold_db) == (7.5, False, -61.0)
+    assert s.highpass_hz == PRESETS["radio"]["highpass_hz"]
+    # A preset that set one of these would be silently ignored in the app.
+    assert not [p for p, v in PRESETS.items() if set(v) & set(MIC_SETUP)]
 
 
 def test_unknown_setting_rejected():

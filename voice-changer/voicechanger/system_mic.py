@@ -108,7 +108,8 @@ class WinRegistry(Registry):  # pragma: no cover - needs Windows
         import winreg
 
         self.w = winreg
-        _enable_privileges(["SeBackupPrivilege", "SeRestorePrivilege"])
+        if is_admin():  # only writes need them; any user can read the microphone list
+            _enable_privileges(["SeBackupPrivilege", "SeRestorePrivilege"])
 
     def _open(self, path: str, write: bool):
         if not write:
@@ -556,6 +557,10 @@ def _enable_privileges(names: list[str]) -> None:  # pragma: no cover - Windows 
 
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Without these, ctypes truncates the 64-bit pseudo-handle from GetCurrentProcess()
+    # and OpenProcessToken fails with ERROR_INVALID_HANDLE.
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
 
     class LUID(ctypes.Structure):
         _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]

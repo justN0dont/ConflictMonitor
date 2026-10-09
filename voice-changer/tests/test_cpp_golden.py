@@ -194,6 +194,8 @@ LIVE = {
                      dict(mode="robot", tremor_depth=2.0, tremor_hz=12.0, gravel=1.0, gravel_hz=170.0)),
     # Bypass is the raw microphone: the input gain applies only to the effect.
     "bypass-toggle-gain": (dict(pitch=-3, input_gain_db=9.0), dict(pitch=-3, input_gain_db=9.0, bypass=True)),
+    # Drive's level detector keeps running while drive is off.
+    "drive-on-off": (dict(pitch=-2), dict(pitch=-2, drive=0.7, mid_hz=2500.0, mid_q=2.0, mid_db=6.0)),
 }
 
 
@@ -235,8 +237,9 @@ def random_settings(rng: np.random.Generator, mode: str) -> Settings:
     return Settings(
         pitch=u(-24, 24), formant=u(-12, 12), mode=mode, robot_hz=u(20, 2000), mix=u(0, 1), **character,
         input_gain_db=u(-12, 12), gate_enabled=bool(rng.random() < 0.5), gate_threshold_db=u(-80, -30),
-        highpass_hz=u(20, 1000), lowpass_hz=u(1000, 20000), low_db=u(-12, 12), mid_db=u(-12, 12),
-        high_db=u(-12, 12), drive=u(0, 1), comp_enabled=bool(rng.random() < 0.5), comp_threshold_db=u(-50, 0),
+        highpass_hz=u(20, 1000), lowpass_hz=u(1000, 20000), low_hz=u(50, 1000), low_db=u(-12, 12),
+        mid_hz=u(200, 8000), mid_q=u(0.3, 4), mid_db=u(-12, 12), high_hz=u(1000, 16000), high_db=u(-12, 12),
+        drive=u(0, 1), comp_enabled=bool(rng.random() < 0.5), comp_threshold_db=u(-50, 0),
         comp_ratio=u(1, 20), comp_makeup_db=u(0, 24), reverb_mix=u(0, 1), reverb_room=u(0, 1),
         output_gain_db=u(-24, 12))
 

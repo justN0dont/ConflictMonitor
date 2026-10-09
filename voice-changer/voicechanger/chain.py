@@ -17,8 +17,8 @@ from dataclasses import asdict, dataclass, fields
 
 import numpy as np
 
-from .dsp.effects import (Biquad, Compressor, DelayLine, GravelModulator, Limiter, NoiseGate,
-                          Reverb, db_to_lin, drive)
+from .dsp.effects import (Biquad, Compressor, DelayLine, Drive, GravelModulator, Limiter, NoiseGate,
+                          Reverb, db_to_lin)
 from .dsp.spectral import SpectralVoice
 
 QUALITY = {
@@ -70,10 +70,14 @@ class Settings:
     # tone
     highpass_hz: float = 80.0
     lowpass_hz: float = 18000.0
-    low_db: float = 0.0          # shelf @ 200 Hz
-    mid_db: float = 0.0          # peak @ 1.5 kHz
-    high_db: float = 0.0         # shelf @ 5 kHz
-    drive: float = 0.0           # 0..1
+    low_hz: float = 200.0        # low shelf corner
+    low_db: float = 0.0
+    mid_hz: float = 1500.0       # mid peak centre
+    mid_q: float = 0.9           # mid peak width (higher = narrower)
+    mid_db: float = 0.0
+    high_hz: float = 5000.0      # high shelf corner
+    high_db: float = 0.0
+    drive: float = 0.0           # 0..1, the same grit at any mic level
     # dynamics / space
     comp_enabled: bool = True
     comp_threshold_db: float = -20.0
@@ -121,6 +125,7 @@ class VoiceChain:
         self._low = Biquad(fs, "lowshelf", 200.0)
         self._mid = Biquad(fs, "peaking", 1500.0, q=0.9)
         self._high = Biquad(fs, "highshelf", 5000.0)
+        self._drive = Drive(fs)
         self._comp = Compressor(fs)
         self._reverb = Reverb(fs)
         self._limiter = Limiter(fs)
@@ -174,15 +179,15 @@ class VoiceChain:
 
         self._hp.set(s.highpass_hz)
         self._lp.set(s.lowpass_hz)
-        self._low.set(200.0, 0.707, s.low_db)
-        self._mid.set(1500.0, 0.9, s.mid_db)
-        self._high.set(5000.0, 0.707, s.high_db)
+        self._low.set(s.low_hz, 0.707, s.low_db)
+        self._mid.set(s.mid_hz, min(max(s.mid_q, 0.1), 10.0), s.mid_db)  # the C++ parser's range
+        self._high.set(s.high_hz, 0.707, s.high_db)
         y = self._hp.process(y)
         y = self._lp.process(y)
         y = self._low.process(y)
         y = self._mid.process(y)
         y = self._high.process(y)
-        y = drive(y, s.drive)
+        y = self._drive.process(y, s.drive)
 
         c = self._comp
         c.enabled = s.comp_enabled
