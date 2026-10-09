@@ -1,0 +1,60 @@
+name: voice-changer
+
+on:
+  push:
+    paths: ["voice-changer/**", ".github/workflows/voice-changer.yml"]
+  pull_request:
+    paths: ["voice-changer/**", ".github/workflows/voice-changer.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: voice-changer
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # history: tests/test_character.py compares against the pre-character code
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.txt
+      - name: Build C++ DSP
+        run: cmake -S apo -B apo/build -DCMAKE_BUILD_TYPE=Release && cmake --build apo/build -j4
+      - name: Tests (Python DSP, installer logic, C++ golden comparison)
+        run: python -m pytest -q
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # history: tests/test_character.py compares against the pre-character code
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Build APO with MSVC (x64, static CRT)
+        run: |
+          cmake -S apo -B apo/build -A x64
+          cmake --build apo/build --config Release
+      - name: APO harness (load DLL, negotiate, lock, process, live settings, unload)
+        run: apo/build/Release/apo_harness.exe apo/build/Release/VoiceChangerAPO.dll
+      - run: pip install -r requirements-dev.txt
+      - name: Tests (incl. MSVC build vs Python reference)
+        run: python -m pytest -q
+      - name: Package
+        shell: pwsh
+        run: |
+          $pkg = "dist/VoiceChanger"
+          New-Item -ItemType Directory -Force "$pkg/voicechanger/bin" | Out-Null
+          Copy-Item -Recurse voicechanger/*.py, voicechanger/dsp "$pkg/voicechanger/"
+          Copy-Item apo/build/Release/VoiceChangerAPO.dll "$pkg/voicechanger/bin/"
+          Copy-Item requirements.txt, run-windows.bat, README.md "$pkg/"
+          Get-ChildItem -Recurse -Filter __pycache__ $pkg | Remove-Item -Recurse -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoiceChanger-windows
+          path: voice-changer/dist/VoiceChanger
