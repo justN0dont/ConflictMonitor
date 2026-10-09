@@ -26,11 +26,13 @@ public:
     STDMETHODIMP CreateInstance(IUnknown* outer, REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
-        if (outer) return CLASS_E_NOAGGREGATION;
-        VoiceChangerAPO* apo = new (std::nothrow) VoiceChangerAPO();
+        // The audio engine aggregates APOs, asking for the non-delegating
+        // IUnknown; COM allows no other interface when aggregating.
+        if (outer && riid != __uuidof(IUnknown)) return CLASS_E_NOAGGREGATION;
+        VoiceChangerAPO* apo = new (std::nothrow) VoiceChangerAPO(outer);
         if (!apo) return E_OUTOFMEMORY;
-        const HRESULT hr = apo->QueryInterface(riid, ppv);
-        apo->Release();  // QueryInterface holds the reference on success
+        const HRESULT hr = apo->NonDelegatingQueryInterface(riid, ppv);
+        apo->NonDelegatingRelease();  // the interface handed out holds the reference on success
         return hr;
     }
     STDMETHODIMP LockServer(BOOL lock) override {

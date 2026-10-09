@@ -45,7 +45,10 @@ struct DenormalGuard {
 
 }  // namespace
 
-VoiceChangerAPO::VoiceChangerAPO() { InterlockedIncrement(&g_objects); }
+VoiceChangerAPO::VoiceChangerAPO(IUnknown* outer)
+    : outer_(outer ? outer : reinterpret_cast<IUnknown*>(static_cast<NonDelegatingUnknown*>(this))) {
+    InterlockedIncrement(&g_objects);
+}
 
 VoiceChangerAPO::~VoiceChangerAPO() {
     control_.Stop();
@@ -55,9 +58,18 @@ VoiceChangerAPO::~VoiceChangerAPO() {
 
 // ---- IUnknown --------------------------------------------------------------
 
-STDMETHODIMP VoiceChangerAPO::QueryInterface(REFIID riid, void** ppv) {
+STDMETHODIMP VoiceChangerAPO::QueryInterface(REFIID riid, void** ppv) { return outer_->QueryInterface(riid, ppv); }
+STDMETHODIMP_(ULONG) VoiceChangerAPO::AddRef() { return outer_->AddRef(); }
+STDMETHODIMP_(ULONG) VoiceChangerAPO::Release() { return outer_->Release(); }
+
+STDMETHODIMP VoiceChangerAPO::NonDelegatingQueryInterface(REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(IAudioProcessingObject)) {
+    if (riid == __uuidof(IUnknown)) {
+        *ppv = static_cast<NonDelegatingUnknown*>(this);
+        NonDelegatingAddRef();
+        return S_OK;
+    }
+    if (riid == __uuidof(IAudioProcessingObject)) {
         *ppv = static_cast<IAudioProcessingObject*>(this);
     } else if (riid == __uuidof(IAudioProcessingObjectRT)) {
         *ppv = static_cast<IAudioProcessingObjectRT*>(this);
@@ -71,13 +83,13 @@ STDMETHODIMP VoiceChangerAPO::QueryInterface(REFIID riid, void** ppv) {
         *ppv = nullptr;
         return E_NOINTERFACE;
     }
-    AddRef();
+    AddRef();  // through the controlling unknown: an aggregate's interfaces keep the whole of it alive
     return S_OK;
 }
 
-STDMETHODIMP_(ULONG) VoiceChangerAPO::AddRef() { return (ULONG)InterlockedIncrement(&refs_); }
+STDMETHODIMP_(ULONG) VoiceChangerAPO::NonDelegatingAddRef() { return (ULONG)InterlockedIncrement(&refs_); }
 
-STDMETHODIMP_(ULONG) VoiceChangerAPO::Release() {
+STDMETHODIMP_(ULONG) VoiceChangerAPO::NonDelegatingRelease() {
     const LONG r = InterlockedDecrement(&refs_);
     if (r == 0) delete this;
     return (ULONG)r;

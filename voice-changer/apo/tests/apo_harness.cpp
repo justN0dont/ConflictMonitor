@@ -199,6 +199,29 @@ HRESULT Lock(Apo& a, IAudioMediaType* format, UINT32 max_frames) {
     return a.cfg->LockForProcess(1, &pdin, 1, &pdout);
 }
 
+// Stands in for the audio engine, which creates every APO aggregated inside
+// an object of its own: this is the controlling unknown, and every interface
+// but IUnknown comes from the APO's non-delegating IUnknown.
+class Outer final : public IUnknown {
+public:
+    IUnknown* inner = nullptr;
+    LONG refs = 1;
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == __uuidof(IUnknown)) {
+            *ppv = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (inner) return inner->QueryInterface(riid, ppv);
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return (ULONG)InterlockedIncrement(&refs); }
+    STDMETHODIMP_(ULONG) Release() override { return (ULONG)InterlockedDecrement(&refs); }  // lives on the stack
+};
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -227,6 +250,39 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(SUCCEEDED(get_class(CLSID_VoiceChangerAPO, __uuidof(IClassFactory), (void**)&factory)), "class factory");
     IClassFactory* none = nullptr;
     CHECK(get_class(GUID_NULL, __uuidof(IClassFactory), (void**)&none) == CLASS_E_CLASSNOTAVAILABLE, "rejects foreign CLSID");
+
+    // ---- aggregation, as the audio engine creates APOs ----
+    // Refusing it (CLASS_E_NOAGGREGATION) made every app's attempt to open
+    // the microphone fail while the effect was installed.
+    {
+        Outer outer;
+        IUnknown* wrong = nullptr;
+        CHECK(factory->CreateInstance(&outer, __uuidof(IAudioProcessingObject), (void**)&wrong) == CLASS_E_NOAGGREGATION &&
+                  !wrong,
+              "aggregated creation must ask for IUnknown");
+        CHECK(SUCCEEDED(factory->CreateInstance(&outer, __uuidof(IUnknown), (void**)&outer.inner)) && outer.inner,
+              "can be aggregated");
+        if (outer.inner) {
+            const LONG before = outer.refs;
+            IAudioProcessingObject* apo = nullptr;
+            outer.inner->QueryInterface(__uuidof(IAudioProcessingObject), (void**)&apo);
+            CHECK(apo && outer.refs == before + 1, "its interfaces count references on the outer object");
+            if (apo) {
+                IAudioProcessingObjectRT* rt = nullptr;
+                IUnknown* identity = nullptr;
+                apo->QueryInterface(__uuidof(IAudioProcessingObjectRT), (void**)&rt);
+                apo->QueryInterface(__uuidof(IUnknown), (void**)&identity);
+                CHECK(rt && identity == static_cast<IUnknown*>(&outer), "its interfaces answer as the outer object");
+                APOInitBaseStruct ai{sizeof(APOInitBaseStruct), CLSID_VoiceChangerAPO};
+                CHECK(SUCCEEDED(apo->Initialize(sizeof(ai), (BYTE*)&ai)), "aggregated APO initializes");
+                if (rt) rt->Release();
+                if (identity) identity->Release();
+                apo->Release();
+            }
+            CHECK(outer.refs == before, "outer object's references balance");
+            outer.inner->Release();  // the non-delegating IUnknown: destroys the APO
+        }
+    }
 
     Apo a;
     CHECK(SUCCEEDED(factory->CreateInstance(nullptr, __uuidof(IAudioProcessingObject), (void**)&a.apo)), "create instance");

@@ -10,18 +10,37 @@
 
 extern volatile LONG g_objects;
 
-class VoiceChangerAPO final : public IAudioProcessingObject,
+// An aggregatable COM object's own IUnknown. Same vtable layout as IUnknown,
+// so it is handed out as one; the interfaces' IUnknown methods delegate to
+// the controlling (outer) unknown instead.
+struct NonDelegatingUnknown {
+    virtual HRESULT STDMETHODCALLTYPE NonDelegatingQueryInterface(REFIID riid, void** ppv) = 0;
+    virtual ULONG STDMETHODCALLTYPE NonDelegatingAddRef() = 0;
+    virtual ULONG STDMETHODCALLTYPE NonDelegatingRelease() = 0;
+};
+
+// The audio engine creates APOs aggregated inside an object of its own, so
+// this one must support COM aggregation: refusing it (CLASS_E_NOAGGREGATION)
+// fails every app's attempt to open the microphone.
+class VoiceChangerAPO final : public NonDelegatingUnknown,
+                              public IAudioProcessingObject,
                               public IAudioProcessingObjectRT,
                               public IAudioProcessingObjectConfiguration,
                               public IAudioSystemEffects2 {
 public:
-    VoiceChangerAPO();
+    // `outer`: the controlling IUnknown when aggregated, else nullptr.
+    explicit VoiceChangerAPO(IUnknown* outer);
     ~VoiceChangerAPO();
 
-    // IUnknown
+    // IUnknown, for every interface: delegates to the controlling unknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
     STDMETHODIMP_(ULONG) AddRef() override;
     STDMETHODIMP_(ULONG) Release() override;
+
+    // The object's own IUnknown (the controlling one when not aggregated)
+    STDMETHODIMP NonDelegatingQueryInterface(REFIID riid, void** ppv) override;
+    STDMETHODIMP_(ULONG) NonDelegatingAddRef() override;
+    STDMETHODIMP_(ULONG) NonDelegatingRelease() override;
 
     // IAudioProcessingObject
     STDMETHODIMP Reset() override;
@@ -51,6 +70,7 @@ public:
 private:
     HRESULT CheckFormat(IAudioMediaType* opposite, IAudioMediaType* requested, IAudioMediaType** supported);
 
+    IUnknown* outer_;  // not AddRef'd: when aggregated, the outer object owns this one
     LONG refs_ = 1;
     bool locked_ = false;
     UINT32 channels_ = 0, sample_rate_ = 0, max_frames_ = 0;
