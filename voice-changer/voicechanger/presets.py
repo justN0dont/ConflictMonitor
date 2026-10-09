@@ -19,7 +19,7 @@ So lowered presets high-pass at 65-80 Hz, ease the low mids with the low
 shelf and lift presence around 2.5-3 kHz with the mid band; raised ones
 high-pass at 110-150 Hz and soften the top with the high shelf.
 
-Every preset matches "natural" in loudness within about 0.7 dB (K-weighted,
+Every preset matches "natural" in loudness within 1 dB (K-weighted,
 over speech, balanced quality) on real male and female speech (VCTK) at
 -38, -30 and -22 dBFS speech RMS, from a quiet laptop mic to a hot headset;
 tests/test_preset_loudness.py checks a synthetic version. Two things keep it
@@ -31,6 +31,8 @@ its threshold N dB lower. output_gain_db then matches the level.
 """
 
 from __future__ import annotations
+
+import math
 
 from .chain import Settings
 
@@ -169,10 +171,44 @@ PRESETS: dict[str, dict] = {
 }
 
 
-def make_settings(name: str) -> Settings:
+# Gender and age presets, fitted to a calibrated voice (calibrate.py): the
+# pitch range the character speaks in, and its vocal tract as a formant offset
+# in semitones from an adult man's. A voice already in range keeps its pitch;
+# one outside moves to the nearest edge, at most an octave. The speaker's own
+# tract is estimated from their pitch, from 0 at 120 Hz to +3 semitones at
+# 210 Hz (typical adult male and female voices). Uncalibrated, the presets
+# keep their fixed shifts, which assume a voice from the other end of the range.
+VOICE_FITS: dict[str, tuple[float, float, float]] = {
+    "feminine": (175, 230, 3.0),
+    "masculine": (95, 125, 0.0),
+    "kid": (240, 300, 5.0),
+    "old_lady": (165, 200, 2.5),
+    "old_man": (115, 145, -0.5),
+    "valley_girl": (200, 250, 3.0),
+}
+MALE_HZ, FEMALE_HZ, FEMALE_TRACT_ST = 120.0, 210.0, 3.0
+
+
+def fit_to_voice(name: str, voice_f0: float) -> tuple[float, float] | None:
+    """(pitch, formant) in semitones that take a voice speaking at ``voice_f0`` Hz
+    to the preset's character, rounded to half semitones; None if it doesn't adapt."""
+    if name not in VOICE_FITS:
+        return None
+    lo, hi, tract = VOICE_FITS[name]
+    pitch = min(max(12 * math.log2(min(max(voice_f0, lo), hi) / voice_f0), -12.0), 12.0)
+    own = FEMALE_TRACT_ST * min(max(math.log2(voice_f0 / MALE_HZ) / math.log2(FEMALE_HZ / MALE_HZ), 0.0), 1.0)
+    return round(2 * pitch) / 2, round(2 * (tract - own)) / 2
+
+
+def make_settings(name: str, voice_f0: float | None = None) -> Settings:
+    """A preset's settings; with ``voice_f0`` (Hz), fitted to that voice (VOICE_FITS)."""
     if name not in PRESETS:
         raise KeyError(f"unknown preset {name!r}; choose from {', '.join(PRESETS)}")
-    return Settings().update(**{**BASE, **PRESETS[name]})
+    s = Settings().update(**{**BASE, **PRESETS[name]})
+    fit = fit_to_voice(name, voice_f0) if voice_f0 else None
+    if fit:
+        s.pitch, s.formant = fit
+    return s
 
 
 # These belong to the microphone and the room, not to a voice, so switching
@@ -180,10 +216,10 @@ def make_settings(name: str) -> Settings:
 MIC_SETUP = ("input_gain_db", "gate_enabled", "gate_threshold_db")
 
 
-def apply_preset(settings: Settings, name: str) -> Settings:
+def apply_preset(settings: Settings, name: str, voice_f0: float | None = None) -> Settings:
     """Reset ``settings`` in place to a preset (in place, so a running chain picks it up),
     keeping the mic set-up (MIC_SETUP)."""
-    fresh = make_settings(name)
+    fresh = make_settings(name, voice_f0)
     for k, v in fresh.to_dict().items():
         if k not in MIC_SETUP:
             setattr(settings, k, v)

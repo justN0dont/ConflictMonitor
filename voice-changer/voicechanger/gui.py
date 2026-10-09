@@ -11,9 +11,9 @@ from tkinter import font as tkfont
 import sys
 import threading
 
-from . import system_mic
+from . import calibrate, system_mic
 from .chain import QUALITY, Settings
-from .presets import PRESETS, apply_preset
+from .presets import PRESETS, apply_preset, fit_to_voice
 
 # (setting, label, from, to, resolution, unit)
 SLIDERS = {
@@ -94,6 +94,7 @@ class App:
         self._suspend = False
         self.endpoints: list = []
         self.system_active = False  # voice changer installed on a mic: sliders drive it live
+        self.voice_f0 = calibrate.load_voice_f0()  # the speaker's own pitch, once calibrated
         self._sys_write_pending = False
         root.title("Voice Changer")
 
@@ -152,6 +153,10 @@ class App:
         cb = ttk.Combobox(bar, textvariable=self.preset_var, values=list(PRESETS), width=14, state="readonly")
         cb.pack(side="left", padx=4)
         cb.bind("<<ComboboxSelected>>", lambda e: self._load_preset(self.preset_var.get()))
+        self.cal_btn = ttk.Button(bar, text="Calibrate voice", command=self._calibrate)
+        self.cal_btn.pack(side="left", padx=(8, 4))
+        self.voice_var = tk.StringVar(value=self._voice_text())
+        ttk.Label(bar, textvariable=self.voice_var).pack(side="left")
         ttk.Label(bar, text="Mode").pack(side="left", padx=(12, 2))
         self.vars["mode"] = tk.StringVar(value="normal")
         for m in ("normal", "robot", "whisper"):
@@ -363,9 +368,66 @@ class App:
 
     def _load_preset(self, name: str) -> None:
         bypass = self.settings.bypass
-        apply_preset(self.settings, name)
+        apply_preset(self.settings, name, self.voice_f0)
         self.settings.bypass = bypass
         self._pull_all()
+
+    # ---- voice calibration -------------------------------------------------
+    def _voice_text(self) -> str:
+        return f"your voice: {self.voice_f0:.0f} Hz" if self.voice_f0 else "voice not calibrated"
+
+    def _calibrate(self) -> None:
+        """Record a few seconds of normal speech; the gender and age presets then fit that voice."""
+        dev = self._index(self.in_var.get())
+        if dev is None:
+            messagebox.showinfo("Calibrate voice", "Choose a microphone first.")
+            return
+        self.cal_btn.configure(state="disabled")
+        self.status.set(f"Calibrating: talk normally for {calibrate.CALIBRATION_SECONDS:.0f} seconds…")
+        if self.system_active:  # measure your own voice, not the installed effect's version of it
+            raw = Settings().update(**{**self.settings.to_dict(), "bypass": True})
+            try:
+                system_mic.write_settings(raw, self.quality_var.get())
+            except OSError:
+                pass
+        # Once bypass reaches the system effect (it checks every 100 ms).
+        self.root.after(300 if self.system_active else 0, lambda: self._calibration_record(dev))
+
+    def _calibration_record(self, dev: int) -> None:
+        import sounddevice as sd
+        try:
+            sr = int(sd.query_devices(dev)["default_samplerate"])
+            rec = sd.rec(int(calibrate.CALIBRATION_SECONDS * sr), samplerate=sr, channels=1, device=dev,
+                         dtype="float32")
+        except Exception as exc:
+            self._calibration_done(f"Could not record: {exc}")
+            return
+        self.root.after(int(calibrate.CALIBRATION_SECONDS * 1000) + 300,
+                        lambda: self._calibration_measure(rec, sr))
+
+    def _calibration_measure(self, rec, sr: int) -> None:
+        import sounddevice as sd
+        sd.wait()
+        hz = calibrate.estimate_f0(rec[:, 0], sr)
+        if hz is None:
+            self._calibration_done("Couldn't hear enough voice. Try again, talking the whole time.")
+            return
+        try:
+            calibrate.save_voice_f0(hz)
+        except OSError:
+            pass  # still used for this session
+        self.voice_f0 = hz
+        self.voice_var.set(self._voice_text())
+        fit = fit_to_voice(self.preset_var.get(), hz)
+        if fit:  # refit the loaded preset, keeping any other slider changes
+            self.settings.pitch, self.settings.formant = fit
+            self._pull_all()
+        self._calibration_done(f"Your voice: {hz:.0f} Hz. The gender and age presets now fit it.")
+
+    def _calibration_done(self, message: str) -> None:
+        self.cal_btn.configure(state="normal")
+        self.status.set(message)
+        self._sys_write_later()  # puts the real settings back if bypass was written
 
     def _save(self) -> None:
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Voice settings", "*.json")])

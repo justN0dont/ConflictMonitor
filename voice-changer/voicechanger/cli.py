@@ -36,12 +36,14 @@ def _add_voice_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--settings", help="JSON file of settings (as saved by the GUI)")
     p.add_argument("--quality", choices=list(QUALITY))
     p.add_argument("--no-gate", action="store_true", help="disable the noise gate")
+    p.add_argument("--voice-f0", type=float, metavar="HZ",
+                   help="the speaker's own pitch: fits the gender and age presets to it (the GUI measures it)")
     for name, typ in VOICE_FLAGS.items():
         p.add_argument("--" + name.replace("_", "-"), dest=name, type=typ)
 
 
 def _settings_from(args) -> Settings:
-    s = make_settings(args.preset)
+    s = make_settings(args.preset, args.voice_f0)
     if args.settings:
         with open(args.settings) as f:
             s.update(**json.load(f))

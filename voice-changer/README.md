@@ -104,6 +104,7 @@ python -m voicechanger live --preset deeper --output "CABLE Input" --monitor "He
 python -m voicechanger live --pitch -3 --formant 3 --record take1.wav
 python -m voicechanger file in.wav out.wav --preset robot
 python -m voicechanger file in.wav out.wav --preset old_man --breath 0.3
+python -m voicechanger live --preset feminine --voice-f0 118  # fitted to a 118 Hz voice
 
 # Windows, system-wide (asks for admin when needed)
 python -m voicechanger apo list                       # microphones, * = installed
@@ -139,10 +140,14 @@ compresses as gently as `natural` (about 3 dB off the louder syllables at a
 normal speaking level; `announcer` a little firmer). Switching presets keeps
 your mic set-up (input gain and gate).
 
-The gender and age presets assume a voice at the other end of the range:
-`feminine`, `kid`, `old_lady` and `valley_girl` start from a lower voice,
-`masculine` from a higher one. Pull Pitch back towards 0 if yours is already
-most of the way there.
+**Calibrate voice** (next to the preset list) records six seconds of you
+talking normally and measures your pitch. The gender and age presets
+(`feminine`, `masculine`, `kid`, `old_lady`, `old_man`, `valley_girl`) then
+move your voice into their range instead of by a fixed amount, and a voice
+that's already there keeps its pitch. The measurement is saved for next time
+(on the command line, pass it as `--voice-f0`). Uncalibrated, these presets
+assume a voice from the other end of the range: `feminine`, `kid`, `old_lady`
+and `valley_girl` a lower one, `masculine` a higher one.
 
 Voices:
 
