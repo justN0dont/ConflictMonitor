@@ -18,12 +18,15 @@ import time
 
 from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
+from sqlalchemy import select
 
 from app.db import async_session
-from app.models import Event
-from app.schemas import EventRead, EventWS
+from app.models import Event, EventReport
+from app.schemas import EventWS
 from app.services.broadcaster import broadcaster
 from app.services.classifier import evidence_span
+from app.services.corroboration import read_event
+from app.services.dedup import merge_duplicate
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +316,75 @@ def _gen_event(ts: datetime.datetime | None = None) -> dict:
     }
 
 
+def _report_for(event: Event) -> EventReport:
+    """The event's own first report row, as every real writer stores one and
+    as the startup backfill creates it for a row without one. Until C84 demo
+    left its events with no row under their count until the next boot (C70).
+    forwarded_from stays NULL: nothing here read a header."""
+    return EventReport(
+        event_id=event.id,
+        source=event.source,
+        channel=event.channel_name,
+        raw_text=event.raw_text,
+        summary=event.summary,
+        source_url=event.source_url,
+        telegram_message_id=None,
+        killed_reported=event.killed_reported,
+        extraction_status=event.extraction_status,
+        reported_at=event.timestamp,
+    )
+
+
+async def _demo_second_report() -> None:
+    """Link a synthetic second report onto one of the newest demo events.
+
+    Through merge_duplicate, not a hand-written row: the counter, the report
+    row and the reliability gate move together or not at all, which is the
+    contract the real writers rely on, and the one path C70 says demo skips.
+    One time in three the report is a forward of the first byline, which the
+    corroboration chip must count as one outlet, not two. Every string
+    carries the marker like every other demo row.
+    """
+    async with async_session() as session:
+        recent = (
+            await session.execute(
+                select(Event).where(Event.source == "demo").order_by(Event.timestamp.desc()).limit(12)
+            )
+        ).scalars().all()
+        if not recent:
+            return
+        target = _pick(recent)
+        forwarded = random.random() < 0.33
+        channel = _pick([c for c in CHANNELS if c != target.channel_name])
+        body = target.summary.removeprefix(SYNTHETIC_MARKER)
+        wording = (
+            f"{SYNTHETIC_MARKER}Forwarded from {target.channel_name}: {body}"
+            if forwarded
+            else f"{SYNTHETIC_MARKER}Second account · {body}"
+        )
+        report = EventReport(
+            source="demo",
+            channel=channel,
+            raw_text=wording,
+            summary=wording,
+            source_url="",
+            telegram_message_id=None,
+            killed_reported=random.randint(0, 24) if random.random() < 0.4 else None,
+            extraction_status=None,
+            # The header as Telegram would have given it; NULL on the other
+            # branch because nothing here read one.
+            forwarded_from=target.channel_name if forwarded else None,
+            reported_at=datetime.datetime.now(datetime.timezone.utc),
+        )
+        await merge_duplicate(session, target, report, new_severity=None)
+        ws = EventWS(type="new_event", event=await read_event(session, target))
+        await broadcaster.broadcast(ws.model_dump_json())
+        logger.info(
+            "Demo second report on event #%d from %s%s", target.id, channel,
+            f" (forward of {target.channel_name})" if forwarded else "",
+        )
+
+
 # =========================================================================
 # SEED HISTORICAL EVENTS
 # =========================================================================
@@ -358,6 +430,8 @@ async def seed_demo_history(count: int = 300):
                 evidence_span=evidence_span(evt_data["raw_text"], ""),
             )
             session.add(db_event)
+            await session.flush()
+            session.add(_report_for(db_event))
             created += 1
 
         await session.commit()
@@ -398,12 +472,14 @@ async def start_demo_event_generator():
                     evidence_span=evidence_span(evt_data["raw_text"], ""),
                 )
                 session.add(db_event)
+                await session.flush()
+                session.add(_report_for(db_event))
                 await session.commit()
                 await session.refresh(db_event)
 
                 ws_payload = EventWS(
                     type="new_event",
-                    event=EventRead.model_validate(db_event),
+                    event=await read_event(session, db_event),
                 )
                 await broadcaster.broadcast(ws_payload.model_dump_json())
                 logger.info(
@@ -411,6 +487,12 @@ async def start_demo_event_generator():
                     db_event.id, db_event.event_type, db_event.severity,
                     db_event.summary[:60],
                 )
+
+            # A second report on a recent event, through the real link, so demo
+            # mode shows what corroboration looks like (C84) and exercises the
+            # merge path C70 says it skips.
+            if random.random() < 0.35:
+                await _demo_second_report()
 
             # Occasionally trigger burst events (escalation simulation)
             burst_counter += 1
@@ -441,11 +523,13 @@ async def start_demo_event_generator():
                             evidence_span=evidence_span(burst_data["raw_text"], ""),
                         )
                         session.add(be)
+                        await session.flush()
+                        session.add(_report_for(be))
                         await session.commit()
                         await session.refresh(be)
                         ws = EventWS(
                             type="new_event",
-                            event=EventRead.model_validate(be),
+                            event=await read_event(session, be),
                         )
                         await broadcaster.broadcast(ws.model_dump_json())
 

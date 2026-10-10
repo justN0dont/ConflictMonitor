@@ -15,6 +15,20 @@ class EventCreate(BaseModel):
     timestamp: datetime | None = None
 
 
+class Corroboration(BaseModel):
+    """Who said it, counted once per outlet (services/corroboration.py).
+
+    Every count is a floor bounded by what event_reports holds. `outlets`
+    collapses a Telegram forward onto its origin and `x_name` onto `name`;
+    a pasted repost still counts as an outlet. `unrecorded` is the reports
+    the merge destroyed before the table existed: 0 on anything since.
+    """
+    reports: int
+    channels: int
+    outlets: int
+    unrecorded: int
+
+
 class EventRead(BaseModel):
     id: int
     source: str
@@ -52,8 +66,39 @@ class EventRead(BaseModel):
     # Consumers must not render "" as a quote, and must not read it as a
     # warning about the location either; models.py carries the full contract.
     evidence_span: str | None = None
+    # null only when nothing computed it — the rows were not read. It is not
+    # "no corroboration": that is reports=1, outlets=1. Every route and every
+    # WebSocket push goes through corroboration.read_events, so null should
+    # not leave this process; the UI falls back to report_count if it does.
+    corroboration: Corroboration | None = None
 
     model_config = {"from_attributes": True}
+
+
+class EventReportRead(BaseModel):
+    """One report under an event: the row the corroboration counts, with the
+    text it was written from (models.EventReport)."""
+    id: int
+    source: str
+    channel: str
+    # The outlet whose words these are (services/corroboration.outlet over the
+    # origin): the key the chip counts by, served so the list groups the same
+    # way and no second rule grows in the frontend.
+    outlet: str
+    # null: this row never recorded Telegram's forward header (RSS, the
+    # archive, demo). "": Telegram said this message is not a forward.
+    # Anything else: a forward, naming its origin as far as the header allowed.
+    forwarded_from: str | None
+    raw_text: str
+    summary: str
+    source_url: str
+    telegram_message_id: int | None
+    # This report's own stated toll, beside the text that stated it. A merged
+    # report's count lives here and nowhere else (dedup.merge_duplicate).
+    killed_reported: int | None
+    extraction_status: str | None
+    reported_at: datetime
+    ingested_at: datetime
 
 
 class EventWS(BaseModel):

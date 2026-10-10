@@ -16,10 +16,11 @@ from app.config import settings
 from app.feeds import ErrorKind
 from app.db import async_session
 from app.models import ChannelCheckpoint, Event, EventReport
-from app.schemas import EventRead, EventWS
+from app.schemas import EventWS
 from app.seed_channels import DEFAULT_CHANNELS, get_reliability
 from app.services.broadcaster import broadcaster
 from app.services.classifier import classify_message, evidence_span
+from app.services.corroboration import read_event
 from app.services.dedup import check_duplicate, merge_duplicate
 from app.services.geocoder import geocode
 
@@ -191,6 +192,34 @@ def _build_source_url(channel_name: str, message_id: int) -> str:
     return f"https://t.me/{channel_name.lstrip('@')}/{message_id}"
 
 
+def forward_origin(message) -> str:
+    """Telegram's forward header as a name, for EventReport.forwarded_from (C84).
+
+    "" when the message is not a forward — Telegram's own statement, which is
+    why it is not NULL. Otherwise the origin as far as the header allows, with
+    no network call: Telethon resolves `message.forward.chat` from the entities
+    that came with the update, so a channel it did not include is named by its
+    peer id. A forward from a person is recorded as "user" and not named — the
+    header is public, the person is not an outlet — and a header that names
+    nothing is "?". services/corroboration.py counts every row that shares one
+    of those strings as one origin, which is the under-count.
+    """
+    fwd = getattr(message, "forward", None)
+    if fwd is None:
+        return ""
+    chat = getattr(fwd, "chat", None)
+    if chat is not None:
+        name = getattr(chat, "username", None) or getattr(chat, "title", None)
+        if name:
+            return str(name)[:255]
+    chat_id = getattr(fwd, "chat_id", None)
+    if chat_id is not None:
+        return f"id:{chat_id}"
+    if getattr(fwd, "sender_id", None) is not None or getattr(fwd, "from_name", None):
+        return "user"
+    return "?"
+
+
 # ── Checkpoint helpers ────────────────────────────────────────────────────────
 
 async def _get_checkpoint(channel_name: str) -> int:
@@ -265,6 +294,7 @@ async def _process_message(
     channel_name: str,
     message_date: datetime,
     message_id: int,
+    forwarded_from: str | None = None,
 ):
     _note_message(message_date)
     if not raw_text or not raw_text.strip():
@@ -334,6 +364,7 @@ async def _process_message(
         summary=result.get("summary", raw_text[:200]),
         source_url=source_url,
         telegram_message_id=message_id,
+        forwarded_from=forwarded_from,
         killed_reported=result.get("killed_reported"),
         # Beside the count, from the same result, so a NULL count on this row
         # can be read as "the message stated none" or "the classifier never
@@ -389,7 +420,7 @@ async def _process_message(
                 # the text that stated it; existing.killed_reported is still
                 # never written.
                 await merge_duplicate(session, existing, report, severity)
-                ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
+                ws_payload = EventWS(type="new_event", event=await read_event(session, existing))
                 await broadcaster.broadcast(ws_payload.model_dump_json())
                 return
 
@@ -434,7 +465,7 @@ async def _process_message(
             await session.commit()
             await session.refresh(db_event)
 
-            ws_payload = EventWS(type="new_event", event=EventRead.model_validate(db_event))
+            ws_payload = EventWS(type="new_event", event=await read_event(session, db_event))
             await broadcaster.broadcast(ws_payload.model_dump_json())
             logger.info(
                 "Event #%d saved | sev=%s | loc='%s' -> %s | geo=%s | %s",
@@ -497,6 +528,7 @@ async def _backfill_entity(client: TelegramClient, entity, conflict_cutoff: date
                 channel_name=channel_name,
                 message_date=msg_date,
                 message_id=message.id,
+                forwarded_from=forward_origin(message),
             )
             count += 1
             if count % 100 == 0:
@@ -643,6 +675,7 @@ async def start_telegram_listener():
                 channel_name=channel_name,
                 message_date=event.message.date,
                 message_id=event.message.id,
+                forwarded_from=forward_origin(event.message),
             )
         except Exception as e:
             logger.exception("Error processing live message: %s", e)

@@ -30,6 +30,12 @@ export interface ConflictEvent {
   created_at: string;
   report_count?: number;
   reporting_channels?: string;
+  /**
+   * Who said it, counted from the report rows (C84). Every route and every
+   * WebSocket push carries it; null or absent means a payload that did not
+   * read the rows, and lib/corroboration.ts then falls back to report_count.
+   */
+  corroboration?: Corroboration | null;
 
   /**
    * Provenance. The API has always returned these (backend schemas.py
@@ -78,6 +84,50 @@ export interface ConflictEvent {
    * "nominatim". null when it was never recorded.
    */
   geo_method?: string | null;
+}
+
+/**
+ * Who said it, counted once per outlet (backend services/corroboration.py,
+ * the one rule). Every count is a floor bounded by the rows the table holds.
+ */
+export interface Corroboration {
+  /** Rows under the event in event_reports. */
+  reports: number;
+  /** Distinct non-empty channel names among them. */
+  channels: number;
+  /**
+   * Distinct outlets once a Telegram forward collapses onto the channel it
+   * was forwarded from and `x_name` onto `name` (one outlet, two transports).
+   * A pasted repost carries no forward header and still counts as one.
+   */
+  outlets: number;
+  /** Reports the merge destroyed before the report table existed; 0 since. */
+  unrecorded: number;
+}
+
+/** One report under an event, from GET /events/{id}/reports. */
+export interface EventReportRow {
+  id: number;
+  source: string;
+  channel: string;
+  /** The outlet whose words these are: the key the chip counts by. */
+  outlet: string;
+  /**
+   * null: this row never recorded Telegram's forward header (RSS, the
+   * archive, demo). "": not a forward. Otherwise the origin's name; "user"
+   * for a forward from a person, who is not named; "?" when the header
+   * named nothing.
+   */
+  forwarded_from: string | null;
+  raw_text: string;
+  summary: string;
+  source_url: string;
+  telegram_message_id: number | null;
+  /** This report's own stated toll, beside the text that stated it. */
+  killed_reported: number | null;
+  extraction_status: string | null;
+  reported_at: string;
+  ingested_at: string;
 }
 
 export interface EventWSMessage {

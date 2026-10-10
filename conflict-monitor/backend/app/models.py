@@ -197,6 +197,22 @@ class EventReport(Base):
     # `telegram_message_id IS NULL` is exactly `source <> 'telegram'` and the
     # two are checkable against each other in one query.
     telegram_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Telegram's forward header, as a name. NULL: this row never recorded it —
+    # every row written before the column existed, every RSS row, the wave
+    # import, the startup backfill and demo, none of which have a header to
+    # read. "": Telegram said this message is not a forward, so these are the
+    # channel's own words. Anything else: a forward, and its origin as far as
+    # the header allows — the origin channel's username, else its title, else
+    # its peer id; "user" for a forward from a person, who is not named; "?"
+    # for a header that names nothing (telegram.forward_origin).
+    #
+    # Why it exists: a forward is not a second report. Fifteen channels
+    # forwarding one post read as fifteen confirmations until something
+    # recorded that fourteen of them said "forwarded from" (C11), and the
+    # header is the only place Telegram says so. services/corroboration.py
+    # collapses rows onto their origin with it; dedup.py's boost and the chip
+    # the UI shows both count what is left (C84).
+    forwarded_from: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # People THIS report's text said were killed, copied from it. The column is
     # legal here in a way it is not on a merged event row, and for the reason
     # merge_duplicate gives at length: the count and the text that stated it

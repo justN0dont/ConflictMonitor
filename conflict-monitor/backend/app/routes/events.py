@@ -13,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import async_session as make_session, get_session
 from app.security import require_admin_token
 from app.models import Event, EventReport
-from app.schemas import EventRead
+from app.schemas import EventRead, EventReportRead
 from app.services.classifier import classify_message, evidence_span
+from app.services.corroboration import origin, outlet, read_events
 from app.services.geocoder import geocode
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ async def list_events(
     if min_reliability:
         stmt = stmt.where(Event.source_reliability >= min_reliability)
     result = await session.execute(stmt)
-    return result.scalars().all()
+    return await read_events(session, result.scalars().all())
 
 
 @router.get("/time-range")
@@ -144,7 +145,46 @@ async def get_event(event_id: int, session: AsyncSession = Depends(get_session))
     event = result.scalar_one_or_none()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    return event
+    (out,) = await read_events(session, [event])
+    return out
+
+
+@router.get("/{event_id}/reports", response_model=list[EventReportRead])
+async def event_reports(event_id: int, session: AsyncSession = Depends(get_session)):
+    """Every report under an event, oldest first: the rows the corroboration
+    counts, each with the text it was written from (C84). A merged report's
+    death toll lives here and nowhere else (dedup.merge_duplicate). An event
+    with no rows answers [] — a writer that stopped recording its report, or a
+    demo row from before demo wrote one — and an unknown id answers 404."""
+    exists = (
+        await session.execute(select(Event.id).where(Event.id == event_id))
+    ).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    result = await session.execute(
+        select(EventReport)
+        .where(EventReport.event_id == event_id)
+        .order_by(EventReport.reported_at.asc(), EventReport.id.asc())
+    )
+    return [_report_read(r) for r in result.scalars().all()]
+
+
+def _report_read(r: EventReport) -> EventReportRead:
+    return EventReportRead(
+        id=r.id,
+        source=r.source,
+        channel=r.channel,
+        outlet=outlet(origin(r.channel, r.forwarded_from)),
+        forwarded_from=r.forwarded_from,
+        raw_text=r.raw_text,
+        summary=r.summary,
+        source_url=r.source_url,
+        telegram_message_id=r.telegram_message_id,
+        killed_reported=r.killed_reported,
+        extraction_status=r.extraction_status,
+        reported_at=r.reported_at,
+        ingested_at=r.ingested_at,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""Link, don't merge. Protects ce5d994 (C74) and 8523961 (C10, C11).
+"""Link, don't merge. Protects ce5d994 (C74), 8523961 (C10, C11) and C84.
 
 The headline is test_a_death_toll_never_moves_onto_the_event. events.
 killed_reported is "people THIS row's raw_text said were killed" — a quantity
@@ -294,3 +294,64 @@ async def test_the_merge_leaves_the_event_row_otherwise_alone(session):
     ).scalar_one()
     assert refreshed.lat is None and refreshed.lon is None
     assert refreshed.geometry is None
+
+
+# ── C84: the boost counts outlets, not names ─────────────────────────────────
+
+
+async def _seed_rows(session, event, rows):
+    """(channel, forwarded_from) pairs, as event_reports holds them."""
+    for i, (ch, fwd) in enumerate(rows):
+        session.add(
+            EventReport(
+                event_id=event.id, channel=ch, forwarded_from=fwd, summary=NEAR_A,
+                telegram_message_id=300 + i,
+            )
+        )
+    await session.flush()
+
+
+async def test_forwards_of_one_post_earn_no_boost(session):
+    """C84 / C11. "15 channels reposting one text still read as 15
+    confirmations" — the forward header is where Telegram says fourteen of
+    them did not. Three rows name three channels and one outlet; the old
+    distinct-channel gate fired here."""
+    existing = make_event(NEAR_A, source_reliability=4)
+    session.add(existing)
+    await session.flush()
+    await _seed_rows(session, existing, [("chan_a", ""), ("reposter_1", "chan_a")])
+
+    await merge_duplicate(
+        session, existing,
+        incoming_report(NEAR_B, channel="reposter_2", forwarded_from="chan_a"), None,
+    )
+    assert existing.source_reliability == 4
+
+
+async def test_two_outlets_on_two_transports_each_earn_no_boost(session):
+    """C84 / C11 / C78. x_osintwarfare / OSINTWarfare and x_geoconfirmed /
+    GeoConfirmed are the archive's own pairs: four names, two outlets, and a
+    gate on names fires at the third name. It must not."""
+    existing = make_event(NEAR_A, source_reliability=4)
+    session.add(existing)
+    await session.flush()
+    await _seed_rows(
+        session, existing, [("OSINTWarfare", None), ("x_osintwarfare", None), ("GeoConfirmed", "")]
+    )
+
+    await merge_duplicate(session, existing, incoming_report(NEAR_B, channel="x_geoconfirmed"), None)
+    assert existing.source_reliability == 4
+
+
+async def test_three_outlets_earn_the_boost_whatever_their_transports(session):
+    """The positive control: three outlets, one of them on its X mirror and one
+    arriving as a forward from a fourth channel the monitor does not read."""
+    existing = make_event(NEAR_A, source_reliability=4)
+    session.add(existing)
+    await session.flush()
+    await _seed_rows(session, existing, [("OSINTWarfare", ""), ("x_geoconfirmed", None)])
+
+    await merge_duplicate(
+        session, existing, incoming_report(NEAR_B, channel="reposter", forwarded_from="elsewhere"), None
+    )
+    assert existing.source_reliability == 5

@@ -17,6 +17,11 @@
  *
  * killed_reported is shown beside it only when the message stated a number.
  * An absent count is not zero, so it renders as nothing at all rather than 0.
+ *
+ * Every event opens to the reports under it, each with the text it was
+ * written from, so the one-second check that count promises can be run from
+ * here; and the corroboration chip names its unit, reports and outlets,
+ * never "sources" (C84).
  */
 import { MapPin, MapPinOff } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -30,6 +35,8 @@ import {
 } from "../lib/tokens";
 import type { ConflictEvent } from "../types/event";
 import { type ArrivalLog, freshIds } from "../lib/events";
+import { CHIP_TITLE, corroborationChip } from "../lib/corroboration";
+import { ReportList } from "./ReportList";
 
 function timeAgo(ts: string): string {
   const seconds = (Date.now() - new Date(ts).getTime()) / 1000;
@@ -88,6 +95,8 @@ export function LiveFeed({ events, arrivals }: LiveFeedProps) {
   const [newIds, setNewIds] = useState<Set<number>>(new Set());
   const [soundEnabled, setSoundEnabled] = useState(false);
   const lastBlipRef = useRef(0);
+  // One event open at a time; its reports are fetched when it opens (C84).
+  const [openId, setOpenId] = useState<number | null>(null);
 
   // NEW marks what ARRIVED in the last 3 s (C50). Growth in length stood in for
   // it: silent for good once the store hit its cap, and a scrub that widened the
@@ -200,7 +209,8 @@ export function LiveFeed({ events, arrivals }: LiveFeedProps) {
           const failed = extractionFailed(evt);
           const noGeo = geoMissing(evt);
           const place = (evt.location_name ?? "").trim();
-          const sources = evt.report_count ?? 1;
+          const chip = corroborationChip(evt);
+          const open = openId === evt.id;
           const precision = geoPrecision(evt.geo_precision);
           const uncertainty = formatUncertainty(evt.geo_uncertainty_m);
 
@@ -282,10 +292,18 @@ export function LiveFeed({ events, arrivals }: LiveFeedProps) {
                 </div>
               </div>
 
-              {/* Summary */}
-              <div className="mt-1 text-[12px] leading-[1.45] text-[var(--text-primary)]">
+              {/* Summary. A button: the reports under the event open beneath
+                  it, each with its own text, byline and stated toll, which is
+                  where raw_text becomes readable at all (C84). */}
+              <button
+                type="button"
+                onClick={() => setOpenId(open ? null : evt.id)}
+                aria-expanded={open}
+                title={open ? "Hide the reports under this event" : "Show the reports under this event, with their text"}
+                className="mt-1 w-full text-left text-[12px] leading-[1.45] text-[var(--text-primary)]"
+              >
                 {evt.summary}
-              </div>
+              </button>
 
               {/* Provenance */}
               <div className="mt-[5px] flex flex-wrap items-center gap-x-2.5 gap-y-1">
@@ -306,13 +324,20 @@ export function LiveFeed({ events, arrivals }: LiveFeedProps) {
                     {precision.label.toUpperCase()}
                   </span>
                 )}
-                {sources > 1 && (
-                  <span
-                    className="text-[9.5px] tabular-nums text-[var(--text-secondary)]"
+                {/* The unit is named every time: reports are rows, outlets are
+                    who said it once forwards and mirrors collapse. Never
+                    "sources" (DISPLAY-12, C84). */}
+                {chip && (
+                  <button
+                    type="button"
+                    onClick={() => setOpenId(open ? null : evt.id)}
+                    aria-expanded={open}
+                    className="rounded-[2px] border border-[var(--border)] px-1 text-[9px] tabular-nums tracking-[0.06em] text-[var(--text-secondary)]"
                     style={{ fontFamily: "var(--font-mono)" }}
+                    title={CHIP_TITLE}
                   >
-                    {sources} sources
-                  </span>
+                    {chip}
+                  </button>
                 )}
                 {evt.source_reliability != null && (
                   <span
@@ -357,6 +382,7 @@ export function LiveFeed({ events, arrivals }: LiveFeedProps) {
                   </span>
                 )}
               </div>
+              {open && <ReportList eventId={evt.id} corroboration={evt.corroboration} />}
             </div>
           );
         })}

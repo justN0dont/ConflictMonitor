@@ -527,3 +527,31 @@ async def test_the_repair_pass_terminates_even_when_a_row_stays_null(
             )
         ).scalar_one()
     assert span is None, "the loop wrote a value just to clear its own predicate"
+
+
+# ── C84: the first column added to event_reports after the table ─────────────
+
+
+async def test_a_report_table_from_before_forwarded_from_gets_the_column(migration_engine):
+    """C84 / C63. 8523961 wrote that the hand-kept ALTER list "could not serve"
+    event_reports and deferred the cost to the next column added there. This
+    is that column. The old shape is made by dropping it — the only way to
+    have one without a second hand-written copy of the schema, which is the
+    fixture tests/conftest.py refuses to keep."""
+    async with migration_engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE event_reports DROP COLUMN IF EXISTS forwarded_from"))
+
+    await run_startup_migrations(migration_engine)
+
+    async with migration_engine.connect() as conn:
+        col = (
+            await conn.execute(
+                text(
+                    "SELECT is_nullable, column_default FROM information_schema.columns "
+                    "WHERE table_name = 'event_reports' AND column_name = 'forwarded_from'"
+                )
+            )
+        ).one()
+    assert col.is_nullable == "YES"
+    # NULL is "never recorded"; '' would stamp "not a forward" on rows nothing read.
+    assert col.column_default is None

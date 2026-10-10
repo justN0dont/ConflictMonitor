@@ -56,8 +56,9 @@ from app.db import async_session
 from app.feeds import ErrorKind
 from app.models import Event, EventReport
 from app.services.broadcaster import broadcaster
-from app.schemas import EventRead, EventWS
+from app.schemas import EventWS
 from app.services.classifier import classify_message, evidence_span
+from app.services.corroboration import read_event
 from app.services.dedup import check_duplicate, merge_duplicate
 from app.services.geocoder import geocode
 
@@ -402,6 +403,9 @@ async def _process_article(
         summary=result.get("summary", full_text[:200]),
         source_url=url,
         telegram_message_id=None,
+        # NULL, never "": an article has no forward header to read, so this
+        # row cannot say "not a forward" — only that nothing recorded one.
+        forwarded_from=None,
         killed_reported=result.get("killed_reported"),
         # Beside the count, from the same result, so a NULL count on this row
         # can be read as "the article stated none" or "the classifier never
@@ -439,7 +443,7 @@ async def _process_article(
             # article text that stated it; existing.killed_reported is still
             # never written.
             await merge_duplicate(session, existing, report, severity)
-            ws_payload = EventWS(type="new_event", event=EventRead.model_validate(existing))
+            ws_payload = EventWS(type="new_event", event=await read_event(session, existing))
             await broadcaster.broadcast(ws_payload.model_dump_json())
             return
 
@@ -481,7 +485,7 @@ async def _process_article(
         await session.commit()
         await session.refresh(db_event)
 
-        ws_payload = EventWS(type="new_event", event=EventRead.model_validate(db_event))
+        ws_payload = EventWS(type="new_event", event=await read_event(session, db_event))
         await broadcaster.broadcast(ws_payload.model_dump_json())
         logger.info(
             "RSS event #%d | sev=%s | loc='%s' -> %s | geo=%s | %s",

@@ -17,7 +17,7 @@ import logging
 import re
 from datetime import timedelta
 
-from sqlalchemy import and_, cast, func, select
+from sqlalchemy import and_, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from geoalchemy2 import Geography
 from geoalchemy2.functions import ST_DWithin
@@ -26,6 +26,7 @@ from shapely.geometry import Point
 
 from app.models import Event, EventReport
 from app.seed_channels import get_reliability as _channel_reliability
+from app.services.corroboration import outlets
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,7 @@ async def merge_duplicate(
     # ── Multi-source confidence boost ──────────────────────────────────────────
     # When multiple independent channels confirm the same event, raise reliability.
     # Base: take the higher of the two channels' scores.
-    # Bonus: +1 if 3+ DISTINCT channels have reported it (capped at 5).
+    # Bonus: +1 if 3+ independent OUTLETS have reported it (capped at 5).
     #
     # The bonus used to gate on `new_count`, which counts merge EVENTS (`C11`).
     # The pipeline generates merge events by itself — a restart re-ingests a
@@ -319,32 +320,37 @@ async def merge_duplicate(
     # Empty channel names are excluded from the count: telegram.py writes ""
     # when a chat has neither username nor title, and two unnamed channels
     # cannot be shown to be distinct from each other.
-    distinct_channels = (
-        await session.execute(
-            select(func.count(func.distinct(EventReport.channel))).where(
-                EventReport.event_id == existing.id,
-                EventReport.channel != "",
+    # Outlets, not channel names (C84). A Telegram forward collapses onto the
+    # channel it was forwarded from, and `x_name` onto `name`: one outlet on
+    # two transports. services/corroboration.py is the one rule, and the chip
+    # the UI shows counts with the same function. Empty names still drop out.
+    independent = outlets(
+        (
+            await session.execute(
+                select(EventReport.channel, EventReport.forwarded_from).where(
+                    EventReport.event_id == existing.id
+                )
             )
-        )
-    ).scalar_one()
+        ).all()
+    )
 
     new_channel_rel = _channel_reliability(report.channel) or 1
     current_rel = existing.source_reliability or 1
     combined = max(current_rel, new_channel_rel)
-    if distinct_channels >= 3:
+    if independent >= 3:
         combined = min(5, combined + 1)
     if combined != existing.source_reliability:
         existing.source_reliability = combined
         logger.debug(
-            "Reliability boosted to %d for event #%d (%d distinct channels)",
-            combined, existing.id, distinct_channels,
+            "Reliability boosted to %d for event #%d (%d independent outlets)",
+            combined, existing.id, independent,
         )
 
     await session.commit()
     await session.refresh(existing)
     logger.info(
-        "Merged into event #%d (report #%d kept | now %d reports, %d distinct "
-        "channel(s) | reliability=%d | sources: %s)",
-        existing.id, report.id, new_count, distinct_channels,
+        "Merged into event #%d (report #%d kept | now %d reports, %d independent "
+        "outlet(s) | reliability=%d | sources: %s)",
+        existing.id, report.id, new_count, independent,
         existing.source_reliability or 0, existing.reporting_channels,
     )

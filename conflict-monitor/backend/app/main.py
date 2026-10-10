@@ -85,6 +85,19 @@ async def run_startup_migrations(engine):
                 # boot is unreadable.
                 logger.exception("Migration ALTER for events.%s failed", col)
 
+        # The first column added to event_reports since 8523961 created the
+        # table, which said this bill would come due (C63). Same rule as the
+        # loop above: logged, never passed. DEFAULT NULL and not '', because ''
+        # is Telegram saying "not a forward" and nothing read a header on the
+        # rows this statement finds.
+        try:
+            await conn.execute(text(
+                "ALTER TABLE event_reports ADD COLUMN IF NOT EXISTS forwarded_from "
+                "TEXT DEFAULT NULL"
+            ))
+        except Exception:
+            logger.exception("Migration ALTER for event_reports.forwarded_from failed")
+
         # severity was created NOT NULL DEFAULT 5, which made "we did not
         # measure severity" unrepresentable and stamped the classifier's
         # fallback on disk as a finding. create_all never alters an existing
@@ -171,7 +184,8 @@ async def run_startup_migrations(engine):
         # and the hand-kept ALTER list in the block above does not need a line;
         # it could not serve one anyway, being hardcoded to "ALTER TABLE
         # events". C63's cost is deferred to the next column added to
-        # event_reports AFTER this commit, not paid here.
+        # event_reports AFTER this commit, not paid here. (Paid since: that
+        # column is forwarded_from, C84, and its ALTER closes the block above.)
         #
         # The DATA is the part that is not free. On a database that already has
         # rows — the dev DB, or a restored archive — every event predates the
