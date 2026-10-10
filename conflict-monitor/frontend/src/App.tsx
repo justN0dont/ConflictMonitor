@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ConnectivityRail } from "./components/ConnectivityRail";
 import { Header } from "./components/Header";
 import { IndicatorRail } from "./components/IndicatorRail";
@@ -6,7 +6,7 @@ import { LiveFeed } from "./components/LiveFeed";
 import { MapPanel } from "./components/MapPanel";
 import { TimelineScrubber } from "./components/TimelineScrubber";
 import { useEventStream } from "./hooks/useEventStream";
-import { countIsFloor } from "./lib/events";
+import { useHistory, useTimelineAxis } from "./hooks/useHistory";
 import { useTracking } from "./hooks/useTracking";
 
 const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
@@ -46,22 +46,17 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Filter events by active time range
-  const filteredEvents = useMemo(() => {
-    if (!activeRange) return events;
-    const start = activeRange.start.getTime();
-    const end = activeRange.end.getTime();
-    return events.filter((e) => {
-      const t = new Date(e.timestamp).getTime();
-      return t >= start && t <= end;
-    });
-  }, [events, activeRange]);
+  // A scrubbed window is fetched from the server, not filtered out of the
+  // 200 newest events the live store holds (C81): LIVE shows the store, a
+  // window shows its own answer. The axis under the scrubber is the whole
+  // table's density plus a liveness lane per ingest feed.
+  const history = useHistory(activeRange);
+  const axis = useTimelineAxis(timeRange);
+  const filteredEvents = activeRange ? history.events : events;
 
-  // The store holds the newest 200; a count over a range reaching past them is a floor.
-  const eventCountIsFloor = useMemo(
-    () => countIsFloor(truncated, events, activeRange),
-    [truncated, events, activeRange],
-  );
+  // LIVE: the store holds the newest 200, so its count is a floor once it is
+  // full. A window: a floor only when the server's cap cut it short.
+  const eventCountIsFloor = activeRange ? history.floor : truncated;
 
   const onRangeChange = useCallback((range: { start: Date; end: Date } | null) => {
     setActiveRange(range);
@@ -113,11 +108,14 @@ export default function App() {
         </div>
       </div>
       <TimelineScrubber
-        allEvents={events}
+        heldCount={events.length}
         timeRange={timeRange}
         activeRange={activeRange}
         onRangeChange={onRangeChange}
         truncated={truncated}
+        density={axis.density}
+        lanes={axis.lanes}
+        window={{ count: filteredEvents.length, loaded: history.loaded, floor: history.floor }}
       />
     </div>
   );

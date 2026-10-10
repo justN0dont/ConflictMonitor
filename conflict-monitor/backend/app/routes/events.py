@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, extract, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import async_session as make_session, get_session
@@ -63,6 +63,79 @@ async def event_time_range(session: AsyncSession = Depends(get_session)):
     if row and row[0] and row[1]:
         return {"earliest": row[0].isoformat(), "latest": row[1].isoformat()}
     return {"earliest": None, "latest": None}
+
+
+# The most buckets one /density answer may hold. A 5-month archive at one
+# bucket per hour is ~3,600; the timeline asks for about one per two pixels.
+MAX_DENSITY_BUCKETS = 5000
+
+
+def _utc(d: datetime) -> datetime:
+    """A naive query datetime is taken as UTC, so it can be compared with the
+    timezone-aware column and the aware row the table's own bounds return."""
+    return d if d.tzinfo is not None else d.replace(tzinfo=timezone.utc)
+
+
+@router.get("/density")
+async def event_density(
+    bucket_s: int = Query(3600, ge=60, le=7 * 86400),
+    after: datetime | None = Query(None),
+    before: datetime | None = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Events per `bucket_s`-second bucket, over the whole table by default.
+
+    The timeline draws its axis from /time-range, which spans every row, while
+    the client holds only the newest 200 events (useEventStream): on the
+    83,938-event archive most of the axis was drawn as quiet because nothing
+    had been fetched for it - "nothing happened" standing in for "nothing was
+    asked for" (C81). These counts are what the axis is made of.
+
+    `located` counts `geometry IS NOT NULL`, the one unlocated fact (see the
+    note at the top of this file), so the display can draw "happened, somewhere
+    we could not place" apart from "placed". A bucket with no events is
+    omitted: an absent bucket means zero rows, nothing else. `after`/`before`
+    default to the table's own bounds and are echoed back so the caller knows
+    which span the counts cover.
+    """
+    lo, hi = after and _utc(after), before and _utc(before)
+    if lo is None or hi is None:
+        bounds = (await session.execute(
+            select(func.min(Event.timestamp), func.max(Event.timestamp))
+        )).one()
+        if bounds[0] is None:
+            return {"bucket_s": bucket_s, "after": None, "before": None, "buckets": []}
+        lo = lo or bounds[0]
+        hi = hi or bounds[1]
+    if hi < lo:
+        raise HTTPException(status_code=422, detail="before is earlier than after")
+    span_s = (hi - lo).total_seconds()
+    if span_s / bucket_s > MAX_DENSITY_BUCKETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{span_s / bucket_s:.0f} buckets; bucket_s must be at least "
+                   f"{int(span_s // MAX_DENSITY_BUCKETS) + 1} for this span",
+        )
+    bucket = (func.floor(extract("epoch", Event.timestamp) / bucket_s) * bucket_s).label("bucket")
+    rows = (await session.execute(
+        select(bucket, func.count().label("total"), func.count(Event.geometry).label("located"))
+        .where(Event.timestamp >= lo, Event.timestamp <= hi)
+        .group_by(bucket)
+        .order_by(bucket)
+    )).all()
+    return {
+        "bucket_s": bucket_s,
+        "after": lo.isoformat(),
+        "before": hi.isoformat(),
+        "buckets": [
+            {
+                "at": datetime.fromtimestamp(int(b), tz=timezone.utc).isoformat(),
+                "total": int(total),
+                "located": int(located),
+            }
+            for b, total, located in rows
+        ],
+    }
 
 
 @router.get("/{event_id}", response_model=EventRead)

@@ -20,9 +20,10 @@ poller, and /health keeps answering from memory throughout.
 import asyncio
 import datetime
 import logging
+import math
 import time
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, extract, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from app import feeds
@@ -189,3 +190,88 @@ async def liveness_timeline(session, feed: str, since: float, until: float) -> l
         # The last row vouches until the next flush is due; not beyond it.
         add(prev_t, until, segments[-1]["state"] if segments else UNKNOWN)
     return segments
+
+
+# A lane bucket's state when heartbeat rows there were pruned (RETENTION_DAYS):
+# this monitor forgetting, which is not the same as this monitor not looking.
+NOT_RETAINED = "not_retained"
+
+
+def lane_buckets(
+    agg,
+    after: float,
+    before: float,
+    bucket_s: int,
+    retained_since: float | None,
+    first_recorded: float | None,
+) -> list[dict]:
+    """Dense liveness buckets over [after, before): one per `bucket_s`.
+
+    `agg` is `(bucket_start_epoch, states, attempts, successes)` per bucket,
+    from heartbeat rows grouped by bucket (liveness_lane does the SQL). Within
+    a bucket the state is the WORST its heartbeats recorded (feeds.worst), so
+    one failing minute inside a six-hour bucket shows; a bucket whose only
+    state is `unconfigured` stays `unconfigured`.
+
+    A bucket with no heartbeat row is one of two things, told apart by two
+    clocks the caller supplies:
+      - `not_retained`: it ends after the feed's first transition row
+        (`first_recorded`, kept forever) and before `retained_since`, so rows
+        were written there and have since been pruned;
+      - `unknown` otherwise: nothing ever vouched for it - before this feed
+        existed, or a gap in which the monitor was not recording.
+    Neither is ever written as a feed state.
+
+    The first bucket is aligned down to a multiple of `bucket_s`, so `at` can
+    precede `after`; a caller drawing the lane clips it.
+    """
+    by_start = {int(b): (states, att, suc) for b, states, att, suc in agg}
+    out: list[dict] = []
+    start = math.floor(after / bucket_s) * bucket_s
+    while start < before:
+        end = start + bucket_s
+        row = by_start.get(start)
+        if row is None:
+            pruned = (
+                retained_since is not None and first_recorded is not None
+                and end <= retained_since and end > first_recorded
+            )
+            out.append({"at": start, "state": NOT_RETAINED if pruned else UNKNOWN,
+                        "attempts": 0, "successes": 0})
+        else:
+            states, att, suc = row
+            w = feeds.worst(feeds.FeedState(s) for s in states)
+            state = w.value if w is not None else feeds.FeedState.UNCONFIGURED.value
+            out.append({"at": start, "state": state,
+                        "attempts": int(att or 0), "successes": int(suc or 0)})
+        start = end
+    return out
+
+
+async def liveness_lane(session, feed: str, after: float, before: float,
+                        bucket_s: int, now: float) -> list[dict]:
+    """`lane_buckets` over this feed's heartbeat rows, aggregated in SQL so a
+    five-month axis costs one grouped scan and returns at most a few thousand
+    rows, never a row per minute."""
+    first_tr = (await session.execute(
+        select(func.min(FeedTransition.at)).where(FeedTransition.feed == feed)
+    )).scalar_one_or_none()
+    first_recorded = first_tr.timestamp() if first_tr is not None else None
+    bucket = (func.floor(extract("epoch", FeedHeartbeat.at) / bucket_s) * bucket_s).label("bucket")
+    aligned = math.floor(after / bucket_s) * bucket_s
+    rows = (await session.execute(
+        select(
+            bucket,
+            func.array_agg(FeedHeartbeat.state.distinct()),
+            func.sum(FeedHeartbeat.attempts),
+            func.sum(FeedHeartbeat.successes),
+        )
+        .where(FeedHeartbeat.feed == feed,
+               FeedHeartbeat.at >= _ts(aligned),
+               FeedHeartbeat.at < _ts(before))
+        .group_by(bucket)
+        .order_by(bucket)
+    )).all()
+    return lane_buckets(rows, after, before, bucket_s,
+                        retained_since=now - RETENTION_DAYS * 86400,
+                        first_recorded=first_recorded)

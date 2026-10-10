@@ -517,6 +517,53 @@ async def health_history(feed: str, hours: float = 24):
     }
 
 
+# The most buckets one /health/lane answer may hold; the timeline asks for
+# about one per two pixels, so a five-month axis is ~600.
+MAX_LANE_BUCKETS = 5000
+
+
+@app.get("/health/lane")
+async def health_lane(feed: str, after: float, before: float, bucket_s: int = 3600):
+    """One feed's liveness as dense buckets over [after, before) epoch seconds,
+    for a timeline axis that may span months (Phase 3, the feed-liveness lane).
+
+    /health/history answers at heartbeat resolution and is capped at 30 days;
+    this answers at `bucket_s` resolution over any span. Each bucket carries the
+    worst state its heartbeats recorded, or `unknown` when nothing vouched for
+    it, or `not_retained` where rows have been pruned (feed_store.lane_buckets
+    says which is which). A collection gap and a quiet period are therefore
+    different shapes on the axis. Reads the database, so it fails if Postgres
+    is down.
+    """
+    from fastapi import HTTPException
+
+    from app.feed_store import RETENTION_DAYS, liveness_lane
+
+    if feed not in feeds.all_trackers():
+        raise HTTPException(status_code=404, detail=f"unknown feed {feed!r}")
+    if bucket_s < 60:
+        raise HTTPException(status_code=422, detail="bucket_s must be at least 60")
+    if before <= after:
+        raise HTTPException(status_code=422, detail="before must be later than after")
+    n = (before - after) / bucket_s
+    if n > MAX_LANE_BUCKETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{n:.0f} buckets; bucket_s must be at least "
+                   f"{int((before - after) // MAX_LANE_BUCKETS) + 1} for this span",
+        )
+    async with async_session() as session:
+        buckets = await liveness_lane(session, feed, after, before, bucket_s, time.time())
+    return {
+        "feed": feed,
+        "after": after,
+        "before": before,
+        "bucket_s": bucket_s,
+        "retention_days": RETENTION_DAYS,
+        "buckets": buckets,
+    }
+
+
 @app.get("/config")
 async def config():
     return {"demo_mode": settings.demo_mode}

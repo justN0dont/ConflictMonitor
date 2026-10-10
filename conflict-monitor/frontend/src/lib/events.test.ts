@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ConflictEvent } from "../types/event";
-import { countIsFloor, freshIds, logArrival, mergeEvent } from "./events";
+import { freshIds, logArrival, mergeEvent } from "./events";
 
 const T0 = Date.UTC(2026, 8, 26, 12, 0, 0);
 const ev = (id: number, minutesAgo: number, summary = "") =>
@@ -54,20 +54,5 @@ describe("freshIds (C50)", () => {
   it("forgets old arrivals", () => {
     const log = logArrival(logArrival(new Map(), 1, T0), 2, T0 + 61_000);
     expect([...log.keys()]).toEqual([2]);
-  });
-});
-
-describe("countIsFloor", () => {
-  const store = held(200); // newest now, oldest 199 minutes ago
-  it("is a floor in LIVE when the store is truncated", () => {
-    expect(countIsFloor(true, store, null)).toBe(true);
-    expect(countIsFloor(false, store, null)).toBe(false);
-  });
-
-  it("is exact for a window inside what is held, a floor for one reaching past it", () => {
-    const inside = { start: new Date(T0 - 60 * 60_000), end: new Date(T0) };
-    const past = { start: new Date(T0 - 300 * 60_000), end: new Date(T0) };
-    expect(countIsFloor(true, store, inside)).toBe(false);
-    expect(countIsFloor(true, store, past)).toBe(true);
   });
 });

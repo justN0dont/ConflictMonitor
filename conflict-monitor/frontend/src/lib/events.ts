@@ -51,20 +51,3 @@ export function freshIds(log: ArrivalLog, ids: Iterable<number>, now: number, wi
   }
   return out;
 }
-
-/**
- * Whether a count of the events in `range` is only a lower bound: the store is
- * truncated and the range reaches back past the oldest event it holds (or
- * there is no range, which means everything). A window wholly inside what is
- * held is counted exactly.
- */
-export function countIsFloor(
-  truncated: boolean,
-  held: readonly ConflictEvent[],
-  range: { start: Date; end: Date } | null,
-): boolean {
-  if (!truncated || held.length === 0) return truncated;
-  if (range === null) return true;
-  const oldestHeld = Math.min(...held.map((e) => new Date(e.timestamp).getTime()));
-  return range.start.getTime() < oldestHeld;
-}

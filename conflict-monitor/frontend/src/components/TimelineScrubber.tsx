@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ConflictEvent } from "../types/event";
-import { eventVisual } from "../lib/tokens";
+import type { Lane } from "../hooks/useHistory";
+import { FEED_WORD, type FeedState } from "../lib/feed";
+import { densityBars, laneBoxes, laneFill, type DensityBucket, type LaneFill } from "../lib/history";
 import { SPEEDS, windowAt } from "../lib/playback";
+import { STATUS } from "../lib/tokens";
 
 function formatTimeLabel(d: Date): string {
   const months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
@@ -17,9 +19,36 @@ function formatDuration(ms: number): string {
   return `${days}d window`;
 }
 
+/**
+ * How each lane state is painted. A recorded feed state gets a status colour;
+ * the two holes get hatches, so that "nobody was listening" never looks like
+ * "nothing happened" (lib/history.ts, laneFill).
+ */
+const LANE_STYLE: Record<LaneFill, React.CSSProperties> = {
+  good: { background: STATUS.good.color, opacity: 0.7 },
+  warning: { background: STATUS.warning.color, opacity: 0.85 },
+  critical: { background: STATUS.critical.color, opacity: 0.9 },
+  off: { background: "var(--text-secondary, #5a6a7e)", opacity: 0.25 },
+  unknown: { background: "repeating-linear-gradient(45deg, transparent 0 2px, rgba(200,214,229,0.2) 2px 3px)" },
+  not_retained: { background: "repeating-linear-gradient(90deg, rgba(200,214,229,0.25) 0 1px, transparent 1px 4px)" },
+};
+
+function laneWord(state: string): string {
+  if (state === "unknown") return "UNKNOWN · no heartbeat recorded";
+  if (state === "not_retained") return "NOT RETAINED · heartbeats pruned";
+  return FEED_WORD[state as FeedState] ?? state.toUpperCase();
+}
+
+// Vertical layout of the 40 px track: bars stand on a baseline, lanes sit under it.
+const BAR_TOP = 0;
+const BASELINE_Y = 22;
+const LANE_Y0 = 26;
+const LANE_H = 4;
+const LANE_GAP = 2;
+
 interface TimelineScrubberProps {
-  /** All events (unfiltered) for drawing tick marks */
-  allEvents: ConflictEvent[];
+  /** How many events the live store holds (its cap is 200). */
+  heldCount: number;
   /** The full time range from the API */
   timeRange: { earliest: Date; latest: Date } | null;
   /** Current filter — null means show all (LIVE mode) */
@@ -28,9 +57,17 @@ interface TimelineScrubberProps {
   onRangeChange: (range: { start: Date; end: Date } | null) => void;
   /** The client holds only the newest events, so LIVE is not "all" of them. */
   truncated: boolean;
+  /** Event counts over the whole table (C81): the axis is made of these. */
+  density: { bucketS: number; buckets: DensityBucket[] } | null;
+  /** One liveness lane per ingest feed, so a gap and a quiet period differ. */
+  lanes: Lane[];
+  /** The scrubbed window: how many events it shows, and whether that is all of them. */
+  window: { count: number; loaded: boolean; floor: boolean };
 }
 
-export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeChange, truncated }: TimelineScrubberProps) {
+export function TimelineScrubber({
+  heldCount, timeRange, activeRange, onRangeChange, truncated, density, lanes, window: win,
+}: TimelineScrubberProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState<"left" | "right" | "window" | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -196,16 +233,12 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
     onRangeChange({ start: new Date(Math.max(rangeStart, newStart)), end: new Date(Math.min(Date.now(), newEnd)) });
   }, [getTimeFromX, winStart, winEnd, rangeStart, isDragging, onRangeChange]);
 
-  // ── Event ticks ───────────────────────────────────────────
-  const ticks = allEvents
-    .filter((e) => e.lat != null && e.lon != null)
-    .slice(0, 300)
-    .map((e) => {
-      const t = new Date(e.timestamp).getTime();
-      const pct = ((t - rangeStart) / fullSpan) * 100;
-      return { pct, severity: e.severity, type: e.event_type };
-    })
-    .filter((t) => t.pct >= 0 && t.pct <= 100);
+  // ── The axis: density over the whole table, liveness per ingest feed ──
+  const bars = density ? densityBars(density.buckets, density.bucketS, rangeStart, fullSpan) : [];
+  const laneRows = lanes.map((l) => ({
+    label: l.label,
+    boxes: laneBoxes(l.buckets, l.bucketS, rangeStart, fullSpan),
+  }));
 
   const isLive = activeRange === null;
 
@@ -284,37 +317,63 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
         onClick={onTrackClick}
         style={{
           flex: 1, height: 40, position: "relative", cursor: "pointer",
-          display: "flex", alignItems: "center",
+          marginLeft: 26,
         }}
       >
-        {/* Background track */}
+        {/* Baseline the density bars stand on */}
         <div style={{
-          position: "absolute", left: 0, right: 0, top: "50%", transform: "translateY(-50%)",
-          height: 4, background: "var(--border, #1a2332)", borderRadius: 2,
+          position: "absolute", left: 0, right: 0, top: BASELINE_Y,
+          height: 1, background: "var(--border, #1a2332)",
         }} />
 
-        {/* Event tick marks */}
-        {ticks.map((tick, i) => (
-          <div
-            key={i}
-            style={{
-              position: "absolute",
-              left: `${tick.pct}%`,
-              top: "50%",
-              transform: "translate(-50%, -50%)",
-              width: 1.5,
-              // severity may be null ("never measured"). null * 1.5 is 0 in
-              // JS, so these used to draw as the shortest tick - the look of
-              // a measured, trivial event. Base height plus a lower opacity
-              // reads as "no reading" instead.
-              height: 4 + (tick.severity ?? 0) * 1.5,
-              background: eventVisual(tick.type).color,
-              opacity: tick.severity == null ? 0.28 : 0.6,
-              borderRadius: 1,
-              pointerEvents: "none",
-            }}
-          />
-        ))}
+        {/* Density: every bucket of the whole table, linear in count. The
+            dimmer bar is every event in the bucket; the brighter one, those
+            that were placed. */}
+        {bars.map((b, i) => {
+          const h = Math.max(1, Math.round(b.heightFrac * (BASELINE_Y - BAR_TOP)));
+          const placed = b.total > 0 ? Math.round((h * b.located) / b.total) : 0;
+          const at = new Date(rangeStart + (b.leftPct / 100) * fullSpan);
+          return (
+            <div
+              key={i}
+              title={`${formatTimeLabel(at)} · ${b.total} event${b.total === 1 ? "" : "s"}, ${b.located} placed`}
+              style={{
+                position: "absolute", left: `${b.leftPct}%`, width: `${b.widthPct}%`, minWidth: 1,
+                top: BASELINE_Y - h, height: h, pointerEvents: "none",
+                background: "rgba(200,214,229,0.22)",
+              }}
+            >
+              <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: placed, background: "rgba(200,214,229,0.55)" }} />
+            </div>
+          );
+        })}
+
+        {/* Liveness lanes: one per ingest feed, holes drawn as holes */}
+        {laneRows.map((lane, li) => {
+          const top = LANE_Y0 + li * (LANE_H + LANE_GAP);
+          return (
+            <div key={lane.label} style={{ position: "absolute", left: 0, right: 0, top, height: LANE_H, pointerEvents: "none" }}>
+              <span style={{
+                position: "absolute", left: -26, top: -2, width: 22, textAlign: "right",
+                fontFamily: "var(--font-mono, monospace)", fontSize: 7, letterSpacing: 0.5,
+                color: "var(--text-secondary, #5a6a7e)", lineHeight: "8px",
+              }}>
+                {lane.label}
+              </span>
+              {lane.boxes.map((box, bi) => (
+                <div
+                  key={bi}
+                  title={`${lane.label} · ${laneWord(box.state)} · ${formatTimeLabel(new Date(box.startMs))} – ${formatTimeLabel(new Date(box.endMs))}`}
+                  style={{
+                    position: "absolute", left: `${box.leftPct}%`, width: `${box.widthPct}%`, minWidth: 1,
+                    top: 0, bottom: 0, pointerEvents: "auto",
+                    ...LANE_STYLE[laneFill(box.state)],
+                  }}
+                />
+              ))}
+            </div>
+          );
+        })}
 
         {/* Selection window (only shown when not LIVE) */}
         {!isLive && (
@@ -380,7 +439,7 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
       <div style={{ flexShrink: 0, width: 160, textAlign: "right" }}>
         {isLive ? (
           <div style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 11, color: "var(--accent-green, #3fb950)", fontWeight: 600, letterSpacing: 1 }}>
-            {truncated ? `LIVE · NEWEST ${allEvents.length}` : "LIVE — ALL EVENTS"}
+            {truncated ? `LIVE · NEWEST ${heldCount}` : "LIVE — ALL EVENTS"}
           </div>
         ) : (
           <>
@@ -390,8 +449,17 @@ export function TimelineScrubber({ allEvents, timeRange, activeRange, onRangeCha
             <div style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 10, color: "var(--text, #c8d6e5)", lineHeight: 1.5 }}>
               {formatTimeLabel(new Date(winEnd))}
             </div>
-            <div style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 9, color: "var(--text-secondary, #5a6a7e)", marginTop: 1 }}>
-              {formatDuration(winEnd - winStart)}
+            <div
+              style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 9, color: "var(--text-secondary, #5a6a7e)", marginTop: 1 }}
+              title={
+                !win.loaded
+                  ? "This window has not been fetched yet"
+                  : win.floor
+                    ? "The server returns at most 500 events per window; this one had more"
+                    : "Every event in this window, fetched from the server"
+              }
+            >
+              {formatDuration(winEnd - winStart)} · {win.loaded ? `${win.count}${win.floor ? "+" : ""} EVT` : "LOADING"}
             </div>
           </>
         )}
