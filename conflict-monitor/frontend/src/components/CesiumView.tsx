@@ -13,6 +13,8 @@ import type { EciVec3 } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
 import { liveLook } from "../lib/replay";
+import { coverageAreas, hatchCanvas } from "../lib/coverage";
+import type { RegionCurrency } from "../lib/feed";
 import { EVENT_TYPES, eventVisual, type EventKey } from "../lib/tokens";
 
 // ---------------------------------------------------------------------------
@@ -188,6 +190,8 @@ interface CesiumViewProps {
   jammingZones: JammingZone[];
   /** No window is scrubbed. When false the live layers are dimmed, never hidden (C82). */
   isLive: boolean;
+  /** AIS per-region currency, drawn as coverage (C83). */
+  regions: RegionCurrency[];
 }
 
 export function CesiumView({
@@ -197,6 +201,7 @@ export function CesiumView({
   tleData,
   jammingZones,
   isLive,
+  regions,
 }: CesiumViewProps) {
   // Aircraft, vessels, satellites and jamming are drawn as of now; in replay
   // they are dimmed to this alpha, never hidden (C82, lib/replay.ts).
@@ -215,6 +220,7 @@ export function CesiumView({
   const vesselSourceRef = useRef<Cesium.CustomDataSource | null>(null);
   const satelliteSourceRef = useRef<Cesium.CustomDataSource | null>(null);
   const jammingSourceRef = useRef<Cesium.CustomDataSource | null>(null);
+  const coverageSourceRef = useRef<Cesium.CustomDataSource | null>(null);
   const satIntervalRef = useRef<number | null>(null);
 
   // -----------------------------------------------------------------------
@@ -282,18 +288,21 @@ export function CesiumView({
     });
 
     // Create data sources
+    const coverageSource = new Cesium.CustomDataSource("coverage");
     const eventSource = new Cesium.CustomDataSource("events");
     const aircraftSource = new Cesium.CustomDataSource("aircraft");
     const vesselSource = new Cesium.CustomDataSource("vessels");
     const satelliteSource = new Cesium.CustomDataSource("satellites");
     const jammingSource = new Cesium.CustomDataSource("jamming");
 
+    viewer.dataSources.add(coverageSource);
     viewer.dataSources.add(eventSource);
     viewer.dataSources.add(aircraftSource);
     viewer.dataSources.add(vesselSource);
     viewer.dataSources.add(satelliteSource);
     viewer.dataSources.add(jammingSource);
 
+    coverageSourceRef.current = coverageSource;
     eventSourceRef.current = eventSource;
     aircraftSourceRef.current = aircraftSource;
     vesselSourceRef.current = vesselSource;
@@ -352,6 +361,59 @@ export function CesiumView({
     viewer.scene.postProcessStages.add(stage);
     postProcessRef.current = stage;
   }, [filterMode]);
+
+  // -----------------------------------------------------------------------
+  // AIS coverage by region (C83): each region's effective pieces, tinted
+  // where it can vouch for a count, hatched where it cannot, plus a label.
+  // Dimmed in replay like every layer that does not follow the timeline.
+  // -----------------------------------------------------------------------
+  useEffect(() => {
+    const source = coverageSourceRef.current;
+    if (!source) return;
+    source.entities.removeAll();
+    const hatch = hatchCanvas();
+    const muted = Cesium.Color.fromCssColorString("#8ea3bb");
+    for (const a of coverageAreas(regions)) {
+      if (a.fill === "off") continue;
+      a.pieces.forEach((p, i) => {
+        source.entities.add({
+          id: `cov-${a.key}-${i}`,
+          rectangle: {
+            coordinates: Cesium.Rectangle.fromDegrees(p.lonMin, p.latMin, p.lonMax, p.latMax),
+            material:
+              a.fill === "observed"
+                ? new Cesium.ColorMaterialProperty(VESSEL_COLOR.withAlpha(0.07 * alpha))
+                : new Cesium.ImageMaterialProperty({
+                    image: hatch,
+                    repeat: new Cesium.Cartesian2((p.lonMax - p.lonMin) * 2, (p.latMax - p.latMin) * 2),
+                    transparent: true,
+                    color: Cesium.Color.WHITE.withAlpha(alpha),
+                  }),
+            height: 0,
+          },
+        });
+      });
+      if (a.anchor) {
+        source.entities.add({
+          id: `cov-${a.key}-label`,
+          position: Cesium.Cartesian3.fromDegrees(a.anchor.lon, a.anchor.lat, 0),
+          label: {
+            text: a.label,
+            font: "9px JetBrains Mono, monospace",
+            fillColor: (a.fill === "observed" ? VESSEL_COLOR : muted).withAlpha(0.85 * alpha),
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            horizontalOrigin: Cesium.HorizontalOrigin.LEFT,
+            verticalOrigin: Cesium.VerticalOrigin.TOP,
+            pixelOffset: new Cesium.Cartesian2(6, 6),
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 8_000_000),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        });
+      }
+    }
+  }, [regions, alpha]);
 
   // -----------------------------------------------------------------------
   // Update conflict events

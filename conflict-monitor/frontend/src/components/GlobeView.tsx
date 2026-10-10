@@ -14,6 +14,8 @@ import type { EciVec3, SatRec } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
 import { liveLook } from "../lib/replay";
+import { coverageAreas, hatchCanvas, type CoverageFill, type Rect } from "../lib/coverage";
+import type { RegionCurrency } from "../lib/feed";
 import { isLocated } from "../lib/located";
 import { eventVisual, geoPrecision } from "../lib/tokens";
 
@@ -634,6 +636,77 @@ function JammingLayer({ zones, dim }: { zones: JammingZone[]; dim: number }) {
 }
 
 // ---------------------------------------------------------------------------
+// AIS coverage by region (C83)
+// ---------------------------------------------------------------------------
+
+/**
+ * One effective piece of a region as a patch of the sphere: tinted where the
+ * region can vouch for a count, the lane's hatch where it cannot. The sphere
+ * geometry's azimuth runs 90° ahead of this file's longitude convention
+ * (latLonToVec3), hence the +90.
+ */
+function CoveragePatch({ piece, fill, hatch, dim }: { piece: Rect; fill: CoverageFill; hatch: THREE.Texture; dim: number }) {
+  const lonSpan = piece.lonMax - piece.lonMin;
+  const latSpan = piece.latMax - piece.latMin;
+  const map = useMemo(() => {
+    if (fill !== "hole") return null;
+    const t = hatch.clone();
+    t.repeat.set(lonSpan / 1.5, latSpan / 1.5);
+    t.needsUpdate = true;
+    return t;
+  }, [fill, hatch, lonSpan, latSpan]);
+  const rad = Math.PI / 180;
+  return (
+    <mesh>
+      <sphereGeometry
+        args={[EARTH_RADIUS * 1.0015, 24, 12, (piece.lonMin + 90) * rad, lonSpan * rad, (90 - piece.latMax) * rad, latSpan * rad]}
+      />
+      {map ? (
+        <meshBasicMaterial map={map} transparent opacity={dim} depthWrite={false} side={THREE.DoubleSide} />
+      ) : (
+        <meshBasicMaterial color="#40e0d0" transparent opacity={0.08 * dim} depthWrite={false} side={THREE.DoubleSide} />
+      )}
+    </mesh>
+  );
+}
+
+function CoverageLayer({ regions, dim }: { regions: RegionCurrency[]; dim: number }) {
+  const hatch = useMemo(() => {
+    const t = new THREE.CanvasTexture(hatchCanvas());
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    return t;
+  }, []);
+  const areas = useMemo(() => coverageAreas(regions), [regions]);
+  return (
+    <group>
+      {areas
+        .filter((a) => a.fill !== "off")
+        .map((a) => (
+          <group key={a.key}>
+            {a.pieces.map((p, i) => (
+              <CoveragePatch key={i} piece={p} fill={a.fill} hatch={hatch} dim={dim} />
+            ))}
+            {a.anchor && (
+              <Text
+                position={latLonToVec3(a.anchor.lat, a.anchor.lon, EARTH_RADIUS * 1.006)}
+                fontSize={0.009}
+                color={a.fill === "observed" ? "#40e0d0" : "#8ea3bb"}
+                fillOpacity={0.85 * dim}
+                anchorX="left"
+                anchorY="top"
+                textAlign="left"
+                font={undefined}
+              >
+                {a.label}
+              </Text>
+            )}
+          </group>
+        ))}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Scene composition
 // ---------------------------------------------------------------------------
 
@@ -647,6 +720,8 @@ interface SceneProps {
   reducedMotion: boolean;
   /** Opacity multiplier on the layers that do not follow the timeline (C82). */
   dim: number;
+  /** AIS per-region currency, drawn as coverage (C83). */
+  regions: RegionCurrency[];
 }
 
 function Scene({
@@ -657,6 +732,7 @@ function Scene({
   jammingZones,
   reducedMotion,
   dim,
+  regions,
 }: SceneProps) {
   return (
     <>
@@ -687,6 +763,9 @@ function Scene({
       <GeoLines url="/textures/coastlines.json" color="#2a6090" lineWidth={1} opacity={0.5} />
       <GeoLines url="/textures/countries.json" color="#1e4060" lineWidth={0.6} opacity={0.3} />
 
+      {/* Coverage under the data layers (C83) */}
+      <CoverageLayer regions={regions} dim={dim} />
+
       {/* Data layers */}
       <EventMarkers located={located} reducedMotion={reducedMotion} />
       <AircraftLayer aircraft={aircraft} dim={dim} />
@@ -709,9 +788,11 @@ interface GlobeViewProps {
   jammingZones: JammingZone[];
   /** No window is scrubbed. When false the live layers are dimmed, never hidden (C82). */
   isLive: boolean;
+  /** AIS per-region currency, drawn as coverage (C83). */
+  regions: RegionCurrency[];
 }
 
-export function GlobeView({ events, aircraft, vessels, tleData, jammingZones, isLive }: GlobeViewProps) {
+export function GlobeView({ events, aircraft, vessels, tleData, jammingZones, isLive, regions }: GlobeViewProps) {
   const reducedMotion = usePrefersReducedMotion();
   const dim = liveLook(isLive).opacity;
 
@@ -740,6 +821,7 @@ export function GlobeView({ events, aircraft, vessels, tleData, jammingZones, is
           jammingZones={jammingZones}
           reducedMotion={reducedMotion}
           dim={dim}
+          regions={regions}
         />
       </Canvas>
 

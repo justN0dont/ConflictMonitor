@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FEED_WORD, type FeedState } from "../lib/feed";
+import { FEED_WORD, type FeedState, type RegionCurrency } from "../lib/feed";
 import Map, { Marker, Popup, Source, Layer } from "react-map-gl";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingStatus, JammingZone, TLERecord, TrackHistory, Vessel } from "../hooks/useTracking";
@@ -9,6 +9,7 @@ import { isLocated } from "../lib/located";
 import { type ArrivalLog, freshIds } from "../lib/events";
 import { EVENT_TYPES, eventVisual, formatUncertainty, geoPrecision } from "../lib/tokens";
 import { NOW, NOW_CHIP, NOW_TITLE, liveLook } from "../lib/replay";
+import { HATCH_SIZE, coverageAreas, coverageFeatureCollection, hatchCanvas } from "../lib/coverage";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
 
@@ -44,6 +45,8 @@ interface MapPanelProps {
   /** The vessel feed's state; a missing AIS key is not an empty sea. */
   vesselsFeedState: FeedState;
   tleFeedState: FeedState;
+  /** The vessel feed's per-region currency, drawn as coverage (C83, lib/coverage.ts). */
+  regions: RegionCurrency[];
   /** When each event arrived over the live stream; only these ping (C50). */
   arrivals: ArrivalLog;
   /** No window is scrubbed. When false the live layers are dimmed and counted as NOW (C82, lib/replay.ts). */
@@ -192,7 +195,7 @@ function PingMarker({
   );
 }
 
-export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState, tleFeedState, arrivals, isLive }: MapPanelProps) {
+export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState, tleFeedState, arrivals, isLive, regions }: MapPanelProps) {
   const [selected, setSelected] = useState<ConflictEvent | null>(null);
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
@@ -209,6 +212,14 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
   // NOW, never hidden - an empty sky at T would be a claim (C82).
   const look = liveLook(isLive);
   const nowSuffix = isLive ? "" : ` · ${NOW}`;
+
+  // Coverage (C83): where AIS can vouch for a count (tint) and where it cannot
+  // (the lane's hatch), each box minus the boxes before it, like the backend.
+  const coverage = useMemo(() => coverageAreas(regions), [regions]);
+  const coverageGeoJSON = useMemo(() => coverageFeatureCollection(coverage), [coverage]);
+  const coverageDrawn = coverage.some((a) => a.fill !== "off");
+  // Mapbox needs the hatch registered as an image before a layer can use it.
+  const [hatchReady, setHatchReady] = useState(false);
 
   // One definition of "located", now held in lib/located.ts so the globe reads
   // the same one rather than its own. The feed states it as its negation
@@ -387,7 +398,54 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
             style={{ width: "100%", height: "100%" }}
             mapStyle="mapbox://styles/mapbox/dark-v11"
             mapboxAccessToken={MAPBOX_TOKEN}
+            onLoad={(e) => {
+              const ctx = hatchCanvas().getContext("2d")!;
+              e.target.addImage("hatch-unknown", ctx.getImageData(0, 0, HATCH_SIZE, HATCH_SIZE), { pixelRatio: 1 });
+              setHatchReady(true);
+            }}
           >
+            {/* Coverage (C83), under everything else: tint where a region can
+                vouch for a count, hatch where it cannot. Land inside a box is
+                the box's reach, not a claim about the land. */}
+            <Source id="coverage" type="geojson" data={coverageGeoJSON}>
+              <Layer
+                id="coverage-observed"
+                type="fill"
+                filter={["all", ["==", "$type", "Polygon"], ["==", "fill", "observed"]]}
+                paint={{ "fill-color": "#40e0d0", "fill-opacity": 0.07 * look.opacity }}
+              />
+              {hatchReady && (
+                <Layer
+                  id="coverage-hole"
+                  type="fill"
+                  filter={["all", ["==", "$type", "Polygon"], ["==", "fill", "hole"]]}
+                  paint={{ "fill-pattern": "hatch-unknown", "fill-opacity": look.opacity }}
+                />
+              )}
+              <Layer
+                id="coverage-labels"
+                type="symbol"
+                filter={["==", "$type", "Point"]}
+                layout={{
+                  "text-field": ["get", "label"],
+                  "text-size": 9,
+                  "text-font": ["DIN Pro Medium", "Arial Unicode MS Regular"],
+                  "text-letter-spacing": 0.08,
+                  "text-anchor": "top-left",
+                  "text-offset": [0.6, 0.6],
+                  "text-justify": "left",
+                  "text-max-width": 28,
+                  "text-line-height": 1.3,
+                }}
+                paint={{
+                  "text-color": ["match", ["get", "fill"], "observed", "#40e0d0", "#8ea3bb"],
+                  "text-opacity": 0.85 * look.opacity,
+                  "text-halo-color": "#0a0e14",
+                  "text-halo-width": 1,
+                }}
+              />
+            </Source>
+
             {/* Trail lines: a short live tail, not history, so empty in replay (C82) */}
             <Source id="aircraft-trails" type="geojson" data={look.tracks ? aircraftTrailGeoJSON : NO_TRAILS}>
               <Layer
@@ -744,6 +802,24 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 </span>
               </div>
             ))}
+            {coverageDrawn && (
+              <div
+                style={{ display: "flex", alignItems: "center", gap: 4 }}
+                title="AIS coverage by region, from the vessel feed's own per-region currency: tinted where the region can vouch for a count, hatched where it cannot. The boxes are the units the monitor measures by; land inside one is its reach, not a claim."
+              >
+                <div style={{ width: 8, height: 8, background: "rgba(64,224,208,0.35)" }} />
+                <span style={{ color: "var(--text-secondary)" }}>AIS OBSERVED</span>
+                <div
+                  style={{
+                    width: 8,
+                    height: 8,
+                    marginLeft: 4,
+                    background: "repeating-linear-gradient(45deg, transparent 0 2px, rgba(200,214,229,0.5) 2px 3px)",
+                  }}
+                />
+                <span style={{ color: "var(--text-secondary)" }}>AIS NOT OBSERVED{nowSuffix}</span>
+              </div>
+            )}
             {unlocatedCount > 0 && (
               <div
                 style={{ display: "flex", alignItems: "center", gap: 4 }}
@@ -823,7 +899,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
         </>
       ) : viewMode === "globe" ? (
         <>
-          <GlobeView events={events} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} isLive={isLive} />
+          <GlobeView events={events} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} regions={regions} isLive={isLive} />
 
           {/* 3D overlay legend */}
           <div
@@ -907,6 +983,24 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   SATELLITES ({legendCount(tleData.length, tleFeedState)}){nowSuffix}
                 </span>
               </div>
+              {coverageDrawn && (
+                <div
+                  style={{ display: "flex", alignItems: "center", gap: 4 }}
+                  title="AIS coverage by region, from the vessel feed's own per-region currency: tinted where the region can vouch for a count, hatched where it cannot. The boxes are the units the monitor measures by; land inside one is its reach, not a claim."
+                >
+                  <div style={{ width: 8, height: 8, background: "rgba(64,224,208,0.35)" }} />
+                  <span style={{ color: "var(--text-secondary)" }}>AIS OBSERVED</span>
+                  <div
+                    style={{
+                      width: 8,
+                      height: 8,
+                      marginLeft: 4,
+                      background: "repeating-linear-gradient(45deg, transparent 0 2px, rgba(200,214,229,0.5) 2px 3px)",
+                    }}
+                  />
+                  <span style={{ color: "var(--text-secondary)" }}>AIS NOT OBSERVED{nowSuffix}</span>
+                </div>
+              )}
             </div>
           </div>
         </>
@@ -917,6 +1011,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
           vessels={vessels}
           tleData={tleData}
           jammingZones={jammingZones}
+          regions={regions}
           isLive={isLive}
         />
       )}

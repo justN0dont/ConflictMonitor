@@ -84,7 +84,7 @@ export default function App() {
         eventCountIsFloor={eventCountIsFloor}
         isLive={isLive}
       />
-      <MapPanel events={filteredEvents} arrivals={arrivals} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} aircraftFeedState={aircraftFeed.state} vesselsFeedState={vesselsFeed.state} tleFeedState={tleFeed.state} isLive={isLive} />
+      <MapPanel events={filteredEvents} arrivals={arrivals} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} aircraftFeedState={aircraftFeed.state} vesselsFeedState={vesselsFeed.state} tleFeedState={tleFeed.state} regions={vesselsFeed.regions ?? []} isLive={isLive} />
       <div className="sidebar">
         <div className="sidebar-feed"><LiveFeed events={filteredEvents} arrivals={arrivals} /></div>
         <div className="sidebar-connectivity">
