@@ -8,8 +8,11 @@ import { CesiumView } from "./CesiumView";
 import { isLocated } from "../lib/located";
 import { type ArrivalLog, freshIds } from "../lib/events";
 import { EVENT_TYPES, eventVisual, formatUncertainty, geoPrecision } from "../lib/tokens";
+import { NOW, NOW_CHIP, NOW_TITLE, liveLook } from "../lib/replay";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
+
+const NO_TRAILS = { type: "FeatureCollection" as const, features: [] as never[] };
 
 /**
  * What each view needs before it can show anything, or null. A view that cannot
@@ -43,6 +46,8 @@ interface MapPanelProps {
   tleFeedState: FeedState;
   /** When each event arrived over the live stream; only these ping (C50). */
   arrivals: ArrivalLog;
+  /** No window is scrubbed. When false the live layers are dimmed and counted as NOW (C82, lib/replay.ts). */
+  isLive: boolean;
 }
 
 /** A legend count: the number drawn, or "—" plus the state when the feed cannot vouch for it. */
@@ -187,7 +192,7 @@ function PingMarker({
   );
 }
 
-export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState, tleFeedState, arrivals }: MapPanelProps) {
+export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jammingStatus, aircraftTracks, vesselTracks, aircraftFeedState, vesselsFeedState, tleFeedState, arrivals, isLive }: MapPanelProps) {
   const [selected, setSelected] = useState<ConflictEvent | null>(null);
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
@@ -198,6 +203,12 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
   const [viewMode, setViewMode] = useState<"2d" | "globe" | "terrain">(
     MAPBOX_TOKEN ? "2d" : "globe",
   );
+
+  // What does not follow the timeline: aircraft, vessels, satellites, GPS
+  // interference and their trails. In replay they are dimmed and counted as
+  // NOW, never hidden - an empty sky at T would be a claim (C82).
+  const look = liveLook(isLive);
+  const nowSuffix = isLive ? "" : ` · ${NOW}`;
 
   // One definition of "located", now held in lib/located.ts so the globe reads
   // the same one rather than its own. The feed states it as its negation
@@ -309,6 +320,23 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
           letterSpacing: 1,
         }}
       >
+        {!isLive && (
+          <span
+            title={NOW_TITLE}
+            style={{
+              marginRight: 8,
+              padding: "4px 8px",
+              borderRadius: 3,
+              background: "rgba(10,14,20,0.9)",
+              border: "1px solid var(--border)",
+              color: "var(--text-secondary)",
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {NOW_CHIP}
+          </span>
+        )}
         {(["2d", "globe", "terrain"] as const).map((mode, idx, arr) => (
           <button
             key={mode}
@@ -360,8 +388,8 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
             mapStyle="mapbox://styles/mapbox/dark-v11"
             mapboxAccessToken={MAPBOX_TOKEN}
           >
-            {/* Aircraft trail lines */}
-            <Source id="aircraft-trails" type="geojson" data={aircraftTrailGeoJSON}>
+            {/* Trail lines: a short live tail, not history, so empty in replay (C82) */}
+            <Source id="aircraft-trails" type="geojson" data={look.tracks ? aircraftTrailGeoJSON : NO_TRAILS}>
               <Layer
                 id="aircraft-trail-lines"
                 type="line"
@@ -374,7 +402,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
             </Source>
 
             {/* Vessel trail lines */}
-            <Source id="vessel-trails" type="geojson" data={vesselTrailGeoJSON}>
+            <Source id="vessel-trails" type="geojson" data={look.tracks ? vesselTrailGeoJSON : NO_TRAILS}>
               <Layer
                 id="vessel-trail-lines"
                 type="line"
@@ -387,7 +415,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
             </Source>
 
             {/* Highlighted trail for selected entity */}
-            {selectedTrailGeoJSON && (
+            {look.tracks && selectedTrailGeoJSON && (
               <Source id="selected-trail" type="geojson" data={selectedTrailGeoJSON}>
                 <Layer
                   id="selected-trail-line"
@@ -439,6 +467,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                     border: "1px solid rgba(255, 64, 64, 0.5)",
                     transform: "rotate(45deg)",
                     pointerEvents: "none",
+                    opacity: look.opacity,
                   }}
                 />
               </Marker>
@@ -453,7 +482,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 anchor="center"
               >
                 <div
-                  style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}
+                  style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer", opacity: look.opacity }}
                   onClick={(e) => { e.stopPropagation(); handleAircraftClick(ac); }}
                   title={`${ac.callsign || ac.icao24} | ${ac.origin_country}${ac.altitude ? ` | ${Math.round(ac.altitude)}m` : ""}`}
                 >
@@ -500,7 +529,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 anchor="center"
               >
                 <div
-                  style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}
+                  style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer", opacity: look.opacity }}
                   onClick={(e) => { e.stopPropagation(); handleVesselClick(v); }}
                   title={`${v.name || v.mmsi} | ${v.ship_type_name || "Vessel"}${v.speed ? ` | ${v.speed}kn` : ""}${v.destination ? ` → ${v.destination}` : ""}`}
                 >
@@ -682,6 +711,8 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
               borderRadius: 4,
               fontSize: 10,
               display: "flex",
+              flexWrap: "wrap",
+              maxWidth: "calc(100% - 32px)",
               gap: 12,
               border: "1px solid var(--border)",
               fontFamily: "var(--font-mono)",
@@ -738,7 +769,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   <path d="M12 2 L14 8 L21 10 L14 11 L14 18 L17 20 L17 21 L12 19 L7 21 L7 20 L10 18 L10 11 L3 10 L10 8 Z" />
                 </svg>
                 <span style={{ color: "var(--text-secondary)" }}>
-                  AIRCRAFT ({legendCount(airborneAircraft.length, aircraftFeedState)})
+                  AIRCRAFT ({legendCount(airborneAircraft.length, aircraftFeedState)}){nowSuffix}
                 </span>
               </div>
             )}
@@ -748,7 +779,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   <path d="M12 2 L15 9 L15 16 L19 20 L12 22 L5 20 L9 16 L9 9 Z" />
                 </svg>
                 <span style={{ color: "var(--text-secondary)" }}>
-                  VESSELS ({legendCount(vessels.length, vesselsFeedState)})
+                  VESSELS ({legendCount(vessels.length, vesselsFeedState)}){nowSuffix}
                 </span>
               </div>
             )}
@@ -764,7 +795,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  GPS INTERFERENCE ({jammingZones.length})
+                  GPS INTERFERENCE ({jammingZones.length}){nowSuffix}
                 </span>
               </div>
             )}
@@ -784,7 +815,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                     ? "GPS: NO INTEGRITY DATA"
                     : jammingStatus.status === "feed_not_live"
                       ? "GPS: AIRCRAFT FEED NOT LIVE"
-                      : "GPS: INSUFFICIENT COVERAGE"}
+                      : "GPS: INSUFFICIENT COVERAGE"}{nowSuffix}
                 </span>
               </div>
             )}
@@ -792,7 +823,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
         </>
       ) : viewMode === "globe" ? (
         <>
-          <GlobeView events={events} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} />
+          <GlobeView events={events} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} isLive={isLive} />
 
           {/* 3D overlay legend */}
           <div
@@ -806,6 +837,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
               fontSize: 10,
               display: "flex",
               flexDirection: "column",
+              maxWidth: "calc(100% - 32px)",
               gap: 6,
               border: "1px solid var(--border)",
               fontFamily: "var(--font-mono)",
@@ -813,7 +845,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
               zIndex: 10,
             }}
           >
-            <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
               {EVENT_TYPES.map(({ key, label, color, Icon }) => (
                 <div
                   key={key}
@@ -834,7 +866,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                 </div>
               ))}
             </div>
-            <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <div
                   style={{
@@ -845,7 +877,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  AIRCRAFT ({legendCount(aircraft.filter((a) => !a.on_ground).length, aircraftFeedState)})
+                  AIRCRAFT ({legendCount(aircraft.filter((a) => !a.on_ground).length, aircraftFeedState)}){nowSuffix}
                 </span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -859,7 +891,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  VESSELS ({legendCount(vessels.length, vesselsFeedState)})
+                  VESSELS ({legendCount(vessels.length, vesselsFeedState)}){nowSuffix}
                 </span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -872,7 +904,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
                   }}
                 />
                 <span style={{ color: "var(--text-secondary)" }}>
-                  SATELLITES ({legendCount(tleData.length, tleFeedState)})
+                  SATELLITES ({legendCount(tleData.length, tleFeedState)}){nowSuffix}
                 </span>
               </div>
             </div>
@@ -885,6 +917,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
           vessels={vessels}
           tleData={tleData}
           jammingZones={jammingZones}
+          isLive={isLive}
         />
       )}
     </div>

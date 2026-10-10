@@ -13,6 +13,7 @@ import {
 import type { EciVec3, SatRec } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
+import { liveLook } from "../lib/replay";
 import { isLocated } from "../lib/located";
 import { eventVisual, geoPrecision } from "../lib/tokens";
 
@@ -376,7 +377,7 @@ function EventMarkers({
  * dependent, with the callsign already at the new fix - which drew motion
  * nobody observed. The step every poll is the honest picture, not a regression.
  */
-function AircraftLayer({ aircraft }: { aircraft: Aircraft[] }) {
+function AircraftLayer({ aircraft, dim }: { aircraft: Aircraft[]; dim: number }) {
   const airborne = useMemo(
     () => aircraft.filter((a) => !a.on_ground && a.lat != null && a.lon != null),
     [aircraft],
@@ -388,7 +389,7 @@ function AircraftLayer({ aircraft }: { aircraft: Aircraft[] }) {
         <group key={ac.icao24}>
           <mesh position={latLonToVec3(ac.lat, ac.lon, EARTH_RADIUS * 1.012)}>
             <sphereGeometry args={[0.004, 6, 6]} />
-            <meshBasicMaterial color="#58d0ff" transparent opacity={0.9} />
+            <meshBasicMaterial color="#58d0ff" transparent opacity={0.9 * dim} />
           </mesh>
           {/* Callsign label */}
           {ac.callsign && (
@@ -396,6 +397,7 @@ function AircraftLayer({ aircraft }: { aircraft: Aircraft[] }) {
               position={latLonToVec3(ac.lat, ac.lon, EARTH_RADIUS * 1.018)}
               fontSize={0.012}
               color="#58d0ff"
+              fillOpacity={dim}
               anchorX="left"
               anchorY="middle"
               font={undefined}
@@ -422,7 +424,7 @@ interface SatPos {
   ground3d: [number, number, number];
 }
 
-function SatelliteLayer({ tleData }: { tleData: TLERecord[] }) {
+function SatelliteLayer({ tleData, dim }: { tleData: TLERecord[]; dim: number }) {
   const [sats, setSats] = useState<SatPos[]>([]);
 
   const satrecs = useMemo(() => {
@@ -491,7 +493,7 @@ function SatelliteLayer({ tleData }: { tleData: TLERecord[] }) {
       {/* Orbit traces */}
       {orbitPaths.map((pts, i) =>
         pts.length > 2 ? (
-          <Line key={`orb-${i}`} points={pts} color="#00e5a0" lineWidth={0.4} transparent opacity={0.1} />
+          <Line key={`orb-${i}`} points={pts} color="#00e5a0" lineWidth={0.4} transparent opacity={0.1 * dim} />
         ) : null,
       )}
 
@@ -501,7 +503,7 @@ function SatelliteLayer({ tleData }: { tleData: TLERecord[] }) {
           {/* Dot at orbital altitude */}
           <mesh position={sat.pos3d}>
             <sphereGeometry args={[0.005, 6, 6]} />
-            <meshBasicMaterial color="#00e5a0" transparent opacity={0.8} />
+            <meshBasicMaterial color="#00e5a0" transparent opacity={0.8 * dim} />
           </mesh>
 
           {/* Name label */}
@@ -509,6 +511,7 @@ function SatelliteLayer({ tleData }: { tleData: TLERecord[] }) {
             position={sat.pos3d}
             fontSize={0.014}
             color="#00e5a0"
+            fillOpacity={dim}
             anchorX="left"
             anchorY="bottom"
             font={undefined}
@@ -522,13 +525,13 @@ function SatelliteLayer({ tleData }: { tleData: TLERecord[] }) {
             color="#00e5a0"
             lineWidth={0.4}
             transparent
-            opacity={0.2}
+            opacity={0.2 * dim}
           />
 
           {/* Ground footprint dot */}
           <mesh position={sat.ground3d}>
             <sphereGeometry args={[0.003, 6, 6]} />
-            <meshBasicMaterial color="#00e5a0" transparent opacity={0.3} />
+            <meshBasicMaterial color="#00e5a0" transparent opacity={0.3 * dim} />
           </mesh>
         </group>
       ))}
@@ -541,20 +544,21 @@ function SatelliteLayer({ tleData }: { tleData: TLERecord[] }) {
 // ---------------------------------------------------------------------------
 
 /** Drawn at the last reported position, never glided there (C46; see AircraftLayer). */
-function VesselLayer({ vessels }: { vessels: Vessel[] }) {
+function VesselLayer({ vessels, dim }: { vessels: Vessel[]; dim: number }) {
   return (
     <group>
       {vessels.map((v) => (
         <group key={v.mmsi}>
           <mesh position={latLonToVec3(v.lat, v.lon, EARTH_RADIUS * 1.002)}>
             <coneGeometry args={[0.004, 0.008, 3]} />
-            <meshBasicMaterial color="#40e0d0" transparent opacity={0.85} />
+            <meshBasicMaterial color="#40e0d0" transparent opacity={0.85 * dim} />
           </mesh>
           {v.name && (
             <Text
               position={latLonToVec3(v.lat, v.lon, EARTH_RADIUS * 1.008)}
               fontSize={0.01}
               color="#40e0d0"
+              fillOpacity={dim}
               anchorX="left"
               anchorY="middle"
               font={undefined}
@@ -572,7 +576,7 @@ function VesselLayer({ vessels }: { vessels: Vessel[] }) {
 // GPS Jamming zones (red hexagonal prisms on the surface)
 // ---------------------------------------------------------------------------
 
-function JammingHex({ zone }: { zone: JammingZone }) {
+function JammingHex({ zone, dim }: { zone: JammingZone; dim: number }) {
   const groupRef = useRef<THREE.Group>(null);
   const pos = useMemo(
     () => new THREE.Vector3(...latLonToVec3(zone.lat, zone.lon, EARTH_RADIUS * 1.001)),
@@ -601,7 +605,7 @@ function JammingHex({ zone }: { zone: JammingZone }) {
         <meshBasicMaterial
           color="#ff2020"
           transparent
-          opacity={0.2 + zone.intensity * 0.3}
+          opacity={(0.2 + zone.intensity * 0.3) * dim}
           side={THREE.DoubleSide}
         />
       </mesh>
@@ -611,7 +615,7 @@ function JammingHex({ zone }: { zone: JammingZone }) {
         <meshBasicMaterial
           color="#ff4040"
           transparent
-          opacity={0.4 + zone.intensity * 0.3}
+          opacity={(0.4 + zone.intensity * 0.3) * dim}
           wireframe
         />
       </mesh>
@@ -619,11 +623,11 @@ function JammingHex({ zone }: { zone: JammingZone }) {
   );
 }
 
-function JammingLayer({ zones }: { zones: JammingZone[] }) {
+function JammingLayer({ zones, dim }: { zones: JammingZone[]; dim: number }) {
   return (
     <group>
       {zones.map((z, i) => (
-        <JammingHex key={`j${i}`} zone={z} />
+        <JammingHex key={`j${i}`} zone={z} dim={dim} />
       ))}
     </group>
   );
@@ -641,6 +645,8 @@ interface SceneProps {
   tleData: TLERecord[];
   jammingZones: JammingZone[];
   reducedMotion: boolean;
+  /** Opacity multiplier on the layers that do not follow the timeline (C82). */
+  dim: number;
 }
 
 function Scene({
@@ -650,6 +656,7 @@ function Scene({
   tleData,
   jammingZones,
   reducedMotion,
+  dim,
 }: SceneProps) {
   return (
     <>
@@ -682,10 +689,10 @@ function Scene({
 
       {/* Data layers */}
       <EventMarkers located={located} reducedMotion={reducedMotion} />
-      <AircraftLayer aircraft={aircraft} />
-      <VesselLayer vessels={vessels} />
-      <SatelliteLayer tleData={tleData} />
-      <JammingLayer zones={jammingZones} />
+      <AircraftLayer aircraft={aircraft} dim={dim} />
+      <VesselLayer vessels={vessels} dim={dim} />
+      <SatelliteLayer tleData={tleData} dim={dim} />
+      <JammingLayer zones={jammingZones} dim={dim} />
     </>
   );
 }
@@ -700,10 +707,13 @@ interface GlobeViewProps {
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingZones: JammingZone[];
+  /** No window is scrubbed. When false the live layers are dimmed, never hidden (C82). */
+  isLive: boolean;
 }
 
-export function GlobeView({ events, aircraft, vessels, tleData, jammingZones }: GlobeViewProps) {
+export function GlobeView({ events, aircraft, vessels, tleData, jammingZones, isLive }: GlobeViewProps) {
   const reducedMotion = usePrefersReducedMotion();
+  const dim = liveLook(isLive).opacity;
 
   // The same predicate the 2D map uses, from the same module, so the two views
   // can no longer disagree about which events exist.
@@ -729,6 +739,7 @@ export function GlobeView({ events, aircraft, vessels, tleData, jammingZones }: 
           tleData={tleData}
           jammingZones={jammingZones}
           reducedMotion={reducedMotion}
+          dim={dim}
         />
       </Canvas>
 

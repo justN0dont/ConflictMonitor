@@ -12,6 +12,7 @@ import {
 import type { EciVec3 } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
+import { liveLook } from "../lib/replay";
 import { EVENT_TYPES, eventVisual, type EventKey } from "../lib/tokens";
 
 // ---------------------------------------------------------------------------
@@ -185,6 +186,8 @@ interface CesiumViewProps {
   vessels: Vessel[];
   tleData: TLERecord[];
   jammingZones: JammingZone[];
+  /** No window is scrubbed. When false the live layers are dimmed, never hidden (C82). */
+  isLive: boolean;
 }
 
 export function CesiumView({
@@ -193,7 +196,11 @@ export function CesiumView({
   vessels,
   tleData,
   jammingZones,
+  isLive,
 }: CesiumViewProps) {
+  // Aircraft, vessels, satellites and jamming are drawn as of now; in replay
+  // they are dimmed to this alpha, never hidden (C82, lib/replay.ts).
+  const alpha = liveLook(isLive).opacity;
   const containerRef = useRef<HTMLDivElement>(null);
   // Attribution is shown, not hidden: Cesium ion, Bing and Google require it on
   // screen (FINDINGS C52). It had gone to a detached div since 0f4ad05.
@@ -488,6 +495,8 @@ export function CesiumView({
           `,
         });
       }
+      entity.point!.color = new Cesium.ConstantProperty(AIRCRAFT_COLOR.withAlpha(alpha));
+      entity.label!.fillColor = new Cesium.ConstantProperty(AIRCRAFT_COLOR.withAlpha(alpha));
     }
 
     const toRemove: Cesium.Entity[] = [];
@@ -496,7 +505,7 @@ export function CesiumView({
       if (!existingIds.has(e.id)) toRemove.push(e);
     }
     toRemove.forEach((e) => source.entities.remove(e));
-  }, [aircraft]);
+  }, [aircraft, alpha]);
 
   // -----------------------------------------------------------------------
   // Update vessels
@@ -557,6 +566,8 @@ export function CesiumView({
           `,
         });
       }
+      entity.billboard!.color = new Cesium.ConstantProperty(Cesium.Color.WHITE.withAlpha(alpha));
+      entity.label!.fillColor = new Cesium.ConstantProperty(VESSEL_COLOR.withAlpha(alpha));
     }
 
     const toRemove: Cesium.Entity[] = [];
@@ -565,7 +576,7 @@ export function CesiumView({
       if (!existingIds.has(e.id)) toRemove.push(e);
     }
     toRemove.forEach((e) => source.entities.remove(e));
-  }, [vessels]);
+  }, [vessels, alpha]);
 
   // -----------------------------------------------------------------------
   // Update GPS jamming zones
@@ -584,16 +595,16 @@ export function CesiumView({
         ellipse: {
           semiMajorAxis: z.radius_km * 1000,
           semiMinorAxis: z.radius_km * 1000,
-          material: JAMMING_COLOR.withAlpha(0.1 + z.intensity * 0.25),
+          material: JAMMING_COLOR.withAlpha((0.1 + z.intensity * 0.25) * alpha),
           outline: true,
-          outlineColor: JAMMING_COLOR.withAlpha(0.5),
+          outlineColor: JAMMING_COLOR.withAlpha(0.5 * alpha),
           outlineWidth: 2,
           height: 0,
         },
         label: {
           text: `GPS INTERFERENCE\n${z.degraded}/${z.total} degraded`,
           font: "10px JetBrains Mono, monospace",
-          fillColor: JAMMING_COLOR,
+          fillColor: JAMMING_COLOR.withAlpha(alpha),
           outlineColor: Cesium.Color.BLACK,
           outlineWidth: 2,
           style: Cesium.LabelStyle.FILL_AND_OUTLINE,
@@ -603,7 +614,7 @@ export function CesiumView({
         },
       });
     }
-  }, [jammingZones]);
+  }, [jammingZones, alpha]);
 
   // -----------------------------------------------------------------------
   // Satellite layer with TLE propagation
@@ -654,13 +665,13 @@ export function CesiumView({
             position: Cesium.Cartesian3.fromDegrees(lon, lat, displayAlt),
             point: {
               pixelSize: 4,
-              color: SATELLITE_COLOR.withAlpha(0.8),
+              color: SATELLITE_COLOR.withAlpha(0.8 * alpha),
               disableDepthTestDistance: Number.POSITIVE_INFINITY,
             },
             label: {
               text: name,
               font: "9px JetBrains Mono, monospace",
-              fillColor: SATELLITE_COLOR,
+              fillColor: SATELLITE_COLOR.withAlpha(alpha),
               outlineColor: Cesium.Color.BLACK,
               outlineWidth: 2,
               style: Cesium.LabelStyle.FILL_AND_OUTLINE,
@@ -675,7 +686,7 @@ export function CesiumView({
                 Cesium.Cartesian3.fromDegrees(lon, lat, 0),
               ],
               width: 0.5,
-              material: SATELLITE_COLOR.withAlpha(0.15),
+              material: SATELLITE_COLOR.withAlpha(0.15 * alpha),
             },
             description: `
               <div style="font-family: JetBrains Mono, monospace; font-size: 12px; color: #c8d6e5;">
@@ -695,7 +706,7 @@ export function CesiumView({
     return () => {
       if (satIntervalRef.current) clearInterval(satIntervalRef.current);
     };
-  }, [tleData]);
+  }, [tleData, alpha]);
 
   // -----------------------------------------------------------------------
   // Render

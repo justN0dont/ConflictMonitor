@@ -21,6 +21,7 @@ import type {
   Vessel,
 } from "../hooks/useTracking";
 import { FEED_WORD, aoSummary, feedAge, type FeedEnvelope } from "../lib/feed";
+import { liveLook, withLiveNote } from "../lib/replay";
 import { formatAge } from "../lib/tokens";
 import { STALE_AFTER, useFeedAges, useNow, type FeedAges } from "../lib/useFeedAges";
 import type { ConflictEvent } from "../types/event";
@@ -50,6 +51,8 @@ interface IndicatorRailProps {
   demoMode: boolean;
   /** The event store is capped and the window reaches past it (lib/events.ts). */
   eventCountIsFloor: boolean;
+  /** No window is scrubbed. When false, every row but EVENT VOLUME reads as of now and says so (C82). */
+  isLive: boolean;
 }
 
 /** A feed as FEED CURRENCY sees it, when the server reports its state. */
@@ -343,6 +346,7 @@ export function IndicatorRail({
   isConnected,
   demoMode,
   eventCountIsFloor,
+  isLive,
 }: IndicatorRailProps) {
   const now = useNow(1000);
   const adsbAge = feedAge(aircraftFeed, aircraftReceivedAt, now);
@@ -356,7 +360,10 @@ export function IndicatorRail({
     latestEventTs: allEvents[0]?.timestamp ?? null,
   });
 
-  const rows: Row[] = [
+  // Rows 0-4 read the feeds as they are now and do not follow the timeline;
+  // in replay each one says so (C82). EVENT VOLUME is the window's own.
+  const look = liveLook(isLive);
+  const nowRows: Row[] = [
     feedCurrencyRow(ages, {
       age: adsbAge,
       live: aircraftFeed.state === "live",
@@ -377,8 +384,8 @@ export function IndicatorRail({
     gpsRow(jammingStatus, jammingZones, ages),
     vesselRow(vesselsFeed, aisAge),
     satelliteRow(tleFeed, tleAge),
-    eventVolumeRow(events, isConnected, ages, eventCountIsFloor),
-  ];
+  ].map((r) => ({ ...r, note: withLiveNote(look, r.note) }));
+  const rows: Row[] = [...nowRows, eventVolumeRow(events, isConnected, ages, eventCountIsFloor)];
 
   return (
     <div className="panel flex h-full flex-col">

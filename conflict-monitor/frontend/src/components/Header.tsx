@@ -10,6 +10,7 @@ import { Plane, Radio, Satellite, Ship, FlaskConical } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Aircraft, JammingStatus, TLERecord, Vessel } from "../hooks/useTracking";
 import { FEED_WORD, aoSummary, feedAge, type FeedEnvelope, type FeedState } from "../lib/feed";
+import { liveLook, withLiveNote } from "../lib/replay";
 import { STATUS, formatAge } from "../lib/tokens";
 import { STALE_AFTER, useFeedAges, useNow } from "../lib/useFeedAges";
 import type { ConflictEvent } from "../types/event";
@@ -33,6 +34,8 @@ interface HeaderProps {
   demoMode: boolean;
   /** The event store is capped and this window reaches past it: EVT is a lower bound. */
   eventCountIsFloor: boolean;
+  /** No window is scrubbed. When false, AC, VES and SAT are counted as of now and say so (C82). */
+  isLive: boolean;
 }
 
 function formatUTCTime(): string {
@@ -167,9 +170,11 @@ export function Header({
   isConnected,
   demoMode,
   eventCountIsFloor,
+  isLive,
 }: HeaderProps) {
   const [utcTime, setUtcTime] = useState(formatUTCTime);
   const now = useNow(1000);
+  const look = liveLook(isLive);
   const adsbAge = feedAge(aircraftFeed, aircraftReceivedAt, now);
   const acState = aircraftFeed.state;
   // null unless live or stale (the server decides); airborne is counted from
@@ -251,30 +256,32 @@ export function Header({
             Icon={Plane}
             value={acCount}
             unit="AC"
-            note={acState === "live" ? "airborne" : `${FEED_WORD[acState]}${aircraftFeed.reason ? ` · ${aircraftFeed.reason}` : ""}`}
-            dim={acState === "stale"}
+            note={withLiveNote(look, acState === "live" ? "airborne" : `${FEED_WORD[acState]}${aircraftFeed.reason ? ` · ${aircraftFeed.reason}` : ""}`)}
+            dim={acState === "stale" || !isLive}
           />
           <Count
             Icon={Ship}
             value={ves.count}
             unit="VES"
-            note={
+            note={withLiveNote(
+              look,
               vesState === "live"
                 ? `in AO waters${ves.outside ? ` · ${ves.outside} outside` : ""}${ves.dark.length ? ` · not seen: ${ves.dark.map((r) => r.name).join(", ")}` : ""}`
-                : `${FEED_WORD[vesState]}${vesselsFeed.reason ? ` · ${vesselsFeed.reason}` : ""}`
-            }
-            dim={vesState === "stale"}
+                : `${FEED_WORD[vesState]}${vesselsFeed.reason ? ` · ${vesselsFeed.reason}` : ""}`,
+            )}
+            dim={vesState === "stale" || !isLive}
           />
           <Count
             Icon={Satellite}
             value={tleFeed.count}
             unit="SAT"
-            note={
+            note={withLiveNote(
+              look,
               tleFeed.state === "live"
                 ? "CelesTrak military group"
-                : `${FEED_WORD[tleFeed.state]}${tleFeed.reason ? ` · ${tleFeed.reason}` : ""}`
-            }
-            dim={tleFeed.state === "stale"}
+                : `${FEED_WORD[tleFeed.state]}${tleFeed.reason ? ` · ${tleFeed.reason}` : ""}`,
+            )}
+            dim={tleFeed.state === "stale" || !isLive}
           />
         </div>
 

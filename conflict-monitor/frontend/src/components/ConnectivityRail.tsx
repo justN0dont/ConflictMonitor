@@ -60,6 +60,7 @@ import type {
   RadarOutage,
   SensorKey,
 } from "../hooks/useTracking";
+import { NOW } from "../lib/replay";
 import { STATUS } from "../lib/tokens";
 import { useNow } from "../lib/useFeedAges";
 import { IndicatorRow, STATE_STATUS, type RailState, type Row } from "./IndicatorRow";
@@ -694,9 +695,11 @@ function AttackTargets({ cf }: { cf: ConnectivityStatus["cloudflare"] }) {
 interface ConnectivityRailProps {
   countries: CountryConnectivity[];
   status: ConnectivityStatus;
+  /** No window is scrubbed. When false the rail is measured as of now and says so (C82). */
+  isLive: boolean;
 }
 
-export function ConnectivityRail({ countries, status }: ConnectivityRailProps) {
+export function ConnectivityRail({ countries, status, isLive }: ConnectivityRailProps) {
   // Ages must climb on their own: a frozen age is indistinguishable from a
   // fresh one, which is the failure this whole rail exists to prevent.
   const nowSec = useNow(1000) / 1000;
@@ -755,12 +758,15 @@ export function ConnectivityRail({ countries, status }: ConnectivityRailProps) {
   // The caption carries what the list cannot show, and it rides in the header
   // rather than in a line of its own: a fourth strip of chrome would cost a
   // whole row of the four this panel has room for.
-  let caption = "IODA";
+  // In replay the source's name gives way to NOW: these rows are measured as
+  // of now and do not follow the timeline (C82). The counts stay.
+  const lead = isLive ? "IODA" : NOW;
+  let caption = lead;
   if (countries.length) {
     caption =
       offscreen > 0
-        ? `IODA · ${offscreen} OF ${rows.length} OFF SCREEN`
-        : `IODA · ${countries.length} COUNTRIES · NOT AVERAGED`;
+        ? `${lead} · ${offscreen} OF ${rows.length} OFF SCREEN`
+        : `${lead} · ${countries.length} COUNTRIES · NOT AVERAGED`;
     if (unseen > 0) caption += ` · ${unseen} NOT MEASURED`;
   }
 
@@ -770,7 +776,10 @@ export function ConnectivityRail({ countries, status }: ConnectivityRailProps) {
         <span className="text-[11px] font-semibold tracking-[0.18em] text-[var(--text-primary)]">
           CONNECTIVITY
         </span>
-        <span className="text-[9px] tracking-[0.1em] text-[var(--text-muted)]">
+        <span
+          className="text-[9px] tracking-[0.1em] text-[var(--text-muted)]"
+          title={isLive ? undefined : "IODA, measured as of now. Connectivity does not follow the timeline."}
+        >
           {caption}
         </span>
       </div>

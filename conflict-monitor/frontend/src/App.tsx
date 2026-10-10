@@ -49,7 +49,10 @@ export default function App() {
   // A scrubbed window is fetched from the server, not filtered out of the
   // 200 newest events the live store holds (C81): LIVE shows the store, a
   // window shows its own answer. The axis under the scrubber is the whole
-  // table's density plus a liveness lane per ingest feed.
+  // table's density plus a liveness lane per ingest feed. Only events follow
+  // the timeline: every view is told whether the screen is live, so the
+  // layers drawn as of now say so instead of passing for T (C82, lib/replay.ts).
+  const isLive = activeRange === null;
   const history = useHistory(activeRange);
   const axis = useTimelineAxis(timeRange);
   const filteredEvents = activeRange ? history.events : events;
@@ -79,12 +82,13 @@ export default function App() {
         isConnected={isConnected}
         demoMode={demoMode}
         eventCountIsFloor={eventCountIsFloor}
+        isLive={isLive}
       />
-      <MapPanel events={filteredEvents} arrivals={arrivals} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} aircraftFeedState={aircraftFeed.state} vesselsFeedState={vesselsFeed.state} tleFeedState={tleFeed.state} />
+      <MapPanel events={filteredEvents} arrivals={arrivals} aircraft={aircraft} vessels={vessels} tleData={tleData} jammingZones={jammingZones} jammingStatus={jammingStatus} aircraftTracks={aircraftTracks} vesselTracks={vesselTracks} aircraftFeedState={aircraftFeed.state} vesselsFeedState={vesselsFeed.state} tleFeedState={tleFeed.state} isLive={isLive} />
       <div className="sidebar">
         <div className="sidebar-feed"><LiveFeed events={filteredEvents} arrivals={arrivals} /></div>
         <div className="sidebar-connectivity">
-          <ConnectivityRail countries={connectivity} status={connectivityStatus} />
+          <ConnectivityRail countries={connectivity} status={connectivityStatus} isLive={isLive} />
         </div>
         <div className="sidebar-rail">
           <IndicatorRail
@@ -104,6 +108,7 @@ export default function App() {
             isConnected={isConnected}
             demoMode={demoMode}
             eventCountIsFloor={eventCountIsFloor}
+            isLive={isLive}
           />
         </div>
       </div>
