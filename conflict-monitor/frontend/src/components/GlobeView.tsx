@@ -14,7 +14,7 @@ import type { EciVec3, SatRec } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
 import { liveLook } from "../lib/replay";
-import { coverageAreas, hatchCanvas, type CoverageFill, type Rect } from "../lib/coverage";
+import { coverageAreas, hatchCanvas, seaPatchCanvas, type CoverageFill, type MultiPolygonCoords, type Rect } from "../lib/coverage";
 import type { RegionCurrency } from "../lib/feed";
 import { isLocated } from "../lib/located";
 import { eventVisual, geoPrecision } from "../lib/tokens";
@@ -641,20 +641,38 @@ function JammingLayer({ zones, dim }: { zones: JammingZone[]; dim: number }) {
 
 /**
  * One effective piece of a region as a patch of the sphere: tinted where the
- * region can vouch for a count, the lane's hatch where it cannot. The sphere
- * geometry's azimuth runs 90° ahead of this file's longitude convention
- * (latLonToVec3), hence the +90.
+ * region can vouch for a count, the lane's hatch where it cannot. With the
+ * region's sea shape (C88) the patch wears a canvas of that shape painted in
+ * the piece's frame, transparent over land; without it, the plain hatch
+ * repeated over the box. The sphere geometry's azimuth runs 90° ahead of
+ * this file's longitude convention (latLonToVec3), hence the +90; its uv
+ * runs east from lonMin and south from latMax, the frame the canvas uses.
  */
-function CoveragePatch({ piece, fill, hatch, dim }: { piece: Rect; fill: CoverageFill; hatch: THREE.Texture; dim: number }) {
-  const lonSpan = piece.lonMax - piece.lonMin;
-  const latSpan = piece.latMax - piece.latMin;
+function CoveragePatch({
+  piece,
+  sea,
+  fill,
+  hatch,
+  dim,
+}: {
+  piece: Rect;
+  sea: MultiPolygonCoords | null;
+  fill: CoverageFill;
+  hatch: THREE.Texture;
+  dim: number;
+}) {
+  const { latMin, latMax, lonMin, lonMax } = piece;
+  const lonSpan = lonMax - lonMin;
+  const latSpan = latMax - latMin;
   const map = useMemo(() => {
+    if (sea) return new THREE.CanvasTexture(seaPatchCanvas({ latMin, latMax, lonMin, lonMax }, sea, fill));
     if (fill !== "hole") return null;
     const t = hatch.clone();
     t.repeat.set(lonSpan / 1.5, latSpan / 1.5);
     t.needsUpdate = true;
     return t;
-  }, [fill, hatch, lonSpan, latSpan]);
+  }, [sea, fill, hatch, latMin, latMax, lonMin, lonMax, lonSpan, latSpan]);
+  useEffect(() => () => map?.dispose(), [map]);
   const rad = Math.PI / 180;
   return (
     <mesh>
@@ -684,7 +702,7 @@ function CoverageLayer({ regions, dim }: { regions: RegionCurrency[]; dim: numbe
         .map((a) => (
           <group key={a.key}>
             {a.pieces.map((p, i) => (
-              <CoveragePatch key={i} piece={p} fill={a.fill} hatch={hatch} dim={dim} />
+              <CoveragePatch key={i} piece={p} sea={a.sea} fill={a.fill} hatch={hatch} dim={dim} />
             ))}
             {a.anchor && (
               <Text

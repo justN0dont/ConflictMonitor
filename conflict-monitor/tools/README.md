@@ -17,6 +17,7 @@ Each one re-derives a claim made there; none of them mutate anything.
 | `gazetteer_gaps.py` | Which location names the tables miss, ranked by event volume — the shortlist for new entries |
 | `recover_from_transcripts.py` | Reconstructs source files from Claude Code transcripts (how v3 was partly recovered) |
 | `gold_set.py` | The gold set (`../data/gold/`): `sample` draws it from the dump, `check` validates its shape (CI), `score` measures the archive's stored labels, a classifier run and four dedup matchers against the labels, `classify` runs the real classifier over it inside the backend container |
+| `sea_regions.py` | The AIS coverage boxes cut to the sea for the map (`../frontend/src/data/sea_regions.json`): Natural Earth's ocean at a pinned commit, each box minus the boxes before it, the provenance inside the file; runs in the backend container, re-run whenever `feeds.REGIONS` changes |
 
 The `archive_*` scripts read the production dump and are meant to run **on the VPS**:
 

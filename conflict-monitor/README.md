@@ -167,6 +167,9 @@ design — restrict them by URL in each provider's console.
 | adsb.lol | Aircraft positions | 15 seconds | None |
 | AISStream.io | Maritime vessels | Real-time (WebSocket) | Free API key |
 | CelesTrak | Military satellite TLEs | 6 hours | None |
+| Natural Earth | Coastline that cuts the AIS coverage boxes to the sea (`frontend/src/data/sea_regions.json`, vendored at a pinned upstream commit, provenance inside the file) | Vendored | None |
+
+Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com.
 
 ## Tech Stack
 

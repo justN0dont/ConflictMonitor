@@ -13,7 +13,7 @@ import type { EciVec3 } from "satellite.js";
 import type { ConflictEvent } from "../types/event";
 import type { Aircraft, JammingZone, TLERecord, Vessel } from "../hooks/useTracking";
 import { liveLook } from "../lib/replay";
-import { coverageAreas, hatchCanvas } from "../lib/coverage";
+import { coverageAreas, hatchCanvas, ringBounds, type Rect } from "../lib/coverage";
 import type { RegionCurrency } from "../lib/feed";
 import { EVENT_TYPES, eventVisual, type EventKey } from "../lib/tokens";
 
@@ -365,6 +365,8 @@ export function CesiumView({
   // -----------------------------------------------------------------------
   // AIS coverage by region (C83): each region's effective pieces, tinted
   // where it can vouch for a count, hatched where it cannot, plus a label.
+  // The pieces are drawn cut to the sea (C88) as polygons, holes kept, or as
+  // the box's rectangles when the sea file no longer matches the registry.
   // Dimmed in replay like every layer that does not follow the timeline.
   // -----------------------------------------------------------------------
   useEffect(() => {
@@ -375,24 +377,42 @@ export function CesiumView({
     const muted = Cesium.Color.fromCssColorString("#8ea3bb");
     for (const a of coverageAreas(regions)) {
       if (a.fill === "off") continue;
-      a.pieces.forEach((p, i) => {
-        source.entities.add({
-          id: `cov-${a.key}-${i}`,
-          rectangle: {
-            coordinates: Cesium.Rectangle.fromDegrees(p.lonMin, p.latMin, p.lonMax, p.latMax),
-            material:
-              a.fill === "observed"
-                ? new Cesium.ColorMaterialProperty(VESSEL_COLOR.withAlpha(0.07 * alpha))
-                : new Cesium.ImageMaterialProperty({
-                    image: hatch,
-                    repeat: new Cesium.Cartesian2((p.lonMax - p.lonMin) * 2, (p.latMax - p.latMin) * 2),
-                    transparent: true,
-                    color: Cesium.Color.WHITE.withAlpha(alpha),
-                  }),
-            height: 0,
-          },
+      // The hatch repeats per degree of the shape's own bounds, polygon or box.
+      const material = (r: Rect) =>
+        a.fill === "observed"
+          ? new Cesium.ColorMaterialProperty(VESSEL_COLOR.withAlpha(0.07 * alpha))
+          : new Cesium.ImageMaterialProperty({
+              image: hatch,
+              repeat: new Cesium.Cartesian2((r.lonMax - r.lonMin) * 2, (r.latMax - r.latMin) * 2),
+              transparent: true,
+              color: Cesium.Color.WHITE.withAlpha(alpha),
+            });
+      if (a.sea) {
+        a.sea.forEach(([outer, ...holes], i) => {
+          source.entities.add({
+            id: `cov-${a.key}-${i}`,
+            polygon: {
+              hierarchy: new Cesium.PolygonHierarchy(
+                Cesium.Cartesian3.fromDegreesArray(outer.flat()),
+                holes.map((h) => new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(h.flat()))),
+              ),
+              material: material(ringBounds(outer)),
+              height: 0,
+            },
+          });
         });
-      });
+      } else {
+        a.pieces.forEach((p, i) => {
+          source.entities.add({
+            id: `cov-${a.key}-${i}`,
+            rectangle: {
+              coordinates: Cesium.Rectangle.fromDegrees(p.lonMin, p.latMin, p.lonMax, p.latMax),
+              material: material(p),
+              height: 0,
+            },
+          });
+        });
+      }
       if (a.anchor) {
         source.entities.add({
           id: `cov-${a.key}-label`,

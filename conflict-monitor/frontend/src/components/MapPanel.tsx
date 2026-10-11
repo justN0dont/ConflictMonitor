@@ -9,7 +9,7 @@ import { isLocated } from "../lib/located";
 import { type ArrivalLog, freshIds } from "../lib/events";
 import { EVENT_TYPES, eventVisual, formatUncertainty, geoPrecision } from "../lib/tokens";
 import { NOW, NOW_CHIP, NOW_TITLE, liveLook } from "../lib/replay";
-import { HATCH_SIZE, coverageAreas, coverageFeatureCollection, hatchCanvas } from "../lib/coverage";
+import { HATCH_SIZE, coverageAreas, coverageFeatureCollection, coverageNote, hatchCanvas } from "../lib/coverage";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN ?? "";
 
@@ -405,8 +405,9 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
             }}
           >
             {/* Coverage (C83), under everything else: tint where a region can
-                vouch for a count, hatch where it cannot. Land inside a box is
-                the box's reach, not a claim about the land. */}
+                vouch for a count, hatch where it cannot. Each region is its box
+                cut to the sea (C88), or the box itself when the sea file no
+                longer matches the registry, and then the label says so. */}
             <Source id="coverage" type="geojson" data={coverageGeoJSON}>
               <Layer
                 id="coverage-observed"
@@ -805,7 +806,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
             {coverageDrawn && (
               <div
                 style={{ display: "flex", alignItems: "center", gap: 4 }}
-                title="AIS coverage by region, from the vessel feed's own per-region currency: tinted where the region can vouch for a count, hatched where it cannot. The boxes are the units the monitor measures by; land inside one is its reach, not a claim."
+                title={coverageNote(coverage)}
               >
                 <div style={{ width: 8, height: 8, background: "rgba(64,224,208,0.35)" }} />
                 <span style={{ color: "var(--text-secondary)" }}>AIS OBSERVED</span>
@@ -986,7 +987,7 @@ export function MapPanel({ events, aircraft, vessels, tleData, jammingZones, jam
               {coverageDrawn && (
                 <div
                   style={{ display: "flex", alignItems: "center", gap: 4 }}
-                  title="AIS coverage by region, from the vessel feed's own per-region currency: tinted where the region can vouch for a count, hatched where it cannot. The boxes are the units the monitor measures by; land inside one is its reach, not a claim."
+                  title={coverageNote(coverage)}
                 >
                   <div style={{ width: 8, height: 8, background: "rgba(64,224,208,0.35)" }} />
                   <span style={{ color: "var(--text-secondary)" }}>AIS OBSERVED</span>
