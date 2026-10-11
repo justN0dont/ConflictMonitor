@@ -12,6 +12,8 @@ who actually said something, and every count it returns is a FLOOR:
   outlets     distinct origins once forwards and transport mirrors collapse
   unrecorded  reports the merge destroyed before event_reports existed:
               max(report_count - reports, 0); 0 on anything ingested since
+  linked      other events the link rule reads as this incident
+              (services/links.py): rows kept apart, never merged
 
 What it does NOT see: a channel that pastes another's text and posts it as its
 own. A pasted repost carries no forward header, so it counts as an outlet
@@ -32,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Event, EventReport
 from app.schemas import Corroboration, EventRead
+from app.services.links import link_counts
 
 # The transport prefix the archive's channel names carry for an outlet's X
 # mirror. Stripping it is the whole "family" rule for mirrors: the register
@@ -67,13 +70,14 @@ def outlets(rows: Iterable[Row]) -> int:
     return len({outlet(o) for o in (origin(c, f) for c, f in rows) if o.strip()})
 
 
-def corroboration(rows: Sequence[Row], report_count: int | None) -> Corroboration:
+def corroboration(rows: Sequence[Row], report_count: int | None, linked: int = 0) -> Corroboration:
     rows = list(rows)
     return Corroboration(
         reports=len(rows),
         channels=len({c for c, _ in rows if c}),
         outlets=outlets(rows),
         unrecorded=max((report_count or 0) - len(rows), 0),
+        linked=linked,
     )
 
 
@@ -98,10 +102,12 @@ async def report_rows(session: AsyncSession, event_ids: Iterable[int]) -> dict[i
 
 async def read_events(session: AsyncSession, events: Sequence[Event]) -> list[EventRead]:
     """EventRead for each event with its corroboration attached."""
-    rows = await report_rows(session, [e.id for e in events])
+    ids = [e.id for e in events]
+    rows = await report_rows(session, ids)
+    links = await link_counts(session, ids)
     return [
         EventRead.model_validate(e).model_copy(
-            update={"corroboration": corroboration(rows[e.id], e.report_count)}
+            update={"corroboration": corroboration(rows[e.id], e.report_count, links[e.id])}
         )
         for e in events
     ]

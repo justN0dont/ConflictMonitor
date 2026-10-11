@@ -103,6 +103,29 @@ export interface Corroboration {
   outlets: number;
   /** Reports the merge destroyed before the report table existed; 0 since. */
   unrecorded: number;
+  /**
+   * Other events the link rule reads as this incident (backend
+   * services/linkrule.py): separate rows with their own text and counts,
+   * never merged, at the rule's measured precision. Absent on a payload
+   * from before the rule existed; read that as 0.
+   */
+  linked?: number;
+}
+
+/** One event linked to another, from GET /events/{id}/links. */
+export interface EventLinkRow {
+  event: ConflictEvent;
+  rule: string;
+  /** Containment over the two cleaned texts, the number the bar was applied to. */
+  score: number;
+  /** "same" | "unknown": the stored place names. "different" never links. */
+  place: string;
+  /** "same" | "unknown": the towns the two texts name. */
+  towns: string;
+  /** Minutes from the event asked about to this one; negative when it came first. */
+  dt_min: number;
+  km: number | null;
+  created_at: string;
 }
 
 /** One report under an event, from GET /events/{id}/reports. */

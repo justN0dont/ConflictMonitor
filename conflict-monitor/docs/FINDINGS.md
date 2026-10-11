@@ -17,7 +17,7 @@ than deleting it.
 **State at the last stopping point — 2026-10-10.**
 
 ```
-branch  phase3-rewind                    HEAD *this commit*   the Global Fishing Watch probe; e5b6fd0 (`C88`), 178ff74 (the gold set, `C86` and `C87`), 459911a (C84), 0a50509 (C83), d47b1bd (C82), da8b8fa (C81) — pushed 2026-10-11
+branch  phase3-rewind                    HEAD *this commit*   the link between events, `C89` opened; 4215e17 (the Global Fishing Watch probe), e5b6fd0 (`C88`), 178ff74 (the gold set, `C86` and `C87`), 459911a (C84), 0a50509 (C83), d47b1bd (C82), da8b8fa (C81) — pushed 2026-10-11
         phase3-display-honesty           f52a351   Phase 3 step 1: C52, C46/C49, C44, C50/C80 — pushed 2026-10-10
         phase2-region-currency           76c0c95   per-region AIS currency — pushed 2026-10-10
         c69-synthetic-demo               b3388bd   PR #2, open
@@ -873,7 +873,58 @@ different town in it ("Breaking \| Israeli occupation forces storm the town of X
 alone cannot be the whole rule — the place has to sit beside it (`C76`). The live rule, on the pairs it
 can see at all, reads TP 1 / FP 1 / FN 28; **83 of the 112 same-incident pairs lie where it never looks**
 — beyond 15 minutes, with one side unlocated, or 50–500 km apart — which is the measured size of the
-link between events that Phase 3 still owes.
+link between events that Phase 3 owed; rule v1 is built in *this commit* and measured on the same pairs
+below.
+
+---
+
+### Link between events — rule v1 measured on the gold pairs, 2026-10-11
+
+The second matcher, at the lower bar, on the population the pairs were drawn from: same
+`event_type`, within 180 minutes, within 500 km when both are located, any unlocated mix.
+`backend/app/services/linkrule.py` is the rule; `tools/gold_set.py score` imports it, so these are
+the shipped code's numbers, and `gold_set.py check` (a CI step) pins the counts at the bar. **The bar
+and the two vetoes were chosen on these 286 pairs, so every figure is in-sample and optimistic**, and
+the pairs are agreement with one labeller, reviewed by nobody (`C89`).
+
+Score: containment over the word sets of `raw_text` with tags and URLs stripped — how much of the
+shorter text the longer one holds. Veto: the two stored names are both names and incompatible
+(`loc_compatible`, no geocoder; the classifier's "Unknown" is not a name); or the towns the two texts
+name — after "town of", "in", "near" and the Arabic equivalents — are both non-empty and share none.
+
+| bar | TP | FP | FN | cannot_tell linked | P | R | F1 | on the 83 pairs the live rule never sees: P | R |
+|---|---|---|---|---|---|---|---|---|---|
+| 0.3 | 82 | 18 | 30 | 7 | 0.82 | 0.73 | 0.77 | 0.80 | 0.71 |
+| **0.4, shipped** | **74** | **12** | **38** | 3 | **0.86** | **0.66** | **0.75** | **0.84** | **0.64** |
+| 0.5 | 63 | 7 | 49 | 2 | 0.90 | 0.56 | 0.69 | 0.90 | 0.55 |
+| 0.6 | 46 | 4 | 66 | 2 | 0.92 | 0.41 | 0.57 | 0.90 | 0.42 |
+| 0.7 | 28 | 3 | 84 | 1 | 0.90 | 0.25 | 0.39 | 0.88 | 0.27 |
+
+Text alone at the same bar read P 0.61 / R 0.80 (the gold-set section above). What the vetoes do,
+among pairs over the bar on text alone: the stored-place veto removes 25 `different` and 13 `same`
+— the cost is one incident named at two granularities, "Tyre" against "Southern Lebanon", "Iran"
+against "Tehran"; the towns veto removes 32 `different` and 6 `same` — the cost is spelling, "Kafr
+Kila" against "Kfarkila", "Deir Elbalah" against "Deir al-Balah". Together they lift precision from
+0.61 to 0.86 while recall falls from 0.80 to 0.66. The stored name alone could not do it: among pairs
+whose stored names agree, 33 are `different` to 36 `same`, because the stored name is a region —
+"West Bank", "Southern Lebanon" — and one outlet's template with another town in it matches it.
+
+The 12 false positives that remain are the texts where no town can be read: Hezbollah's operation
+statements in Arabic naming a target but no town, siren alerts over "northern occupied Palestine",
+two West Bank storms the pattern misses ("storm Nablus", no preposition), and two markets reports.
+Of the 38 misses, 19 are the vetoes' cost above and 19 score under the bar: the same incident told
+in two languages (Dimona's fire and its casualty count, 0.00) or in two reporters' own sentences.
+
+Expected on the archive, by the strata weights — 8 to 10 labelled pairs per cell against cells of up
+to 2.6 million candidates, so an order of magnitude, not a count: **~40,000 pairs linked of 5.16
+million candidate pairs**; the labels put the same-incident pairs near 48,000. Nothing has
+back-linked the archive; a replay over it is the instrument that turns this estimate into a count.
+
+Not measured: the candidate stage inherits the classifier's `event_type`, which agrees with the text
+95% of the time (above), so about one true pair in ten never becomes a candidate; and at ingest the
+places are the live classifier's, which names the text's place five times in six where the archive's
+names it one time in three, so the vetoes should bite differently on live rows, in either direction.
+The first week of `event_links` rows against a reader measures it.
 
 ---
 
@@ -913,7 +964,7 @@ as a probe can go from here.
 
 ## Findings ledger
 
-69 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **23 open**, 43 fixed, 3 invalid or external. Of the open ones, **none is critical** and 8 are high. (Recounted from the rows by script on 2026-10-11, when `C88` was found and fixed in the same commit: 68 rows, 23 open and 8 high before; 69 after, 23 open and 8 high, and the tables agreed. Earlier recount, kept: on 2026-10-10, when the gold set landed and `C86` and `C87` were opened in the same commit: 66 rows, 21 open and 6 high before; 68 after, 23 open and 8 high, and the tables agreed. Earlier recount, kept: on 2026-10-10, when `C84` was found and fixed and `C85` opened in the same commit: 64 rows, 20 open and 6 high before; 66 after, 21 open and 6 high, and the tables agreed. Earlier recount, kept: on 2026-10-10, when `C83` was found and fixed in the same commit: 63 rows, 20 open and 6 high before; 64 after, and the tables agreed. Earlier recount, kept: on 2026-10-10, when `C82` was found and fixed in the same commit: 62 rows, 20 open and 6 high before; 63 after, and the tables agreed. Earlier recount, kept: on 2026-10-10, when `C81` was found and fixed in the same commit: 61 rows, 20 open and 6 high before; 62 after, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C50` moved to Fixed and `C80` was found and fixed in the same commit — the first new row since `C79`, so the total is 61: 21 open and 6 high before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C44` moved to Fixed: 22 open and 7 high before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C46` and `C49` moved to Fixed: 24 open and 8 high before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C29` moved to Fixed: 25 open before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C69` was rebased onto `0f6e1ea`: the two branches closed `C69` and `C60`/`C61`/`C62` in parallel, each recounted correctly against a base without the other's move, and the merge left both sentences one side short. Earlier recount, kept: on 2026-09-25, when `C60`, `C61` and `C62` moved to Fixed: 29 open and 11 high before, and the tables agreed. Earlier recount, kept: on 2026-09-24, when `C31` moved to Fixed: before the move the tables already held 30 open and 12 high against the 31 and 13 this line claimed, so it had drifted by one again. Earlier note, kept: `8523961` closes `C10`, narrows `C11` and `C74`, and opens `C78` and `C79`. It also corrects the line itself: the previous text said "57 / 29 open / 14 high" while the tables held 58 rows and 30 open — the note claimed `ce5d994` opened `C76` when it opened `C76` **and** `C77`, and the tally was incremented once. The same drift, in the same sentence, two commits running. Counted from the rows with a script, not carried forward.)
+70 candidate findings, first re-checked against the tree at `64b690a` and re-verified line by line against `de146f6`: **24 open**, 43 fixed, 3 invalid or external. Of the open ones, **none is critical** and 8 are high. (Recounted from the rows by script on 2026-10-11, when `C89` was opened by the commit that built the link between events: 69 rows, 23 open and 8 high before; 70 after, 24 open and 8 high, and the tables agreed. Earlier recount, kept: on 2026-10-11, when `C88` was found and fixed in the same commit: 68 rows, 23 open and 8 high before; 69 after, 23 open and 8 high, and the tables agreed. Earlier recount, kept: on 2026-10-10, when the gold set landed and `C86` and `C87` were opened in the same commit: 66 rows, 21 open and 6 high before; 68 after, 23 open and 8 high, and the tables agreed. Earlier recount, kept: on 2026-10-10, when `C84` was found and fixed and `C85` opened in the same commit: 64 rows, 20 open and 6 high before; 66 after, 21 open and 6 high, and the tables agreed. Earlier recount, kept: on 2026-10-10, when `C83` was found and fixed in the same commit: 63 rows, 20 open and 6 high before; 64 after, and the tables agreed. Earlier recount, kept: on 2026-10-10, when `C82` was found and fixed in the same commit: 62 rows, 20 open and 6 high before; 63 after, and the tables agreed. Earlier recount, kept: on 2026-10-10, when `C81` was found and fixed in the same commit: 61 rows, 20 open and 6 high before; 62 after, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C50` moved to Fixed and `C80` was found and fixed in the same commit — the first new row since `C79`, so the total is 61: 21 open and 6 high before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C44` moved to Fixed: 22 open and 7 high before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C46` and `C49` moved to Fixed: 24 open and 8 high before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C29` moved to Fixed: 25 open before, and the tables agreed. Earlier recount, kept: on 2026-09-26, when `C69` was rebased onto `0f6e1ea`: the two branches closed `C69` and `C60`/`C61`/`C62` in parallel, each recounted correctly against a base without the other's move, and the merge left both sentences one side short. Earlier recount, kept: on 2026-09-25, when `C60`, `C61` and `C62` moved to Fixed: 29 open and 11 high before, and the tables agreed. Earlier recount, kept: on 2026-09-24, when `C31` moved to Fixed: before the move the tables already held 30 open and 12 high against the 31 and 13 this line claimed, so it had drifted by one again. Earlier note, kept: `8523961` closes `C10`, narrows `C11` and `C74`, and opens `C78` and `C79`. It also corrects the line itself: the previous text said "57 / 29 open / 14 high" while the tables held 58 rows and 30 open — the note claimed `ce5d994` opened `C76` when it opened `C76` **and** `C77`, and the tally was incremented once. The same drift, in the same sentence, two commits running. Counted from the rows with a script, not carried forward.)
 
 Claims that no longer hold are kept with status `INVALID` rather than deleted.
 
@@ -947,6 +998,7 @@ Ordered by severity, then area.
 | `C87` | high | 1 | Ingest | **Measured on the gold set, `178ff74`; not fixed.** The classifier names a place for **83.9% ±5.5** of texts that name no scene at all (`data/gold/`, 106 of 144 raw): the prompt says "NEVER return Unknown if ANY location is mentioned", so a country named as an actor becomes the scene, and `_handle_response` then adds the first flag country when the model does say Unknown. The archive shows the same habit at 52.3% (`Strait of Hormuz` ×12, `Iran` ×12 where the text names none). That name is what the geocoder places — with the namesake hits of `C86`, at facility precision — so a statement about Hormuz draws a dot in the strait. The fix is a scene, not a subject: the prompt asks where the event happened and returns Unknown otherwise, the flag fallback stops filling `location_name`, and `evidence_span` (already three-valued) is the check. It changes which rows are located, so it is a decision, not a tidy-up |
 | `C65` | low | — | Platform | Shutdown calls task.cancel() without awaiting, so no client-close path is guaranteed to run |
 | `C67` | low | — | Platform | No .dockerignore; frontend COPY . . does overlay host node_modules, but the linux binaries survive |
+| `C89` | medium | 3 | Ingest | **Opened by *this commit*, which built the link between events.** Rule v1's bar and vetoes were chosen on the 286 gold pairs they are measured on, so P 0.86 / R 0.66 is in-sample; the pairs are one labeller's reading, reviewed by nobody. The 12 false positives it keeps are template texts where no town can be read (Arabic operation statements, siren alerts); 19 of its 38 misses are the vetoes' cost (one incident named at two granularities, two spellings of one town). Instruments, in order: a second draw of pairs with another seed, labelled blind and scored once (held-out precision); the live classifier's places for the pair sides, since at ingest the vetoes read qwen's names, not the archive's; the first week of `event_links` rows against a reader. Until then the chip's title states the number and `gold_set.py check` pins it |
 
 ### Fixed
 
@@ -1736,16 +1788,20 @@ cycle live → stale → unavailable between its rare fixes: that is its coverag
       projection was built and reverted: the three.js globe is visually distinct and the owner keeps it. The
       duplication it caused is real, so the resolution is one shared spec (predicate + precision) imported by
       both renderers, not one renderer
-- [ ] Link, don't merge — **half shipped in `8523961`, the within-event graph in `459911a`, and the
-      box stays unticked for the link between events.** `event_reports` preserves every report's text
+- [x] Link, don't merge — **half shipped in `8523961`, the within-event graph in `459911a`, the link
+      between events in *this commit*.** `event_reports` preserves every report's text
       (`8523961`: `C10` closed, `C74` narrowed). `459911a` (`C84`) makes the rows readable and
       countable: `GET /events/{id}/reports` serves every report with its byline, forward origin, text
       and own death toll; every event payload carries `corroboration {reports, channels, outlets,
-      unrecorded}`, each a floor; the feed opens any event to its reports. What is not built is the
-      link *between events* — `cluster_id` and `corroboration_link`: two rows dedup did not merge,
+      unrecorded}`, each a floor; the feed opens any event to its reports. **Built in *this commit*:** the
+      link *between events* — `event_links` rows, not `cluster_id` (decisions below): two rows dedup did not merge,
       linked as one incident. That is a second matcher at a lower bar, and a bar needs the gold pairs — which exist since
       `178ff74`: 83 of the 112 same-incident pairs in `data/gold/` lie where the live rule can never look (beyond
-      15 min, one side unlocated, or 50–500 km apart), and the text score alone tops out near P 0.65 on them
+      15 min, one side unlocated, or 50–500 km apart), and the text score alone tops out near P 0.65 on them.
+      Rule v1 (`services/linkrule.py`): containment over the cleaned texts over 0.4 with neither the stored
+      places nor the towns the texts name disagreeing — **P 0.86 / R 0.66** on the pairs, in-sample (`C89`);
+      written at ingest, `corroboration.linked` on every payload, `GET /events/{id}/links`, the chip and the
+      list. The archive is not back-linked
 - [x] Channel family graph from `fwd_from`; collapse corroboration counts over `family_id` — **shipped
       in `459911a` as a rule, not a table** (`C84`): `event_reports.forwarded_from` records
       Telegram's forward header (`""` not a forward, NULL never recorded, else the origin), and
@@ -1759,6 +1815,48 @@ cycle live → stale → unavailable between its rare fixes: that is its coverag
       assistant and **reviewed by nobody yet**, with the labeller on every row and a reason on every cannot_tell;
       `tools/gold_set.py` draws, validates (a CI step) and scores; `check_policy.py` forbids runtime use. The first
       numbers are in Measured facts. Not to be used on a Claude-family classifier: that would measure self-agreement
+
+#### Link between events — decisions, settled 2026-10-11
+
+Grounded in the measurement above (Measured facts, "Link between events"), in the shape of the
+earlier decision sections. Each says what it rules out.
+
+**1. A link is a row, never a merge.** `event_links` holds one row per pair (`a_id < b_id`, unique),
+with the score, what the rule saw (`place`, `towns`), the gap, the distance, and the rule version
+that wrote it. Nothing on either event changes: not `severity`, `source_reliability`,
+`killed_reported`, `report_count` or the channels. The row is a claim at the rule's measured
+precision, and the reader sees the score. Ruled out: `cluster_id` on the event — a stored component
+id has to be rewritten across two clusters whenever a link joins them, nothing reads one yet, and the
+component is derivable from the rows the day something does.
+
+**2. The rule is one stdlib module, measured by the scorer that measures everything else.**
+`services/linkrule.py` has no backend dependency, so `tools/gold_set.py` imports it on the host:
+`score` prints its curve, `check` pins its counts at the bar (`LINK_RULE_PINNED`), and the backend
+suite never opens the gold files — QUALITY-16 is a policy check on `backend/app`, and keeping the
+tests off the files is the same idea. A rule that scores differently is a different rule: a new
+`RULE` string, new pinned counts, and a register entry. `normalize` is pinned equal to
+`dedup._normalize` so the two matchers read the same words. Ruled out: a copy of the rule in the
+tool, which would verify the copy.
+
+**3. It runs at ingest, after the insert, and never undoes it.** Both ingest paths call
+`links.link_event` once the event is committed; the candidates are one query over the population
+the rule was measured on (same type, ±180 min, ≤500 km when both are located, an unlocated side
+never a reason to exclude), newest first, capped at 2,000 as a bound on work; the rows are written
+in their own commit; a failure is logged and the event stands. The push after it carries the count.
+Ruled out: linking before the insert (a link to a row that may not commit), and re-linking the
+existing event on the merge path (its text did not change). The archive is not back-linked: that is
+a replay tool with its own measurement, not a startup migration over 84,000 rows.
+
+**4. What the reader sees.** `corroboration.linked` on every payload, a floor like the rest;
+`GET /events/{id}/links` lists the linked events strongest first with the score, both place checks
+and the signed gap; the chip gains `N LINKED` and its title states the precision; the report list
+shows the linked events under the reports with "LINK 0.62 · PLACES AGREE · TOWN UNREAD · 40 MIN
+AFTER · 28 KM". Ruled out: folding links into `reports` or `outlets` — a linked event's reports are
+its own, and a count that mixed the two would claim corroboration at the link's precision without
+saying so.
+
+**5. Demo does not link.** Synthetic rows are not evidence of the rule; the demo's merges already
+read live (an open untriaged item), and adding links to that would widen it.
 
 ---
 
@@ -1858,4 +1956,5 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-10-10 | `459911a` | `C84` found and fixed: **the corroboration graph within an event.** `event_reports.forwarded_from` from Telegram's forward header; `services/corroboration.py` collapses rows onto outlets (forward → origin, `x_name` → `name`); `corroboration {reports, channels, outlets, unrecorded}` on every event payload via `read_events`; `GET /events/{id}/reports`; the boost gates on outlets; the feed opens any event to its reports and the chip names its unit (`DISPLAY-12` steps 1 and 2 paid). Demo writes report rows and links second reports through `merge_duplicate`. `C11` narrowed again, `C70` narrowed, `C85` opened. 22 pytest cases, 13 vitest cases |
 | 2026-10-10 | `178ff74` | **The gold set.** `data/gold/`: 425 archive events and 286 pairs, stratified, labelled from text alone with the labeller on every row and nobody's review yet; `tools/gold_set.py` samples, validates (a CI step), scores and classifies; `check_policy.py` forbids runtime use. Measured: 17.5% of archive rows report no incident, `event_type` agrees on 55.6%, the stored place is the text's on 27.0%; qwen3.8-27b on the same rows: noise verdict agrees 89.2% and it keeps 48% of non-incidents, `event_type` agrees 95.1%, the stated place is the text's 83.6% of the time, a place is named for 83.9% of texts that name none (`C87` opened), `killed_reported` copied on 21 of 22 and invented on 1.1%; containment over `raw_text` beats Jaccard over `summary` on recall at equal precision and neither clears P 0.70 (`C76` unblocked, not applied); 83 of 112 same-incident pairs lie outside the live rule's reach. `C86` opened (Nominatim namesakes placed with facility precision, seen live) and `C87` (a place named where the text names none). The stack ran live on this machine for the first time since September: RSS through qwen3.8-27b, adsb.lol, AISStream, IODA and Radar; Telegram unconfigured, CelesTrak refused the connection |
 | 2026-10-11 | `e5b6fd0` | `C88` found and fixed: **the coverage cut to the sea.** The AIS regions were drawn as the boxes the feed subscribes by, and the hatch over Egypt, Sudan and Arabia read as a claim about land — 62% of the drawn area was land, in square degrees. `tools/sea_regions.py` cuts each box minus the boxes before it to Natural Earth's 1:10m ocean (public domain, pinned commit, sha256 and the registry inside `frontend/src/data/sea_regions.json`); all three views draw that shape and fall back to the box, saying so, for any region whose registry entry no longer matches the file. Natural Earth credited in the README. The gold set's placeholders become `178ff74` |
-| 2026-10-11 | *this commit* | **Global Fishing Watch probed for the Red Sea**, as far as it goes without a token: what it serves (hourly AIS presence per 0.1° cell, about 96 h behind, Kpler satellite and terrestrial), the terms (CC BY-NC 4.0, non-commercial, attribution), the exact request, and the gateway answering `401` to it. `tools/gfw_probe.py` measures the Red Sea box the moment `GFW_API_TOKEN` exists; the token is on the owner. `C88`'s placeholders become `e5b6fd0` |
+| 2026-10-11 | `4215e17` | **Global Fishing Watch probed for the Red Sea**, as far as it goes without a token: what it serves (hourly AIS presence per 0.1° cell, about 96 h behind, Kpler satellite and terrestrial), the terms (CC BY-NC 4.0, non-commercial, attribution), the exact request, and the gateway answering `401` to it. `tools/gfw_probe.py` measures the Red Sea box the moment `GFW_API_TOKEN` exists; the token is on the owner. `C88`'s placeholders become `e5b6fd0` |
+| 2026-10-11 | *this commit* | **The link between events** — Phase 3's "link, don't merge", the half between rows. `event_links`: one row per pair dedup kept apart that rule v1 reads as one incident (containment over the cleaned texts over 0.4, no disagreeing stored place, no disagreeing town in the texts), with the score and what the rule saw; nothing on either event changes. Measured on the gold pairs by the scorer importing the shipped module — **P 0.86 / R 0.66**, in-sample — and pinned by `gold_set.py check`. Written at ingest on both paths; `corroboration.linked` on every payload; `GET /events/{id}/links`; the chip says `N LINKED` and the list shows each link's reasons. `C89` opened for what is unmeasured. The probe's placeholder becomes `4215e17` |

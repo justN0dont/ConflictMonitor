@@ -60,6 +60,7 @@ from app.schemas import EventWS
 from app.services.classifier import classify_message, evidence_span
 from app.services.corroboration import read_event
 from app.services.dedup import check_duplicate, merge_duplicate
+from app.services.links import link_event
 from app.services.geocoder import geocode
 
 logger = logging.getLogger(__name__)
@@ -484,6 +485,10 @@ async def _process_article(
         session.add(report)
         await session.commit()
         await session.refresh(db_event)
+        # The row is on disk; now the link between events (services/links.py):
+        # rows dedup kept apart that the lower bar reads as one incident. Its
+        # own commit, never undoing this one, and the push carries the count.
+        await link_event(session, db_event)
 
         ws_payload = EventWS(type="new_event", event=await read_event(session, db_event))
         await broadcaster.broadcast(ws_payload.model_dump_json())

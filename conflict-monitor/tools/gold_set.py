@@ -584,8 +584,43 @@ def cmd_check(args) -> int:
                 print("FAIL %s line %d (%s): %s" % (name, n, r.get("id", r.get("pair_id")), "; ".join(errs)))
             labelled += r.get("gold") is not None
         print("ok   %s: %d rows, %d labelled" % (name, len(rows), labelled))
+    bad += check_link_rule(d)
     bad += selftest()
     return 1 if bad else 0
+
+
+# The shipped link rule's counts on the labelled pairs (TP, FP, FN), by rule
+# version, as FINDINGS.md Measured facts "Link between events" states them.
+# A rule, a bar or a label that changes must change this and the register
+# together, never one without the other.
+LINK_RULE_PINNED = {"v1": (74, 12, 38)}
+
+
+def check_link_rule(d: Path) -> int:
+    """backend/app/services/linkrule.py, imported rather than copied, scores
+    the labelled pairs exactly as pinned. The one place the gold set meets
+    the shipped rule; the backend suite never opens the gold files."""
+    rows = [r for r in read_jsonl(d / "pairs.jsonl") if r.get("gold") is not None]
+    if not rows:
+        return 0
+    sys.path.insert(0, str(PROJECT / "backend"))
+    from app.services import linkrule as lr
+    tp = fp = fn = 0
+    for r in rows:
+        a = lr.assess(r["a"]["raw_text"], r["a"]["location_name"], r["b"]["raw_text"], r["b"]["location_name"])
+        label = r["gold"]["label"]
+        tp += a.linked and label == "same"
+        fp += a.linked and label == "different"
+        fn += (not a.linked) and label == "same"
+    want = LINK_RULE_PINNED.get(lr.RULE)
+    if want is None:
+        print("FAIL link rule %s has no pinned counts; measure it and pin them" % lr.RULE)
+        return 1
+    if (tp, fp, fn) != want:
+        print("FAIL link rule %s on the pairs: TP %d FP %d FN %d, pinned %s" % (lr.RULE, tp, fp, fn, want))
+        return 1
+    print("ok   link rule %s on the pairs: TP %d FP %d FN %d, as pinned" % (lr.RULE, tp, fp, fn))
+    return 0
 
 
 # ── score ─────────────────────────────────────────────────────────────────────
@@ -791,6 +826,40 @@ def score_pairs(d: Path, meta):
     print("    TP %d  FP %d  FN %d  cannot_tell above bar %d   P %s  R %s" % (tp, fp, fn, ct, fmt(p), fmt(r)))
     unseen = sum(1 for rr in rows if rr["gold"]["label"] == "same" and not _live_rule_sees(rr["stratum"]))
     print("    same-incident pairs the rule can never see (outside 15 min, one side unlocated, or 50–500 km apart): %d" % unseen)
+    print()
+    score_link_rule(rows, meta)
+
+
+def score_link_rule(rows, meta):
+    """The link between events, as shipped: backend/app/services/linkrule.py
+    is imported, not copied, so this is the rule's number. Its bar and vetoes
+    were chosen on these pairs, so the figures are in-sample."""
+    sys.path.insert(0, str(PROJECT / "backend"))
+    from app.services import linkrule as lr
+    assessed = [(lr.assess(r["a"]["raw_text"], r["a"]["location_name"], r["b"]["raw_text"], r["b"]["location_name"]), r)
+                for r in rows]
+    print("  the link rule %s as shipped (containment over clean raw_text, place and towns vetoes); * = its bar %.1f" % (lr.RULE, lr.BAR))
+    print("    %5s %4s %4s %4s %4s   %5s %5s %5s  | unseen by the live rule: %4s %4s %4s   %5s %5s"
+          % ("bar", "TP", "FP", "FN", "c/t>", "P", "R", "F1", "TP", "FP", "FN", "P", "R"))
+    for t in (0.3, 0.4, 0.5, 0.6, 0.7):
+        def hit(a, t=t):
+            return a.score > t and a.place != "different" and a.towns != "different"
+        tp, fp, fn, ct, p, r, f1 = pr_at([(1.0 if hit(a) else 0.0, rr["gold"]["label"]) for a, rr in assessed], 0.5)
+        tp2, fp2, fn2, _, p2, r2, _ = pr_at(
+            [(1.0 if hit(a) else 0.0, rr["gold"]["label"]) for a, rr in assessed if not _live_rule_sees(rr["stratum"])], 0.5)
+        print("    %4.1f%s %4d %4d %4d %4d   %5s %5s %5s  |                          %4d %4d %4d   %5s %5s"
+              % (t, "*" if t == lr.BAR else " ", tp, fp, fn, ct, fmt(p), fmt(r), fmt(f1), tp2, fp2, fn2, fmt(p2), fmt(r2)))
+    for key in ("place", "towns"):
+        c = collections.Counter(rr["gold"]["label"] for a, rr in assessed if a.score > lr.BAR and getattr(a, key) == "different")
+        print("    the %s veto, among pairs over the bar on text alone: %s" % (key, dict(c)))
+    cells = meta["pairs"]["cells"]
+    total = 0.0
+    for stratum, c in cells.items():
+        rs = [a for a, rr in assessed if rr["stratum"] == stratum]
+        if rs:
+            total += c["N"] * sum(1 for a in rs if a.linked) / len(rs)
+    print("    expected pairs linked on the archive, by the strata weights (8-10 labelled per cell, so an order of magnitude): ~%.0f of %d candidate pairs"
+          % (total, sum(c["N"] for c in cells.values())))
     print()
 
 

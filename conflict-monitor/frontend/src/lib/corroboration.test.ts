@@ -4,14 +4,15 @@
  * and the note about reports the archive destroyed.
  */
 import { describe, expect, it } from "vitest";
-import type { ConflictEvent, Corroboration, EventReportRow } from "../types/event";
-import { corroborationChip, plural, reportByline, unrecordedNote } from "./corroboration";
+import type { ConflictEvent, Corroboration, EventLinkRow, EventReportRow } from "../types/event";
+import { corroborationChip, linkLine, plural, reportByline, unrecordedNote } from "./corroboration";
 
-const C = (reports: number, channels: number, outlets: number, unrecorded = 0): Corroboration => ({
+const C = (reports: number, channels: number, outlets: number, unrecorded = 0, linked?: number): Corroboration => ({
   reports,
   channels,
   outlets,
   unrecorded,
+  ...(linked === undefined ? {} : { linked }),
 });
 
 function evt(over: Partial<ConflictEvent> = {}): ConflictEvent {
@@ -72,6 +73,15 @@ describe("corroborationChip", () => {
     expect(corroborationChip(evt({ corroboration: C(0, 0, 0, 1) }))).toBe("0 REPORTS · 0 OUTLETS · +1 UNRECORDED");
   });
 
+  it("names a linked event beside one report, and after what the archive destroyed", () => {
+    expect(corroborationChip(evt({ corroboration: C(1, 1, 1, 0, 1) }))).toBe("1 REPORT · 1 OUTLET · 1 LINKED");
+    expect(corroborationChip(evt({ corroboration: C(2, 2, 2, 1, 3) }))).toBe(
+      "2 REPORTS · 2 OUTLETS · +1 UNRECORDED · 3 LINKED",
+    );
+  });
+  it("reads a payload from before the rule as zero links, never as unknown", () => {
+    expect(corroborationChip(evt({ corroboration: C(1, 1, 1) }))).toBeNull();
+  });
   it("falls back to the stored count when the payload carries no rows, and claims no outlets", () => {
     expect(corroborationChip(evt({ report_count: 4 }))).toBe("4 REPORTS");
     expect(corroborationChip(evt({ report_count: 1 }))).toBeNull();
@@ -112,5 +122,28 @@ describe("unrecordedNote and plural", () => {
   it("pluralises on exactly one", () => {
     expect(plural(1, "REPORT")).toBe("1 REPORT");
     expect(plural(0, "OUTLET")).toBe("0 OUTLETS");
+  });
+});
+
+describe("linkLine", () => {
+  const link = (over: Partial<EventLinkRow> = {}): EventLinkRow => ({
+    event: evt({ id: 2 }),
+    rule: "v1",
+    score: 0.6154,
+    place: "same",
+    towns: "unknown",
+    dt_min: 40,
+    km: 27.9,
+    created_at: "2026-10-11T00:00:00Z",
+    ...over,
+  });
+  it("says the score, both place checks, the gap and the distance", () => {
+    expect(linkLine(link())).toBe("LINK 0.62 · PLACES AGREE · TOWN UNREAD · 40 MIN AFTER · 28 KM");
+  });
+  it("signs the gap from the event asked about and drops a distance it does not have", () => {
+    expect(linkLine(link({ dt_min: -0.4, km: null, place: "unknown", towns: "same" }))).toBe(
+      "LINK 0.62 · A PLACE UNNAMED · SAME TOWN · SAME MINUTE",
+    );
+    expect(linkLine(link({ dt_min: -90, km: null }))).toBe("LINK 0.62 · PLACES AGREE · TOWN UNREAD · 90 MIN BEFORE");
   });
 });

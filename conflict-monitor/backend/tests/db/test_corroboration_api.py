@@ -45,8 +45,8 @@ async def test_every_listed_event_carries_counts_the_rows_can_back(session):
 
     out = await _list(session)
     by_id = {e.id: e.corroboration.model_dump() for e in out}
-    assert by_id[one.id] == {"reports": 1, "channels": 1, "outlets": 1, "unrecorded": 0}
-    assert by_id[many.id] == {"reports": 3, "channels": 3, "outlets": 1, "unrecorded": 0}
+    assert by_id[one.id] == {"reports": 1, "channels": 1, "outlets": 1, "unrecorded": 0, "linked": 0}
+    assert by_id[many.id] == {"reports": 3, "channels": 3, "outlets": 1, "unrecorded": 0, "linked": 0}
 
 
 async def test_unrecorded_is_the_archive_s_destroyed_reports(session):
@@ -60,7 +60,7 @@ async def test_unrecorded_is_the_archive_s_destroyed_reports(session):
     await session.flush()
 
     out = await get_event(archive_row.id, session=session)
-    assert out.corroboration.model_dump() == {"reports": 1, "channels": 1, "outlets": 1, "unrecorded": 213}
+    assert out.corroboration.model_dump() == {"reports": 1, "channels": 1, "outlets": 1, "linked": 0, "unrecorded": 213}
 
 
 async def test_an_event_with_no_report_rows_says_so(session):
@@ -71,7 +71,7 @@ async def test_an_event_with_no_report_rows_says_so(session):
     session.add(bare)
     await session.flush()
     (out,) = await _list(session)
-    assert out.corroboration.model_dump() == {"reports": 0, "channels": 0, "outlets": 0, "unrecorded": 1}
+    assert out.corroboration.model_dump() == {"reports": 0, "channels": 0, "outlets": 0, "linked": 0, "unrecorded": 1}
 
 
 async def test_the_reports_route_serves_every_row_oldest_first_with_its_outlet(session):

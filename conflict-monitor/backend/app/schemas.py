@@ -27,6 +27,11 @@ class Corroboration(BaseModel):
     channels: int
     outlets: int
     unrecorded: int
+    # Other events the link rule reads as this incident (services/
+    # linkrule.py): separate rows, each with its own text and counts, never
+    # merged. A floor like the rest, and a claim at the rule's measured
+    # precision, which the chip's title states.
+    linked: int = 0
 
 
 class EventRead(BaseModel):
@@ -99,6 +104,21 @@ class EventReportRead(BaseModel):
     extraction_status: str | None
     reported_at: datetime
     ingested_at: datetime
+
+
+class EventLinkRead(BaseModel):
+    """One event the link rule reads as the same incident as the one asked
+    about, with what the rule saw (models.EventLink)."""
+    event: EventRead
+    rule: str
+    score: float
+    place: str
+    towns: str
+    # Minutes from the event asked about to this one: negative when it came
+    # first.
+    dt_min: float
+    km: float | None
+    created_at: datetime
 
 
 class EventWS(BaseModel):

@@ -1,7 +1,7 @@
 import datetime
 
 from geoalchemy2 import Geometry
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -270,6 +270,45 @@ class EventReport(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     ingested_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class EventLink(Base):
+    """Two events the link rule reads as one incident (services/linkrule.py).
+
+    The half of "link, don't merge" between events: dedup merges reports that
+    arrive within 15 minutes in one place; a link joins two rows it kept apart
+    — later, further, or one of them unplaced — at a lower bar and says so.
+    One row per pair, `a_id < b_id`. Nothing on either event changes when a
+    row is written: not severity, reliability, the death toll or the counts.
+    The row carries the score and what the rule saw, so a reader can disagree
+    with the bar; `rule` names the version that wrote it, since a rule that
+    changes must not be read as the one that measured 0.86 precision.
+
+    ON DELETE CASCADE for the reason event_reports gives: two admin routes
+    delete events outside the ORM.
+    """
+    __tablename__ = "event_links"
+    __table_args__ = (
+        UniqueConstraint("a_id", "b_id", name="uq_event_links_pair"),
+        Index("idx_event_links_b", "b_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    a_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    b_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"))
+    rule: Mapped[str] = mapped_column(String(16))
+    # containment over the cleaned texts, the number the bar is applied to
+    score: Mapped[float] = mapped_column(Float)
+    # "same" | "different" | "unknown": the stored names, then the towns the
+    # texts name. A "different" on either never reaches this table.
+    place: Mapped[str] = mapped_column(String(16))
+    towns: Mapped[str] = mapped_column(String(16))
+    # b's timestamp minus a's, in minutes; km NULL when either is unlocated
+    dt_min: Mapped[float] = mapped_column(Float)
+    km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 

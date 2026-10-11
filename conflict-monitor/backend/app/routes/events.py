@@ -13,10 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import async_session as make_session, get_session
 from app.security import require_admin_token
 from app.models import Event, EventReport
-from app.schemas import EventRead, EventReportRead
+from app.schemas import EventLinkRead, EventRead, EventReportRead
 from app.services.classifier import classify_message, evidence_span
 from app.services.corroboration import origin, outlet, read_events
 from app.services.geocoder import geocode
+from app.services.links import linked_events
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,34 @@ async def event_reports(event_id: int, session: AsyncSession = Depends(get_sessi
         .order_by(EventReport.reported_at.asc(), EventReport.id.asc())
     )
     return [_report_read(r) for r in result.scalars().all()]
+
+
+@router.get("/{event_id}/links", response_model=list[EventLinkRead])
+async def event_links(event_id: int, session: AsyncSession = Depends(get_session)):
+    """Every event the link rule reads as this incident, strongest first, each
+    with the score and what the rule saw (services/linkrule.py). The rows are
+    separate events with their own reports and counts; nothing was merged. An
+    unknown id answers 404; an event with no links answers []."""
+    exists = (
+        await session.execute(select(Event.id).where(Event.id == event_id))
+    ).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    pairs = await linked_events(session, event_id)
+    others = await read_events(session, [e for _, e in pairs])
+    return [
+        EventLinkRead(
+            event=other,
+            rule=link.rule,
+            score=link.score,
+            place=link.place,
+            towns=link.towns,
+            dt_min=link.dt_min if link.a_id == event_id else -link.dt_min,
+            km=link.km,
+            created_at=link.created_at,
+        )
+        for (link, _), other in zip(pairs, others)
+    ]
 
 
 def _report_read(r: EventReport) -> EventReportRead:
