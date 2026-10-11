@@ -30,9 +30,12 @@ decisions"):
                false positive a text score cannot see
 
 Measured on the labelled gold pairs by the scorer in tools/, which imports THIS
-module so the number is the shipped rule's, never a copy's, and pins the counts. The bar and
-the vetoes were chosen on those pairs, so the figures are in-sample and
-optimistic; the pairs are agreement with one labeller and reviewed by nobody.
+module so the number is the shipped rule's, never a copy's, and pins the counts.
+The bar and the vetoes were chosen on those pairs (P 0.86 / R 0.66, in-sample);
+scored once on 284 held-out pairs they had never met: P 0.88 / R 0.53. Precision
+transfers, recall does not, and the stored-place veto is most of the gap: it
+removes near-identical texts whose stored names disagree. The pairs are agreement
+with one labeller and reviewed by nobody (FINDINGS.md, Measured facts, "Held out").
 
 Stdlib only, on purpose: tools/ runs on the host without the backend's
 dependencies. normalize() must equal dedup._normalize (pinned by

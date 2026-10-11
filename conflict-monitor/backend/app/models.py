@@ -284,7 +284,7 @@ class EventLink(Base):
     row is written: not severity, reliability, the death toll or the counts.
     The row carries the score and what the rule saw, so a reader can disagree
     with the bar; `rule` names the version that wrote it, since a rule that
-    changes must not be read as the one that measured 0.86 precision.
+    changes must not be read as the one that measured 0.88 precision held out.
 
     ON DELETE CASCADE for the reason event_reports gives: two admin routes
     delete events outside the ORM.

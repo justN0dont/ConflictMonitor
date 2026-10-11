@@ -38,13 +38,15 @@ export const CHIP_TITLE =
   "Reports are rows kept with their own text. Outlets are who said it: a forward counts as its origin's, " +
   "and one outlet on two transports counts once. A pasted repost still counts, so outlets is a floor. " +
   "Unrecorded reports were merged before their text was kept. Linked are other events the link rule reads as this " +
-  "incident: separate rows, never merged, at precision 0.86 and recall 0.66 on the gold pairs against one labeller. " +
+  "incident: separate rows, never merged, at precision 0.88 and recall 0.53 on labelled pairs the rule had never seen " +
+  "(0.86 and 0.66 on the pairs it was tuned on), against one labeller. " +
   "Click to read the reports and the linked events.";
 
 export const LINK_TITLE =
   "Separate events the link rule reads as this incident: their texts overlap by more than 0.4 (containment, tags " +
   "and URLs stripped) and neither the stored places nor the towns the texts name disagree. Measured on the gold " +
-  "pairs at precision 0.86, recall 0.66, against one labeller and reviewed by nobody. Nothing was merged.";
+  "pairs at precision 0.88 and recall 0.53 on pairs the rule had never seen (0.86 and 0.66 on the pairs it was " +
+  "tuned on), against one labeller and reviewed by nobody. Nothing was merged.";
 
 /** What the rule saw, in words: the score, the two place checks, the gap. */
 export function linkLine(l: EventLinkRow): string {

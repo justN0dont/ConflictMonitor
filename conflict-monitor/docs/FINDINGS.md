@@ -17,7 +17,7 @@ than deleting it.
 **State at the last stopping point — 2026-10-10.**
 
 ```
-branch  phase3-rewind                    HEAD *this commit*   the held-out pairs drawn and labelled; f2af2e7 (the link between events, `C89` opened), 4215e17 (the Global Fishing Watch probe), e5b6fd0 (`C88`), 178ff74 (the gold set, `C86` and `C87`), 459911a (C84), 0a50509 (C83), d47b1bd (C82), da8b8fa (C81) — pushed 2026-10-11
+branch  phase3-rewind                    HEAD *this commit*   the link rule scored on the held-out pairs; 0d9df77 (the held-out pairs drawn and labelled), f2af2e7 (the link between events, `C89` opened), 4215e17 (the Global Fishing Watch probe), e5b6fd0 (`C88`), 178ff74 (the gold set, `C86` and `C87`), 459911a (C84), 0a50509 (C83), d47b1bd (C82), da8b8fa (C81) — pushed 2026-10-11
         phase3-display-honesty           f52a351   Phase 3 step 1: C52, C46/C49, C44, C50/C80 — pushed 2026-10-10
         phase2-region-currency           76c0c95   per-region AIS currency — pushed 2026-10-10
         c69-synthetic-demo               b3388bd   PR #2, open
@@ -873,7 +873,7 @@ different town in it ("Breaking \| Israeli occupation forces storm the town of X
 alone cannot be the whole rule — the place has to sit beside it (`C76`). The live rule, on the pairs it
 can see at all, reads TP 1 / FP 1 / FN 28; **83 of the 112 same-incident pairs lie where it never looks**
 — beyond 15 minutes, with one side unlocated, or 50–500 km apart — which is the measured size of the
-link between events that Phase 3 owed; rule v1 is built in *this commit* and measured on the same pairs
+link between events that Phase 3 owed; rule v1 is built in `f2af2e7` and measured on the same pairs
 below.
 
 ---
@@ -925,6 +925,45 @@ Not measured: the candidate stage inherits the classifier's `event_type`, which 
 places are the live classifier's, which names the text's place five times in six where the archive's
 names it one time in three, so the vetoes should bite differently on live rows, in either direction.
 The first week of `event_links` rows against a reader measures it.
+
+**Held out, 2026-10-11, in the commit after the labels (`0d9df77`).** 284 pairs drawn with seed 2 by
+the same sampler, no pair sharing an event with a gold pair, labelled blind by the same reader (134
+same, 142 different, 8 cannot_tell), and scored once; `gold_set.py check` pins both sets' counts.
+Intervals are 95% Wilson.
+
+| | gold pairs (the rule was tuned on these) | held-out pairs |
+|---|---|---|
+| at the bar: TP / FP / FN | 74 / 12 / 38 | 71 / 10 / 63 |
+| precision | 0.86 [0.77, 0.92] | **0.88 [0.79, 0.93]** |
+| recall | 0.66 [0.57, 0.74] | **0.53 [0.45, 0.61]** |
+| on the pairs dedup can never see: P / R | 0.84 / 0.64 | 0.87 / 0.52 |
+| text alone at the bar: TP / FP / FN | 90 / 58 / 22 | 97 / 48 / 37 |
+| the place veto, over the bar on text: different / same removed | 25 / 13 | 23 / 19 |
+| the towns veto: different / same removed | 32 / 6 | 27 / 9 |
+| expected pairs linked on the archive, by the strata | ~40,000 | ~19,000 |
+
+Precision transfers; recall does not. Of the 63 misses, 37 score under the bar — the same strike
+told in Arabic and in English scores 0.00, and two outlets' own sentences about one statement score
+0.2 to 0.4 — and 26 are the vetoes' cost: 17 the stored place, 7 the towns, 2 both. **The place
+veto's cost is the finding.** Of the 19 same-incident pairs it removes, 11 are near-copies of one
+text — containment 0.7 and up, two identical Middle East Eye headlines at 0.93 and 0.99, the same
+Choueifat sentence twice at 1.00 — whose stored places disagree: the archive's own place labels,
+which match the text one time in three (the gold-set section above). The veto trusts a name that is
+wrong more often than the text it overrules. On live rows the names are the classifier's, right five
+times in six, so the cost should be smaller there; that is the measurement `C89` still owes. The
+obvious v2 — let a near-identical text outrank a disagreeing stored name — is not built here: this
+set has now been seen, so it would be in-sample for that rule, and needs a third draw.
+
+The 10 false positives are the shapes already named: Hezbollah's Arabic operation statements, West
+Bank storms whose towns the pattern misses ("storm Al-Bireh", no preposition; "the town, Yater", a
+comma), two detainee releases from one template, a funeral and an abduction under one region label.
+The cell dedup never sees and the link sees worst is "within 15 minutes, 50–500 km apart": 1 hit and
+19 misses here — one missile salvo reported from two cities, which the reader called one incident and
+the rule, by the place veto or the bar, two. The archive estimate halving from ~40,000 to ~19,000
+says what that estimate is worth: the biggest cells carry 8 labelled pairs against millions.
+
+This draw has 134 same-incident pairs to the gold set's 112: a different mix across the cells, not
+evidence of drift, and the same single reader.
 
 ---
 
@@ -998,7 +1037,7 @@ Ordered by severity, then area.
 | `C87` | high | 1 | Ingest | **Measured on the gold set, `178ff74`; not fixed.** The classifier names a place for **83.9% ±5.5** of texts that name no scene at all (`data/gold/`, 106 of 144 raw): the prompt says "NEVER return Unknown if ANY location is mentioned", so a country named as an actor becomes the scene, and `_handle_response` then adds the first flag country when the model does say Unknown. The archive shows the same habit at 52.3% (`Strait of Hormuz` ×12, `Iran` ×12 where the text names none). That name is what the geocoder places — with the namesake hits of `C86`, at facility precision — so a statement about Hormuz draws a dot in the strait. The fix is a scene, not a subject: the prompt asks where the event happened and returns Unknown otherwise, the flag fallback stops filling `location_name`, and `evidence_span` (already three-valued) is the check. It changes which rows are located, so it is a decision, not a tidy-up |
 | `C65` | low | — | Platform | Shutdown calls task.cancel() without awaiting, so no client-close path is guaranteed to run |
 | `C67` | low | — | Platform | No .dockerignore; frontend COPY . . does overlay host node_modules, but the linux binaries survive |
-| `C89` | medium | 3 | Ingest | **Opened by *this commit*, which built the link between events.** Rule v1's bar and vetoes were chosen on the 286 gold pairs they are measured on, so P 0.86 / R 0.66 is in-sample; the pairs are one labeller's reading, reviewed by nobody. The 12 false positives it keeps are template texts where no town can be read (Arabic operation statements, siren alerts); 19 of its 38 misses are the vetoes' cost (one incident named at two granularities, two spellings of one town). Instruments, in order: a second draw of pairs with another seed, labelled blind and scored once (held-out precision); the live classifier's places for the pair sides, since at ingest the vetoes read qwen's names, not the archive's; the first week of `event_links` rows against a reader. Until then the chip's title states the number and `gold_set.py check` pins it |
+| `C89` | medium | 3 | Ingest | **Opened by `f2af2e7`, which built the link between events.** Rule v1's bar and vetoes were chosen on the 286 gold pairs they are measured on, so P 0.86 / R 0.66 is in-sample; the pairs are one labeller's reading, reviewed by nobody. The 12 false positives it keeps are template texts where no town can be read (Arabic operation statements, siren alerts); 19 of its 38 misses are the vetoes' cost (one incident named at two granularities, two spellings of one town). **Instrument one done in *this commit*:** 284 held-out pairs (seed 2, disjoint from the gold pairs, labelled blind in `0d9df77`) read **P 0.88 [0.79, 0.93] / R 0.53 [0.45, 0.61]** at the bar — precision transfers, recall does not, and the place veto is why: 11 of the 19 same-incident pairs it removes there are near-copies of one text whose stored places disagree, the archive's own labels (Measured facts, "Held out"). Remaining: the live classifier's places for the pair sides, since at ingest the vetoes read qwen's names, not the archive's, and the veto's cost should fall with them; the first week of `event_links` rows against a reader; and a v2 that lets a near-identical text outrank a disagreeing stored name, measured on a third draw. The chip's title states the held-out number and `gold_set.py check` pins both sets |
 
 ### Fixed
 
@@ -1789,17 +1828,18 @@ cycle live → stale → unavailable between its rare fixes: that is its coverag
       duplication it caused is real, so the resolution is one shared spec (predicate + precision) imported by
       both renderers, not one renderer
 - [x] Link, don't merge — **half shipped in `8523961`, the within-event graph in `459911a`, the link
-      between events in *this commit*.** `event_reports` preserves every report's text
+      between events in `f2af2e7`.** `event_reports` preserves every report's text
       (`8523961`: `C10` closed, `C74` narrowed). `459911a` (`C84`) makes the rows readable and
       countable: `GET /events/{id}/reports` serves every report with its byline, forward origin, text
       and own death toll; every event payload carries `corroboration {reports, channels, outlets,
-      unrecorded}`, each a floor; the feed opens any event to its reports. **Built in *this commit*:** the
+      unrecorded}`, each a floor; the feed opens any event to its reports. **Built in `f2af2e7`:** the
       link *between events* — `event_links` rows, not `cluster_id` (decisions below): two rows dedup did not merge,
       linked as one incident. That is a second matcher at a lower bar, and a bar needs the gold pairs — which exist since
       `178ff74`: 83 of the 112 same-incident pairs in `data/gold/` lie where the live rule can never look (beyond
       15 min, one side unlocated, or 50–500 km apart), and the text score alone tops out near P 0.65 on them.
       Rule v1 (`services/linkrule.py`): containment over the cleaned texts over 0.4 with neither the stored
-      places nor the towns the texts name disagreeing — **P 0.86 / R 0.66** on the pairs, in-sample (`C89`);
+      places nor the towns the texts name disagreeing — **P 0.86 / R 0.66** on the pairs, in-sample, and
+      **P 0.88 / R 0.53 held out** on 284 pairs it had never seen (`C89`);
       written at ingest, `corroboration.linked` on every payload, `GET /events/{id}/links`, the chip and the
       list. The archive is not back-linked
 - [x] Channel family graph from `fwd_from`; collapse corroboration counts over `family_id` — **shipped
@@ -1958,4 +1998,5 @@ document that silently edits away its own mistakes would fail its own standard.
 | 2026-10-11 | `e5b6fd0` | `C88` found and fixed: **the coverage cut to the sea.** The AIS regions were drawn as the boxes the feed subscribes by, and the hatch over Egypt, Sudan and Arabia read as a claim about land — 62% of the drawn area was land, in square degrees. `tools/sea_regions.py` cuts each box minus the boxes before it to Natural Earth's 1:10m ocean (public domain, pinned commit, sha256 and the registry inside `frontend/src/data/sea_regions.json`); all three views draw that shape and fall back to the box, saying so, for any region whose registry entry no longer matches the file. Natural Earth credited in the README. The gold set's placeholders become `178ff74` |
 | 2026-10-11 | `4215e17` | **Global Fishing Watch probed for the Red Sea**, as far as it goes without a token: what it serves (hourly AIS presence per 0.1° cell, about 96 h behind, Kpler satellite and terrestrial), the terms (CC BY-NC 4.0, non-commercial, attribution), the exact request, and the gateway answering `401` to it. `tools/gfw_probe.py` measures the Red Sea box the moment `GFW_API_TOKEN` exists; the token is on the owner. `C88`'s placeholders become `e5b6fd0` |
 | 2026-10-11 | `f2af2e7` | **The link between events** — Phase 3's "link, don't merge", the half between rows. `event_links`: one row per pair dedup kept apart that rule v1 reads as one incident (containment over the cleaned texts over 0.4, no disagreeing stored place, no disagreeing town in the texts), with the score and what the rule saw; nothing on either event changes. Measured on the gold pairs by the scorer importing the shipped module — **P 0.86 / R 0.66**, in-sample — and pinned by `gold_set.py check`. Written at ingest on both paths; `corroboration.linked` on every payload; `GET /events/{id}/links`; the chip says `N LINKED` and the list shows each link's reasons. `C89` opened for what is unmeasured. The probe's placeholder becomes `4215e17` |
-| 2026-10-11 | *this commit* | **The held-out pairs, drawn and labelled, not yet scored** (`C89`, instrument one). `data/gold/holdout/pairs.jsonl`: 284 pairs drawn from the same archive with seed 2 by the same stratified sampler (`gold_set.py sample --seed 2 --pairs-only --exclude data/gold`), every pair sharing an event with a gold pair skipped (86,134 of them), labelled from the texts alone in a shuffled order with the stratum, geometry, stored place and summary hidden, by the same labeller: 134 same, 142 different, 8 cannot_tell with reasons. `gold_set.py check` validates the file. The rule has not been scored on it; the next commit does that once, and the two commits are the evidence of the order |
+| 2026-10-11 | `0d9df77` | **The held-out pairs, drawn and labelled, not yet scored** (`C89`, instrument one). `data/gold/holdout/pairs.jsonl`: 284 pairs drawn from the same archive with seed 2 by the same stratified sampler (`gold_set.py sample --seed 2 --pairs-only --exclude data/gold`), every pair sharing an event with a gold pair skipped (86,134 of them), labelled from the texts alone in a shuffled order with the stratum, geometry, stored place and summary hidden, by the same labeller: 134 same, 142 different, 8 cannot_tell with reasons. `gold_set.py check` validates the file. The rule has not been scored on it; the next commit does that once, and the two commits are the evidence of the order |
+| 2026-10-11 | *this commit* | **The link rule scored on the held-out pairs, once** (`C89`, instrument one done). Rule v1 at its bar on the 284 pairs it had never seen: **P 0.88 [0.79, 0.93], R 0.53 [0.45, 0.61]**, against 0.86 / 0.66 on the pairs it was tuned on. Precision transfers; recall does not, and the place veto is why: 11 of the 19 same-incident pairs it removes are near-copies of one text whose stored places disagree — the archive's own labels, wrong two times in three. Not tuned on this set; a v2 needs a third draw. `gold_set.py score` reports both sets and `check` pins both; the chip's title and the rule's docstring now state the held-out number first. The labels' placeholder becomes `0d9df77` |

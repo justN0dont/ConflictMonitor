@@ -621,33 +621,39 @@ def cmd_check(args) -> int:
 # A rule, a bar or a label that changes must change this and the register
 # together, never one without the other.
 LINK_RULE_PINNED = {"v1": (74, 12, 38)}
+# The same, on holdout/pairs.jsonl: scored once, after the labels were committed (0d9df77).
+LINK_RULE_PINNED_HOLDOUT = {"v1": (71, 10, 63)}
 
 
 def check_link_rule(d: Path) -> int:
     """backend/app/services/linkrule.py, imported rather than copied, scores
     the labelled pairs exactly as pinned. The one place the gold set meets
     the shipped rule; the backend suite never opens the gold files."""
-    rows = [r for r in read_jsonl(d / "pairs.jsonl") if r.get("gold") is not None]
-    if not rows:
-        return 0
     sys.path.insert(0, str(PROJECT / "backend"))
     from app.services import linkrule as lr
-    tp = fp = fn = 0
-    for r in rows:
-        a = lr.assess(r["a"]["raw_text"], r["a"]["location_name"], r["b"]["raw_text"], r["b"]["location_name"])
-        label = r["gold"]["label"]
-        tp += a.linked and label == "same"
-        fp += a.linked and label == "different"
-        fn += (not a.linked) and label == "same"
-    want = LINK_RULE_PINNED.get(lr.RULE)
-    if want is None:
-        print("FAIL link rule %s has no pinned counts; measure it and pin them" % lr.RULE)
-        return 1
-    if (tp, fp, fn) != want:
-        print("FAIL link rule %s on the pairs: TP %d FP %d FN %d, pinned %s" % (lr.RULE, tp, fp, fn, want))
-        return 1
-    print("ok   link rule %s on the pairs: TP %d FP %d FN %d, as pinned" % (lr.RULE, tp, fp, fn))
-    return 0
+    bad = 0
+    for name, path, pinned in (("the pairs", d / "pairs.jsonl", LINK_RULE_PINNED),
+                               ("the held-out pairs", d / "holdout" / "pairs.jsonl", LINK_RULE_PINNED_HOLDOUT)):
+        rows = [r for r in read_jsonl(path) if r.get("gold") is not None] if path.exists() else []
+        if not rows:
+            continue
+        tp = fp = fn = 0
+        for r in rows:
+            a = lr.assess(r["a"]["raw_text"], r["a"]["location_name"], r["b"]["raw_text"], r["b"]["location_name"])
+            label = r["gold"]["label"]
+            tp += a.linked and label == "same"
+            fp += a.linked and label == "different"
+            fn += (not a.linked) and label == "same"
+        want = pinned.get(lr.RULE)
+        if want is None:
+            print("FAIL link rule %s has no pinned counts on %s; measure it once and pin them" % (lr.RULE, name))
+            bad += 1
+        elif (tp, fp, fn) != want:
+            print("FAIL link rule %s on %s: TP %d FP %d FN %d, pinned %s" % (lr.RULE, name, tp, fp, fn, want))
+            bad += 1
+        else:
+            print("ok   link rule %s on %s: TP %d FP %d FN %d, as pinned" % (lr.RULE, name, tp, fp, fn))
+    return bad
 
 
 # ── score ─────────────────────────────────────────────────────────────────────
@@ -854,10 +860,16 @@ def score_pairs(d: Path, meta):
     unseen = sum(1 for rr in rows if rr["gold"]["label"] == "same" and not _live_rule_sees(rr["stratum"]))
     print("    same-incident pairs the rule can never see (outside 15 min, one side unlocated, or 50–500 km apart): %d" % unseen)
     print()
-    score_link_rule(rows, meta)
+    score_link_rule(rows, meta, "the gold pairs (the rule's bar and vetoes were chosen on these: in-sample)")
+    holdout = d / "holdout" / "pairs.jsonl"
+    if holdout.exists():
+        hrows = [r for r in read_jsonl(holdout) if r.get("gold") is not None]
+        hmeta = json.loads((d / "holdout" / "meta.json").read_text(encoding="utf-8"))
+        print("  held-out pairs: %d labelled; %s" % (len(hrows), dict(collections.Counter(r["gold"]["label"] for r in hrows))))
+        score_link_rule(hrows, hmeta, "the held-out pairs (seed %s, disjoint from the gold pairs, labelled before the rule saw them)" % hmeta["seed"])
 
 
-def score_link_rule(rows, meta):
+def score_link_rule(rows, meta, which):
     """The link between events, as shipped: backend/app/services/linkrule.py
     is imported, not copied, so this is the rule's number. Its bar and vetoes
     were chosen on these pairs, so the figures are in-sample."""
@@ -865,7 +877,7 @@ def score_link_rule(rows, meta):
     from app.services import linkrule as lr
     assessed = [(lr.assess(r["a"]["raw_text"], r["a"]["location_name"], r["b"]["raw_text"], r["b"]["location_name"]), r)
                 for r in rows]
-    print("  the link rule %s as shipped (containment over clean raw_text, place and towns vetoes); * = its bar %.1f" % (lr.RULE, lr.BAR))
+    print("  the link rule %s as shipped on %s; * = its bar %.1f" % (lr.RULE, which, lr.BAR))
     print("    %5s %4s %4s %4s %4s   %5s %5s %5s  | unseen by the live rule: %4s %4s %4s   %5s %5s"
           % ("bar", "TP", "FP", "FN", "c/t>", "P", "R", "F1", "TP", "FP", "FN", "P", "R"))
     for t in (0.3, 0.4, 0.5, 0.6, 0.7):
