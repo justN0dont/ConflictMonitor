@@ -27,6 +27,10 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 conflict-monitor/tools/check_policy.py
+      # The gold set's shape (tools/gold_set.py check): enum membership, a
+      # reason on every cannot_tell, a labeller on every label, plus the
+      # scorer's selftest. Never label quality.
+      - run: python3 conflict-monitor/tools/gold_set.py check
 
   backend:
     name: Backend tests (PostGIS)

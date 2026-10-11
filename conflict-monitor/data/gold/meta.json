@@ -1,0 +1,189 @@
+{
+  "archive": "conflict_monitor-20260818.sql.gz",
+  "archive_md5": "3da7684f9dc9fbfd210679e02710b37c",
+  "drawn_at": "2026-10-10",
+  "seed": 20260818,
+  "regime_start": "2026-02-01T00:00:00+00:00",
+  "skipped": {
+    "not text (satellite_firms)": 640,
+    "before regime window": 6
+  },
+  "events": {
+    "target": 350,
+    "floor": 25,
+    "strata": {
+      "rss/located/military": {
+        "N": 14123,
+        "n": 59
+      },
+      "rss/located/other": {
+        "N": 2208,
+        "n": 25
+      },
+      "rss/unlocated/military": {
+        "N": 16932,
+        "n": 71
+      },
+      "rss/unlocated/other": {
+        "N": 660,
+        "n": 25
+      },
+      "telegram/located/military": {
+        "N": 24734,
+        "n": 104
+      },
+      "telegram/located/other": {
+        "N": 2284,
+        "n": 25
+      },
+      "telegram/unlocated/military": {
+        "N": 21576,
+        "n": 91
+      },
+      "telegram/unlocated/other": {
+        "N": 775,
+        "n": 25
+      }
+    }
+  },
+  "pairs": {
+    "window_min": 180,
+    "alloc_per_cell_by_band": {
+      "sim<0.15": 8,
+      "sim0.15-0.3": 10,
+      "sim0.3-0.4": 10,
+      "sim>0.4": 10
+    },
+    "candidates": 5160754,
+    "cells": {
+      "15-180min/both50-500km/sim0.15-0.3": {
+        "N": 6116,
+        "n": 10
+      },
+      "15-180min/both50-500km/sim0.3-0.4": {
+        "N": 409,
+        "n": 10
+      },
+      "15-180min/both50-500km/sim<0.15": {
+        "N": 271518,
+        "n": 8
+      },
+      "15-180min/both50-500km/sim>0.4": {
+        "N": 223,
+        "n": 10
+      },
+      "15-180min/both<=50km/sim0.15-0.3": {
+        "N": 21408,
+        "n": 10
+      },
+      "15-180min/both<=50km/sim0.3-0.4": {
+        "N": 3102,
+        "n": 10
+      },
+      "15-180min/both<=50km/sim<0.15": {
+        "N": 152141,
+        "n": 8
+      },
+      "15-180min/both<=50km/sim>0.4": {
+        "N": 2151,
+        "n": 10
+      },
+      "15-180min/both_unlocated/sim0.15-0.3": {
+        "N": 7627,
+        "n": 10
+      },
+      "15-180min/both_unlocated/sim0.3-0.4": {
+        "N": 740,
+        "n": 10
+      },
+      "15-180min/both_unlocated/sim<0.15": {
+        "N": 1603499,
+        "n": 8
+      },
+      "15-180min/both_unlocated/sim>0.4": {
+        "N": 570,
+        "n": 10
+      },
+      "15-180min/one_unlocated/sim0.15-0.3": {
+        "N": 10854,
+        "n": 10
+      },
+      "15-180min/one_unlocated/sim0.3-0.4": {
+        "N": 704,
+        "n": 10
+      },
+      "15-180min/one_unlocated/sim<0.15": {
+        "N": 2618218,
+        "n": 8
+      },
+      "15-180min/one_unlocated/sim>0.4": {
+        "N": 397,
+        "n": 10
+      },
+      "<=15min/both50-500km/sim0.15-0.3": {
+        "N": 729,
+        "n": 10
+      },
+      "<=15min/both50-500km/sim0.3-0.4": {
+        "N": 91,
+        "n": 10
+      },
+      "<=15min/both50-500km/sim<0.15": {
+        "N": 25016,
+        "n": 8
+      },
+      "<=15min/both50-500km/sim>0.4": {
+        "N": 59,
+        "n": 10
+      },
+      "<=15min/both<=50km/sim0.15-0.3": {
+        "N": 3740,
+        "n": 10
+      },
+      "<=15min/both<=50km/sim0.3-0.4": {
+        "N": 735,
+        "n": 10
+      },
+      "<=15min/both<=50km/sim<0.15": {
+        "N": 17907,
+        "n": 8
+      },
+      "<=15min/both<=50km/sim>0.4": {
+        "N": 1,
+        "n": 1
+      },
+      "<=15min/both_unlocated/sim0.15-0.3": {
+        "N": 1816,
+        "n": 10
+      },
+      "<=15min/both_unlocated/sim0.3-0.4": {
+        "N": 290,
+        "n": 10
+      },
+      "<=15min/both_unlocated/sim<0.15": {
+        "N": 158124,
+        "n": 8
+      },
+      "<=15min/both_unlocated/sim>0.4": {
+        "N": 1,
+        "n": 1
+      },
+      "<=15min/one_unlocated/sim0.15-0.3": {
+        "N": 1915,
+        "n": 10
+      },
+      "<=15min/one_unlocated/sim0.3-0.4": {
+        "N": 203,
+        "n": 10
+      },
+      "<=15min/one_unlocated/sim<0.15": {
+        "N": 250229,
+        "n": 8
+      },
+      "<=15min/one_unlocated/sim>0.4": {
+        "N": 221,
+        "n": 10
+      }
+    }
+  }
+}

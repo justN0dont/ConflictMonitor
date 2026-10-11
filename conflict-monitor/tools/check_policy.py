@@ -87,6 +87,23 @@ def reduced_motion_is_honoured():
     return None
 
 
+@check
+def gold_set_is_never_loaded_at_runtime():
+    """QUALITY-16 (docs/GODS-EYE-VIEW.md): data/gold/ is an evaluation set,
+    scored by tools/gold_set.py and never read by the application. A runtime
+    reference would turn labelled rows into fixtures, and a classifier that
+    had seen them would then be measured on its own training data."""
+    pattern = re.compile(r"data/gold|gold_set|events\.jsonl|pairs\.jsonl")
+    for root, exts in (("backend/app", (".py",)), ("frontend/src", (".ts", ".tsx"))):
+        base = PROJECT / root
+        if not base.is_dir():
+            return f"{root} is missing: cannot check it"
+        for path in sorted(base.rglob("*")):
+            if path.suffix in exts and pattern.search(path.read_text(encoding="utf-8")):
+                return f"{path.relative_to(PROJECT)} references the gold set (QUALITY-16)"
+    return None
+
+
 def main() -> int:
     failed = 0
     for fn in CHECKS:
