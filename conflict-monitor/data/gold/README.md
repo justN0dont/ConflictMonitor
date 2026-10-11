@@ -80,6 +80,24 @@ python tools/gold_set.py score --run runs/qwen3.8-27b-2026-10-10.jsonl
 a row, change its `gold` if it is wrong and set `reviewed_by`; the scorer prints the review
 count on every run.
 
+## The held-out pairs
+
+`holdout/pairs.jsonl` is a second draw of pairs only, made on 2026-10-11 for the link rule
+(`backend/app/services/linkrule.py`), whose bar and vetoes were chosen on `pairs.jsonl` and so
+could not be measured on it honestly. Same archive, same stratified sampler, seed 2, and every
+pair that shares an event with a gold pair skipped, so a rule tuned on those texts meets none of
+them here:
+
+```bash
+python tools/gold_set.py sample ARCHIVE --out data/gold/holdout --seed 2 --pairs-only --exclude data/gold
+```
+
+Labelled by the same reader, from the texts alone, in a shuffled order with the stratum, the
+similarity band, the geometry, the stored place and the summary hidden. The labels were written
+and committed before the rule was scored on them; the two commits are the record of that order.
+`check` validates the file by the same rules as `pairs.jsonl`; `score` reports the rule on both
+sets, and `check` pins the rule's counts on both.
+
 ## Measured 2026-10-10
 
 Full output: `python tools/gold_set.py score --run runs/qwen3.8-27b-2026-10-10.jsonl`.

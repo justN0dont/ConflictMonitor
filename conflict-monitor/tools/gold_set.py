@@ -6,6 +6,10 @@ the pipeline against them.
       Draw the UNLABELLED set from the production dump: events.jsonl,
       pairs.jsonl and meta.json. Deterministic (SEED). Refuses to overwrite a
       file that already carries labels unless --force.
+  python tools/gold_set.py sample ARCHIVE --out data/gold/holdout --seed N --pairs-only --exclude data/gold
+      A second draw of pairs only, with another seed, skipping every pair
+      that shares an event with the gold pairs: the held-out set a rule
+      tuned on the gold pairs is scored on once (C89).
   python tools/gold_set.py check [DIR]
       Validate the files' shape (enum membership, a reason on every
       cannot_tell, a labeller on every label, unique ids) and run the selftest.
@@ -300,9 +304,9 @@ def coords(f, idx):
 class Reservoir:
     """Fixed-size uniform sample of a stream; one seeded Random per stratum."""
 
-    def __init__(self, k, label):
+    def __init__(self, k, label, seed=SEED):
         self.k, self.items, self.n = k, [], 0
-        self.rnd = random.Random(SEED ^ zlib.crc32(label.encode("utf-8")))
+        self.rnd = random.Random(seed ^ zlib.crc32(label.encode("utf-8")))
 
     def add(self, item):
         self.n += 1
@@ -370,7 +374,7 @@ def cmd_sample(args):
     N_h = collections.Counter(stratum(r) for r in light)
     N = sum(N_h.values())
     alloc = {h: min(n, max(EVENTS_FLOOR, round(EVENTS_TARGET * n / N))) for h, n in N_h.items()}
-    ev_res = {h: Reservoir(k, "events/" + h) for h, k in alloc.items()}
+    ev_res = {h: Reservoir(k, "events/" + h, args.seed) for h, k in alloc.items()}
     for r in light:
         ev_res[stratum(r)].add(r)
     chosen_events = {r["id"]: (h, r) for h in ev_res for r in ev_res[h].items}
@@ -378,6 +382,13 @@ def cmd_sample(args):
           % (len(alloc), sum(alloc.values()), EVENTS_TARGET, EVENTS_FLOOR))
 
     # Pairs: same event_type, b within PAIR_WINDOW_MIN after a, cell by time × geo × sim.
+    # --exclude: no pair that shares an event with a pair already drawn there, so
+    # a rule tuned on those texts meets none of them here.
+    excluded = set()
+    if args.exclude:
+        for r in read_jsonl(Path(args.exclude) / "pairs.jsonl"):
+            excluded.update((r["a"]["id"], r["b"]["id"]))
+    n_excluded = 0
     t0 = time.time()
     light.sort(key=lambda r: (r["ts"], r["id"]))
     pair_res = {}
@@ -391,6 +402,9 @@ def cmd_sample(args):
                 break
             if a["event_type"] != b["event_type"]:
                 continue
+            if a["id"] in excluded or b["id"] in excluded:
+                n_excluded += 1
+                continue
             tc = time_cell(dmin)
             gc = geo_cell(a["loc"], b["loc"])
             if tc is None or gc is None:
@@ -401,15 +415,15 @@ def cmd_sample(args):
             n_cand += 1
             cell_N[key] += 1
             if key not in pair_res:
-                pair_res[key] = Reservoir(PAIR_ALLOC[band], "pairs/" + key)
+                pair_res[key] = Reservoir(PAIR_ALLOC[band], "pairs/" + key, args.seed)
             km = haversine_km(*a["loc"], *b["loc"]) if a["loc"] and b["loc"] else None
             pair_res[key].add((a["id"], b["id"], round(dmin, 1), None if km is None else round(km, 1)))
     chosen_pairs = [(key, item) for key in sorted(pair_res) for item in pair_res[key].items]
-    print("pairs: %d candidate pairs in %d cells; %d drawn; %.0fs"
-          % (n_cand, len(cell_N), len(chosen_pairs), time.time() - t0))
+    print("pairs: %d candidate pairs in %d cells; %d drawn; %d skipped for sharing an event with %s; %.0fs"
+          % (n_cand, len(cell_N), len(chosen_pairs), n_excluded, args.exclude or "nothing", time.time() - t0))
 
     # Pass 2: raw_text for every chosen row.
-    need = set(chosen_events) | {i for _, it in chosen_pairs for i in it[:2]}
+    need = (set() if args.pairs_only else set(chosen_events)) | {i for _, it in chosen_pairs for i in it[:2]}
     texts = {}
     t0 = time.time()
     with gzip.open(args.archive, "rt", encoding="utf-8", errors="replace") as fh:
@@ -433,7 +447,7 @@ def cmd_sample(args):
         return d
 
     events_out = []
-    for h in sorted(ev_res):
+    for h in ([] if args.pairs_only else sorted(ev_res)):  # --pairs-only fetched no event texts
         for r in sorted(ev_res[h].items, key=lambda r: r["id"]):
             events_out.append({
                 **row(r, False), "stratum": h,
@@ -457,7 +471,9 @@ def cmd_sample(args):
             md5.update(chunk)
     meta = {
         "archive": os.path.basename(args.archive), "archive_md5": md5.hexdigest(),
-        "drawn_at": dt.date.today().isoformat(), "seed": SEED,
+        "drawn_at": dt.date.today().isoformat(), "seed": args.seed,
+        "pairs_only": bool(args.pairs_only), "excluded_pairs_sharing_an_event_with": args.exclude,
+        "pairs_skipped_as_excluded": n_excluded,
         "regime_start": REGIME_START.isoformat(), "skipped": dict(skipped),
         "events": {"target": EVENTS_TARGET, "floor": EVENTS_FLOOR,
                    "strata": {h: {"N": N_h[h], "n": len(ev_res[h].items)} for h in sorted(ev_res)}},
@@ -465,7 +481,8 @@ def cmd_sample(args):
                   "candidates": n_cand,
                   "cells": {k: {"N": cell_N[k], "n": len(pair_res[k].items)} for k in sorted(pair_res)}},
     }
-    write_jsonl(out / "events.jsonl", events_out)
+    if not args.pairs_only:
+        write_jsonl(out / "events.jsonl", events_out)
     write_jsonl(out / "pairs.jsonl", pairs_out)
     (out / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print()
@@ -477,7 +494,7 @@ def cmd_sample(args):
     for k in sorted(pair_res):
         print("  %-42s %8d %8d" % (k, cell_N[k], len(pair_res[k].items)))
     print()
-    print("wrote %d events, %d pairs to %s" % (len(events_out), len(pairs_out), out))
+    print("wrote %s%d pairs to %s" % ("" if args.pairs_only else "%d events, " % len(events_out), len(pairs_out), out))
 
 
 def write_jsonl(path: Path, rows):
@@ -584,6 +601,16 @@ def cmd_check(args) -> int:
                 print("FAIL %s line %d (%s): %s" % (name, n, r.get("id", r.get("pair_id")), "; ".join(errs)))
             labelled += r.get("gold") is not None
         print("ok   %s: %d rows, %d labelled" % (name, len(rows), labelled))
+    holdout = d / "holdout" / "pairs.jsonl"
+    if holdout.exists():
+        rows, seen, labelled = read_jsonl(holdout), set(), 0
+        for n, r in enumerate(rows, 1):
+            errs = validate_pair(r, seen)
+            if errs:
+                bad += 1
+                print("FAIL holdout/pairs.jsonl line %d (%s): %s" % (n, r.get("pair_id"), "; ".join(errs)))
+            labelled += r.get("gold") is not None
+        print("ok   holdout/pairs.jsonl: %d rows, %d labelled" % (len(rows), labelled))
     bad += check_link_rule(d)
     bad += selftest()
     return 1 if bad else 0
@@ -985,6 +1012,9 @@ def main() -> int:
     s.add_argument("archive", nargs="?", default=DEFAULT_ARCHIVE)
     s.add_argument("--out", default=str(DEFAULT_DIR))
     s.add_argument("--force", action="store_true")
+    s.add_argument("--seed", type=int, default=SEED)
+    s.add_argument("--pairs-only", action="store_true", help="write pairs.jsonl and meta.json only")
+    s.add_argument("--exclude", default=None, help="a gold dir whose pairs' events this draw must not touch")
     c = sub.add_parser("check")
     c.add_argument("dir", nargs="?", default=str(DEFAULT_DIR))
     sc = sub.add_parser("score")
